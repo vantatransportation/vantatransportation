@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 160" role="img" aria-label="sedan illustration">
+  <defs>
+    <linearGradient id="b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3a3d42"/><stop offset="1" stop-color="#101113"/></linearGradient>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#6b7077"/><stop offset="1" stop-color="#2b2d31"/></linearGradient>
+  </defs>
+  <ellipse cx="200" cy="138" rx="170" ry="8" fill="#000" opacity=".5"/>
+  <path fill="url(#b)" stroke="#8b9097" stroke-width="1.5" stroke-linejoin="round" d="M18 116 L22 98 Q26 88 56 84 L116 58 Q140 44 186 44 L246 44 Q282 46 304 70 L350 78 Q380 84 384 104 L386 116 Q386 122 378 122 L323 122 A21 21 0 0 0 281 122 L121 122 A21 21 0 0 0 79 122 L26 122 Q18 122 18 116 Z"/>
+  <path fill="url(#g)" opacity=".85" d="M126 62 Q146 52 186 52 L238 52 Q268 54 286 72 L128 72 Z"/>
+  <g fill="#050505" stroke="#aeb2b8" stroke-width="2"><circle cx="100" cy="124" r="21"/><circle cx="302" cy="124" r="21"/></g>
+  <g fill="#8b9097"><circle cx="100" cy="124" r="8"/><circle cx="302" cy="124" r="8"/></g>
+</svg>

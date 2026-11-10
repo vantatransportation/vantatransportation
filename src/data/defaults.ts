@@ -1,0 +1,81 @@
+/**
+ * Fallback content used when Supabase is not configured or unreachable, so the
+ * public site always renders. It mirrors supabase/seed.sql. It contains NO prices.
+ */
+import type { SiteData } from "@/lib/types";
+
+export const defaultSiteData: SiteData = {
+  source: "defaults",
+  promotion: null,
+  categories: [
+    { id: "vans", name: "Vans", slug: "vans", description: "Group travel for larger parties, with room for everyone and their luggage.", capacityLabel: "11–14 passengers", image: "/vehicles/van.svg" },
+    { id: "large-suvs", name: "Large SUVs", slug: "large-suvs", description: "Space and comfort for families, small groups and business travel.", capacityLabel: "6–7 passengers", image: "/vehicles/suv.svg" },
+    { id: "full-size-sedans", name: "Full-size Sedans", slug: "full-size-sedans", description: "Our flagship sedans for executive and special-occasion travel.", capacityLabel: "2–3 passengers", image: "/vehicles/sedan.svg" },
+    { id: "mid-size-sedans", name: "Mid-size Sedans", slug: "mid-size-sedans", description: "Refined everyday chauffeur travel for individuals and pairs.", capacityLabel: "2–3 passengers", image: "/vehicles/sedan.svg" },
+  ],
+  vehicles: [
+    { id: "sprinter", name: "Mercedes-Benz Sprinter", categoryName: "Vans", categorySlug: "vans", tierName: "First Class", similarModels: "Similar models allowed", description: "Premium van for larger groups.", passengers: 14, luggage: null, image: null, capacityLabel: "11–14 passengers", isAvailable: true },
+    { id: "transit", name: "Ford Transit", categoryName: "Vans", categorySlug: "vans", tierName: "Business Class", similarModels: "Similar models allowed", description: "Spacious van for larger groups.", passengers: 14, luggage: null, image: null, capacityLabel: "11–14 passengers", isAvailable: true },
+    { id: "suburban", name: "Chevrolet Suburban", categoryName: "Large SUVs", categorySlug: "large-suvs", tierName: "Business Class", similarModels: "GMC Yukon XL, Ford Expedition or similar", description: "Full-size SUV with generous space.", passengers: 8, luggage: null, image: null, capacityLabel: "6–7 passengers", isAvailable: true },
+    { id: "escalade", name: "Cadillac Escalade ESV", categoryName: "Large SUVs", categorySlug: "large-suvs", tierName: "First Class", similarModels: "Lincoln Navigator L or similar", description: "Luxury full-size SUV.", passengers: 8, luggage: null, image: null, capacityLabel: "6–7 passengers", isAvailable: true },
+    { id: "s-class", name: "Mercedes-Benz S-Class", categoryName: "Full-size Sedans", categorySlug: "full-size-sedans", tierName: "First Class", similarModels: "BMW 7 Series or similar", description: "Flagship executive sedan.", passengers: 4, luggage: null, image: null, capacityLabel: "2–3 passengers", isAvailable: true },
+    { id: "e-class", name: "Mercedes-Benz E-Class", categoryName: "Mid-size Sedans", categorySlug: "mid-size-sedans", tierName: "Business Class", similarModels: "BMW 5 Series or similar", description: "Refined mid-size sedan.", passengers: 4, luggage: null, image: null, capacityLabel: "2–3 passengers", isAvailable: true },
+  ],
+  standards: [
+    { id: "1", title: "Black exterior", description: "Every vehicle in our fleet is black on the outside." },
+    { id: "2", title: "Black interior", description: "A consistent, understated cabin in every vehicle." },
+    { id: "3", title: "Leather seats", description: "Leather seating throughout the fleet." },
+    { id: "4", title: "Clean vehicles", description: "Vehicles are cleaned and checked before every trip." },
+    { id: "5", title: "Clean drivers", description: "Drivers arrive presentable and professional." },
+  ],
+  faqs: [
+    { id: "1", question: "How do I get a price?", answer: "Use Calculate Your Fare to enter your trip and see an estimate. You can then send us a booking request." },
+    { id: "2", question: "Do I pay online?", answer: "By default the website takes booking requests and we confirm your booking with you directly. When online payment is turned on, you will see a Pay online option after you submit your request. A booking is not confirmed until we confirm it." },
+    { id: "3", question: "Can I book by the hour?", answer: "Yes. Hourly bookings include a mileage allowance; additional miles are charged separately and shown in your quote." },
+    { id: "4", question: "What if I do not like my quote?", answer: "Send us a query using Request a Better Quote. Requesting a better quote does not guarantee a lower price or discount. Each request is reviewed on a case-by-case basis, depending on trip details, distance, vehicle availability and other relevant circumstances." },
+    { id: "5", question: "Can I add stops?", answer: "Yes. You can add multiple stops when you calculate your fare." },
+  ],
+  content: {
+    "hero.title": "Luxury Transportation. Peace of Mind for Every Journey.",
+    "hero.subtitle": "Premium private rides for families, airport transfers, and everyday travel—with thoughtful service and support for the people who matter most.",
+    "hero.cta_primary": "BOOK A RIDE",
+    "hero.cta_secondary": "GET A QUOTE",
+    "about.title": "Comfortable, reliable, discreet.",
+    "about.body": "Vanta Transportation provides chauffeur-driven travel with a focus on cleanliness, professionalism and comfort. This text is a placeholder: replace it with your own company story in the dashboard.",
+    services: [
+      { title: "Point-to-point", description: "A chauffeur takes you directly from pickup to destination, with stops if you need them." },
+      { title: "Hourly chauffeur", description: "Keep a vehicle and driver for as long as you need, billed by the hour." },
+      { title: "Airport transfers", description: "Pickups and drop-offs for airport travel." },
+      { title: "Group travel", description: "Vans and large SUVs for bigger parties." },
+    ],
+    "contact.email": "vantaholdings.1@gmail.com",
+    "contact.phone": "+1 443-910-1794",
+    "contact.address": "",
+    "contact.hours": "24/7 for requests. Transportation availability and final confirmation depend on location and availability.",
+    "footer.tagline": "Chauffeured transportation.",
+    "home.categories_title": "Choose the right vehicle",
+    "home.categories_sub": "From a single passenger to a group of fourteen.",
+    "home.fleet_title": "The fleet",
+    "home.fleet_note": "Similar models may be provided.",
+    "home.standards_title": "Every vehicle, every driver, the same standard",
+    "home.why_title": "Why travel with Vanta",
+    "home.cta_title": "Ready to book your ride?",
+    "policy.no_show": "If a passenger does not show up for the confirmed pickup, the full applicable trip price may be charged in accordance with the company's no-show policy. If you cannot locate your driver or need help with pickup arrangements, please contact Vanta right away.",
+    "policy.assistance": "Our drivers aim to provide thoughtful, passenger-conscious service and reasonable assistance throughout your journey, including helping passengers with luggage and getting in and out of the vehicle when reasonably possible.",
+    "policy.availability": "You can submit a request at any time. Availability and final confirmation depend on the location, driver or affiliate availability and applicable booking rules.",
+    "coverage.primary": "Washington, D.C., Maryland and Virginia (the DMV) are our primary focus, including the greater Baltimore area.",
+    "coverage.east_coast": "We also take requests along the East Coast from North Carolina to New York. These trips may be fulfilled by Vanta or by approved transportation partners.",
+    "coverage.other": "You may request transportation elsewhere in the U.S. and in selected European destinations such as San Francisco, Los Angeles, Chicago, Paris and cities in England. These trips may be arranged through an affiliate network, subject to availability, local requirements and confirmation.",
+    "trust.points": [
+      { title: "Rides for the people you care about", description: "Arrange a ride for a parent, child or relative, and tell us who is travelling and who to contact." },
+      { title: "Passenger-conscious service", description: "Reasonable help with luggage and getting in and out of the vehicle, when reasonably possible." },
+      { title: "Clear booking information", description: "See your estimate, the waiting-time and no-show policies, and what is requested versus confirmed." },
+      { title: "Airport transfers and Meet & Greet", description: "Pre-arranged airport rides. Request a driver to meet the passenger inside the airport." },
+    ],
+    pillars: [
+      { title: "See the fare first", description: "Enter your trip and get an itemized estimate before you send a request." },
+      { title: "Room to negotiate", description: "If a quote does not suit your budget, tell us. We review every request personally." },
+      { title: "Fares by distance or by the hour", description: "Hourly bookings include a mileage allowance, and any extra miles are shown in your quote." },
+    ],
+  },
+};

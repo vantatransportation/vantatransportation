@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 150" role="img" aria-label="Vanta V mark">
+  <defs>
+    <linearGradient id="l" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f4f5f6"/><stop offset=".55" stop-color="#b3b7bd"/><stop offset="1" stop-color="#8e929a"/></linearGradient>
+    <linearGradient id="r" x1="1" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#cfd1d5"/><stop offset=".55" stop-color="#8a8e96"/><stop offset="1" stop-color="#5f636a"/></linearGradient>
+  </defs>
+  <path fill="url(#l)" d="M2 6 L84 24 L120 108 L120 148 L112 148 Z"/>
+  <path fill="url(#r)" d="M238 6 L156 24 L120 108 L120 148 L128 148 Z"/>
+</svg>
