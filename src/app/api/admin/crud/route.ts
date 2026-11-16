@@ -4,6 +4,7 @@ import { resources } from "@/lib/admin/resources";
 import { coerceValues } from "@/lib/admin/coerce";
 import { notify } from "@/lib/notify";
 import { normalizePhotoFields, releaseAsset } from "@/lib/cloudinary";
+import { validateTierPricing } from "@/lib/tier-pricing";
 import { BUSINESS_TZ } from "@/lib/config";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -67,6 +68,7 @@ export async function POST(request: Request) {
     const before = await db.from(resource.table).select("*").eq("id", id).maybeSingle();
     if (!before.data) return json({ error: "Not found." }, 404);
     if (resource.table === "vehicles") { const bad = normalizePhotoFields(c.data, before.data); if (bad) return json({ error: bad }, 422); }
+    if (resource.table === "vehicle_tiers") { const bad = validateTierPricing(c.data); if (bad) return json({ error: bad }, 422); }
 
     if (resource.table === "pricing_configs" && c.data.status === "active") {
       await archiveOtherActive(db, String(c.data.vehicle_id ?? before.data.vehicle_id), id);

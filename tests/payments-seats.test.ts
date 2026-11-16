@@ -71,12 +71,14 @@ test("vehicle photos: only https images count; Cloudinary URLs get transformatio
 const walk = (d: string): string[] => readdirSync(d).flatMap((f) => { const p = join(d, f); return statSync(p).isDirectory() ? walk(p) : [p]; });
 const src = walk(new URL("../src", import.meta.url).pathname).filter((f) => /\.(tsx?|css)$/.test(f));
 
-test("no 'Economical' label remains in active source or seed data; tiers are Business Class / First Class", () => {
-  const hits = src.filter((f) => /economical/i.test(readFileSync(f, "utf8")));
+test("exactly three tiers (Premium, Luxury, Luxury Plus); no Economical, Economy, Super Luxury, Business Class or First Class in active source or seed data", () => {
+  const hits = src.filter((f) => /economical|economy|super.?luxury|business class|first class/i.test(readFileSync(f, "utf8")));
   assert.deepEqual(hits, []);
-  assert.ok(!/economical/i.test(readFileSync(new URL("../supabase/seed.sql", import.meta.url), "utf8")));
+  const seed = readFileSync(new URL("../supabase/seed.sql", import.meta.url), "utf8");
+  assert.ok(!/economical|economy|super.?luxury|business class|first class/i.test(seed));
+  for (const slug of ["premium", "luxury", "luxury-plus"]) assert.ok(seed.includes(`'${slug}'`), slug);
   const defaults = readFileSync(new URL("../src/data/defaults.ts", import.meta.url), "utf8");
-  assert.ok(defaults.includes('tierName: "Business Class"') && defaults.includes('tierName: "First Class"'));
+  assert.ok(defaults.includes('tierName: "Premium"') && defaults.includes('tierName: "Luxury"'));
   for (const label of ["11–14 passengers", "6–7 passengers", "2–3 passengers"]) assert.ok(defaults.includes(label), label);
 });
 

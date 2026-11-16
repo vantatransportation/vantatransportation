@@ -20,13 +20,13 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
   const { data: b } = await db.from("bookings").select("*, customers(id,name,email,phone), vehicles(name), vehicle_tiers(name)").eq("id", id).maybeSingle();
   if (!b) notFound();
   const [payQ, legsQ, peopleQ, airportQ, settings] = await Promise.all([
-    db.from("payments").select("id,kind,status,amount_cents,refunded_cents,currency,stripe_session_id,stripe_payment_intent_id,failure_reason,created_at,paid_at").eq("booking_id", id).order("created_at", { ascending: false }),
+    db.from("payments").select("id,kind,provider,provider_ref,provider_txn_id,status,amount_cents,refunded_cents,currency,failure_reason,created_at,paid_at").eq("booking_id", id).order("created_at", { ascending: false }),
     db.from("booking_legs").select("leg_number,direction,pickup_address,dropoff_address,pickup_at,distance_miles,fare_cents").eq("booking_id", id).order("leg_number"),
     db.from("booking_people").select("role,full_name,phone,email,relationship").eq("booking_id", id).order("created_at"),
     db.from("booking_airport_details").select("*").eq("booking_id", id),
     loadBookingSettings(db),
   ]);
-  const payments = (payQ.data ?? []) as { id: string; kind: string; status: string; amount_cents: number; refunded_cents: number; currency: string; stripe_session_id: string | null; stripe_payment_intent_id: string | null; failure_reason: string | null; created_at: string; paid_at: string | null }[];
+  const payments = (payQ.data ?? []) as { id: string; kind: string; provider: string; provider_ref: string | null; provider_txn_id: string | null; status: string; amount_cents: number; refunded_cents: number; currency: string; failure_reason: string | null; created_at: string; paid_at: string | null }[];
   const seats = (Array.isArray(b.child_seats) ? b.child_seats : []) as { type: string; quantity: number }[];
   const legs = (legsQ.data ?? []) as { leg_number: number; direction: string; pickup_address: string; dropoff_address: string | null; pickup_at: string; distance_miles: number | null; fare_cents: number | null }[];
   const people = (peopleQ.data ?? []) as { role: string; full_name: string; phone: string | null; email: string | null; relationship: string | null }[];
@@ -48,15 +48,19 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
       <h1>Booking {b.reference}</h1>
       <p className="adm-sub"><span className="pill">{label(b.status)}</span> · Received {fmtDate(b.created_at, BUSINESS_TZ)}</p>
       <div className="panel">
-        <h3>Payment</h3>
+        <h3>Pricing and payment</h3>
         <dl className="kv">
-          <dt>Status</dt><dd>{String(b.payment_status).replace(/_/g, " ")} · paid {fmtMoney(b.amount_paid_cents ?? 0)} of {b.estimated_fare_cents != null ? fmtMoney(b.estimated_fare_cents) : "price to be confirmed"}</dd>
-          <dt>Child seats</dt><dd>{seats.length ? `${seats.map((x) => `${x.quantity} × ${x.type.replace(/_/g, "-")}`).join(", ")} · fee ${fmtMoney(b.child_seat_fee_cents ?? 0)} (requested, subject to confirmation)` : "None requested"}</dd>
+          <dt>Tier</dt><dd>{b.tier_name ?? "Not recorded"}</dd>
+          <dt>Estimated trip fare</dt><dd>{b.estimated_fare_cents != null ? fmtMoney(b.estimated_fare_cents) : "To be confirmed"} <span className="muted">(calculated from mileage/hours/tolls; information only, not charged online)</span></dd>
+          <dt>Charged online</dt><dd>{b.online_amount_cents != null ? `${fmtMoney(b.online_amount_cents)} = fixed tier price ${fmtMoney(b.fixed_price_cents ?? 0)}${b.meet_greet_selected ? ` + Meet & Greet ${fmtMoney(b.meet_greet_fee_cents ?? 0)}` : ""}${(b.child_seat_fee_cents ?? 0) > 0 ? ` + child seats ${fmtMoney(b.child_seat_fee_cents)}` : ""}` : "Not set up (tier fixed price was not configured when this was requested)"}</dd>
+          <dt>Meet &amp; Greet</dt><dd>{b.meet_greet_selected ? "Selected (fee frozen at request time)" : "Not selected"}</dd>
+          <dt>Payment status</dt><dd>{String(b.payment_status).replace(/_/g, " ")} · collected {fmtMoney(b.amount_paid_cents ?? 0)}</dd>
+          <dt>Child seats</dt><dd>{seats.length ? `${seats.map((x) => `${x.quantity} × ${x.type.replace(/_/g, "-")}`).join(", ")} (requested, subject to confirmation)` : "None requested"}</dd>
         </dl>
-        {payments.length > 0 && <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Date</th><th>Type</th><th>Amount</th><th>Status</th><th>Stripe reference</th></tr></thead><tbody>
-          {payments.map((p) => <tr key={p.id}><td>{fmtDate(p.paid_at ?? p.created_at, BUSINESS_TZ)}</td><td>{p.kind}</td><td>{fmtMoney(p.amount_cents)}{p.refunded_cents > 0 ? ` (refunded ${fmtMoney(p.refunded_cents)})` : ""}</td><td>{p.status}{p.failure_reason ? ` · ${p.failure_reason}` : ""}</td><td><code>{p.stripe_payment_intent_id ?? p.stripe_session_id ?? ""}</code></td></tr>)}
+        {payments.length > 0 && <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Date</th><th>Provider</th><th>Type</th><th>Amount</th><th>Status</th><th>Reference</th></tr></thead><tbody>
+          {payments.map((p) => <tr key={p.id}><td>{fmtDate(p.paid_at ?? p.created_at, BUSINESS_TZ)}</td><td>{p.provider === "paypal" ? "PayPal" : "Stripe"}</td><td>{p.kind}</td><td>{fmtMoney(p.amount_cents)}{p.refunded_cents > 0 ? ` (refunded ${fmtMoney(p.refunded_cents)})` : ""}</td><td>{p.status}{p.failure_reason ? ` · ${p.failure_reason}` : ""}</td><td><code>{p.provider_txn_id ?? p.provider_ref ?? ""}</code></td></tr>)}
         </tbody></table></div>}
-        <p className="muted">A payment never confirms a booking: confirm it as usual. Refunds are issued in the Stripe dashboard and appear here automatically.</p>
+        <p className="muted">A payment never confirms a booking: confirm it as usual. Refunds are issued in the Stripe or PayPal dashboard and appear here automatically.</p>
       </div>
       <div className="twocol">
         <div className="panel">
@@ -129,7 +133,7 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
             <dt>Flight</dt><dd>{[a.airline, a.flight_number].filter(Boolean).join(" ")} {a.flight_date ? `· ${a.flight_date}` : ""} {a.flight_time ? `at ${a.flight_time}` : ""} {a.terminal ? `· Terminal ${a.terminal}` : ""}</dd>
             <dt>Passenger name</dt><dd>{String(a.passenger_name ?? "")}</dd>
             {a.pickup_instructions && <><dt>Instructions</dt><dd>{String(a.pickup_instructions)}</dd></>}
-            <dt>Meet &amp; Greet</dt><dd>{a.meet_greet_requested ? (a.meet_greet_status === "confirmed" ? "Confirmed by Vanta" : a.meet_greet_status === "declined" ? "Declined" : "Requested, not yet confirmed") : "Not requested"}{a.meet_greet_requested && a.meet_greet_charge_cents == null ? " · charge pending approval" : a.meet_greet_charge_cents != null ? ` · ${fmtMoney(a.meet_greet_charge_cents)}` : ""}</dd>
+            <dt>Meet &amp; Greet</dt><dd>{a.meet_greet_requested ? (a.meet_greet_status === "confirmed" ? "Confirmed by Vanta" : a.meet_greet_status === "declined" ? "Declined" : "Requested, not yet confirmed") : "Not requested"}{a.meet_greet_requested && a.meet_greet_charge_cents == null ? " · no fee recorded" : a.meet_greet_charge_cents != null ? ` · ${fmtMoney(a.meet_greet_charge_cents)}` : ""}</dd>
           </dl>
         </div>
       ))}

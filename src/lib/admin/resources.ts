@@ -76,15 +76,15 @@ export const resources: Record<string, Resource> = {
     refLabel: (r) => String(r.name ?? ""),
   },
   tiers: {
-    slug: "tiers", table: "vehicle_tiers", title: "Vehicle tiers (Business Class / First Class)", singular: "tier",
-    select: "*", orderBy: "sort_order", canCreate: true, canDelete: true, sortable: true,
+    slug: "tiers", table: "vehicle_tiers", title: "Tier prices & fees", singular: "tier",
+    select: "*", orderBy: "sort_order", canCreate: false, canDelete: false, sortable: false,
+    // Exactly three tiers (Premium, Luxury, Luxury Plus). Names are fixed; only descriptions, prices and fees are edited here.
     fields: [
-      { name: "name", label: "Name", type: "text", required: true },
-      { name: "slug", label: "URL slug", type: "text", help: "Leave blank to generate from the name." },
       { name: "description", label: "Description", type: "textarea" },
-      { name: "is_active", label: "In use", type: "bool" },
+      { name: "fixed_price_cents", label: "Fixed price charged online ($)", type: "money", help: "Charged online for this tier instead of the mileage/hourly estimate. Leave blank until approved: online payment stays unavailable for the tier until it is set. Must be above $0." },
+      { name: "meet_greet_fee_cents", label: "Airport Meet & Greet fee ($)", type: "money", help: "Added when the customer ticks Meet & Greet. Leave blank to not offer it for this tier. Must be above $0." },
     ],
-    columns: [{ label: "Name", path: "name" }, { label: "Description", path: "description" }, { label: "Active", path: "is_active", kind: "bool" }],
+    columns: [{ label: "Tier", path: "name" }, { label: "Fixed price", path: "fixed_price_cents", kind: "money" }, { label: "Meet & Greet fee", path: "meet_greet_fee_cents", kind: "money" }, { label: "Description", path: "description" }],
     refLabel: (r) => String(r.name ?? ""),
   },
   vehicles: {
@@ -259,9 +259,7 @@ export const resources: Record<string, Resource> = {
     slug: "booking-settings", table: "booking_settings", title: "Booking settings", singular: "setting",
     select: "*", orderBy: "updated_at", ascending: false, canCreate: false, canDelete: false,
     fields: [
-      { name: "meet_greet_enabled", label: "Airport Meet & Greet can be requested", type: "bool" },
-      { name: "meet_greet_charge_cents", label: "Meet & Greet charge ($)", type: "money", help: "Leave blank until a price is approved. Customers then see \"charge to be confirmed\"." },
-      { name: "meet_greet_charge_approved", label: "Meet & Greet charge is approved", type: "bool", help: "The charge is only added to totals when this is on." },
+      { name: "meet_greet_enabled", label: "Airport Meet & Greet can be requested", type: "bool", help: "The fee for each tier is set under Tier prices & fees." },
       { name: "waiting_included_minutes", label: "Included waiting time (minutes)", type: "number", required: true },
       { name: "waiting_increment_minutes", label: "Waiting charge increment (minutes)", type: "number", required: true },
       { name: "waiting_rate_cents", label: "Waiting rate per increment ($)", type: "money", help: "Leave blank until a rate is approved." },
@@ -269,15 +267,17 @@ export const resources: Record<string, Resource> = {
       { name: "child_seat_one_way_cents", label: "Child car seat price, one way ($ per seat)", type: "money", help: "Initial value from the client: $10. Applied per seat." },
       { name: "child_seat_round_trip_cents", label: "Child car seat price, round trip ($ per seat)", type: "money", help: "Initial value from the client: $15. Charged once per seat for the whole round trip, not per leg." },
       { name: "child_seat_max", label: "Maximum child seats per booking", type: "number" },
-      { name: "payment_mode", label: "Online payment", type: "select", options: ["disabled", "full", "deposit_fixed", "deposit_percent"], help: "disabled = booking requests only. Needs Stripe keys on the server to take effect." },
+      { name: "payment_mode", label: "Online payment", type: "select", options: ["disabled", "full", "deposit_fixed", "deposit_percent"], help: "disabled = booking requests only. full = the online amount (fixed tier price + Meet & Greet + child seats). Deposits are a fixed amount or a percent of that online amount." },
+      { name: "stripe_enabled", label: "Offer card payment (Stripe)", type: "bool", help: "Also needs the Stripe keys on the server." },
+      { name: "paypal_enabled", label: "Offer PayPal", type: "bool", help: "Also needs the PayPal credentials on the server." },
       { name: "deposit_fixed_cents", label: "Deposit: fixed amount ($)", type: "money", help: "Used when Online payment is deposit_fixed. Leave blank until approved." },
       { name: "deposit_percent", label: "Deposit: percent of the total", type: "number", step: 0.01, help: "Used when Online payment is deposit_percent (1 to 100)." },
       { name: "payment_terms", label: "Payment terms shown to customers", type: "textarea", help: "Only wording the business has approved (refunds, cancellations). Leave blank to show none." },
     ],
     columns: [
-      { label: "Meet & Greet", path: "meet_greet_enabled", kind: "bool" }, { label: "M&G charge", path: "meet_greet_charge_cents", kind: "money" },
+      { label: "Meet & Greet", path: "meet_greet_enabled", kind: "bool" },
       { label: "Included wait (min)", path: "waiting_included_minutes" }, { label: "Waiting rate", path: "waiting_rate_cents", kind: "money" },
-      { label: "Seat (1-way)", path: "child_seat_one_way_cents", kind: "money" }, { label: "Seat (round trip)", path: "child_seat_round_trip_cents", kind: "money" }, { label: "Payment", path: "payment_mode" },
+      { label: "Seat (1-way)", path: "child_seat_one_way_cents", kind: "money" }, { label: "Seat (round trip)", path: "child_seat_round_trip_cents", kind: "money" }, { label: "Payment", path: "payment_mode" }, { label: "Stripe", path: "stripe_enabled", kind: "bool" }, { label: "PayPal", path: "paypal_enabled", kind: "bool" },
     ],
   },
   "round-trip": {

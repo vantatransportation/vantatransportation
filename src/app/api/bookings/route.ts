@@ -55,20 +55,24 @@ export async function POST(request: Request) {
       const seatText = childSeatSummary(t.childSeats ?? NO_SEATS);
       const site = (process.env.NEXT_PUBLIC_SITE_URL || "").replace(/\/$/, "");
       const payUrl = result.payment && result.paymentToken && site ? `${site}/pay/${result.paymentToken}` : undefined;
-      const extrasText = [t.returnLeg ? "Round trip" : "", seatText ? `Child seats: ${seatText} (requested)` : "", result.meetGreetRequested ? (result.meetGreetPending ? "Meet & Greet requested (charge pending approval)" : "Meet & Greet requested") : ""].filter(Boolean).join(", ");
+      const extrasText = [t.returnLeg ? "Round trip" : "", seatText ? `Child seats: ${seatText} (requested)` : "", result.meetGreetRequested ? "Meet & Greet requested" : ""].filter(Boolean).join(", ");
       // Alerts intentionally omit phone numbers, notes, passenger instructions and emergency contacts.
       await notify(db, "booking.created", { type: "booking", id: result.id }, {
         Reference: result.reference, Customer: name, Email: email, Pickup: t.pickup.text,
         Stops: t.stops.map((s) => s.text).join(" | ") || undefined, Destination: t.dropoff.text,
         When: formatPickup(t.pickupAtIso, BUSINESS_TZ) + (t.returnLeg ? `  (return ${formatPickup(t.returnLeg.pickupAtIso, BUSINESS_TZ)})` : ""), Passengers: String(t.passengers), Vehicle: result.vehicleName,
         "Trip type": t.tripType === "hourly" ? `Hourly (${t.hours} h)` : t.returnLeg ? "Round trip" : "Point to point",
-        "Estimated fare": result.totalCents != null ? formatMoney(result.totalCents, result.currency) : "To be confirmed",
+        "Estimated trip fare (information only)": result.totalCents != null ? formatMoney(result.totalCents, result.currency) : "To be confirmed",
+        Tier: result.online?.tierName, "Fixed tier price": result.online ? formatMoney(result.online.fixedPriceCents, result.currency) : undefined,
+        "Meet & Greet": result.online && result.online.meetGreetCents > 0 ? formatMoney(result.online.meetGreetCents, result.currency) : result.meetGreetRequested ? "Requested" : undefined,
+        "Child car seats": result.childSeatFeeCents > 0 ? formatMoney(result.childSeatFeeCents, result.currency) : undefined,
+        "Online amount due": result.online ? formatMoney(result.online.totalCents, result.currency) : "Not set up yet",
         "Service region": REGION_LABEL[result.region], "Needs staff review": result.requiresReview ? "Yes" : undefined,
         "Requested extras": extrasText || undefined, "Booking for": det.details.bookingFor === "other" ? "Someone else" : undefined,
         _customerEmail: email, _customerName: name, _payUrl: payUrl,
       });
     }
-    return json({ ok: true, reference: result.reference, totalCents: result.totalCents, currency: result.currency, payUrl: result.payment && result.paymentToken ? `/pay/${result.paymentToken}` : null });
+    return json({ ok: true, reference: result.reference, totalCents: result.totalCents, onlineAmountCents: result.online?.totalCents ?? null, currency: result.currency, payUrl: result.payment && result.paymentToken ? `/pay/${result.paymentToken}` : null });
   } catch (e) {
     console.error("[bookings] unexpected error", e);
     return json({ error: "We could not save your booking. Please try again." }, 500);

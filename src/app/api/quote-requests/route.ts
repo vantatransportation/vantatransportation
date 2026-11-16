@@ -62,7 +62,7 @@ export async function POST(request: Request) {
 
     const seat = seatExtra((await loadBookingSettings(db)).seats, trip.childSeats, Boolean(trip.returnLeg), trip.passengers);
     if (!seat.ok) return json({ error: seat.error }, 422);
-    const extras = seat.line ? [seat.line] : [];
+    const extras: never[] = []; // the saved estimate is the trip-based estimate only; add-ons are priced separately
     let originalCents: number | null = null;
     let snapshot: Record<string, unknown> | null = null;
     let lineItems: unknown = [];

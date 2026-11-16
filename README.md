@@ -35,7 +35,7 @@ Requires Node 22 or newer (the tests use built-in TypeScript stripping).
 
 ### 1. Supabase
 1. Create a project at supabase.com.
-2. SQL editor: run in order `supabase/migrations/0001_schema.sql`, `0002_rls.sql`, `0003_workflows.sql`, `0004_family_upgrade.sql`, `0005_tiers_photos_seats_payments.sql`, then (fresh installs only) `supabase/seed.sql`. On an existing database run only the migrations you have not run yet; do NOT re-run the seed.
+2. SQL editor: run in order `supabase/migrations/0001_schema.sql`, `0002_rls.sql`, `0003_workflows.sql`, `0004_family_upgrade.sql`, `0005_tiers_photos_seats_payments.sql`, `0006_fixed_tier_pricing_paypal.sql`, then (fresh installs only) `supabase/seed.sql`. On an existing database run only the migrations you have not run yet; do NOT re-run the seed.
 3. Project Settings, API: copy the URL, publishable (anon) key and service-role key into `.env.local`.
 4. Authentication, Providers, Email: **turn off "Allow new users to sign up"** (there is no public registration; even if someone signed up, they would have no data access because every table is admin-only).
 5. Storage: the `site-images` bucket is created by migration 0002 (public read, admin write).
@@ -78,14 +78,30 @@ Admins open the dashboard and use **Alerts, Enable browser notifications** (an e
 4. Security: only signed-in admins can request an upload signature (`/api/admin/cloudinary/sign`); the secret never reaches the browser; there is no unsigned public upload; only images inside your own cloud and the `vanta/vehicles` folder can be assigned; a replaced or removed image is deleted from Cloudinary only if no other vehicle uses it. An upload that is never saved can remain in Cloudinary (you can delete it in the Cloudinary console).
 5. Without credentials the admin shows a configuration message and the public site shows a branded "Photo coming soon" placeholder. No photos are included in this project: upload your own licensed photos.
 
-### 8. Online payments (Stripe Checkout)
-Payments are **off** by default. The integration uses Stripe's REST API directly (no extra package).
-1. In Stripe (test mode), copy the **secret key** into `STRIPE_SECRET_KEY`.
-2. Create a webhook endpoint `https://YOUR-DOMAIN/api/stripe/webhook` listening to: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `checkout.session.expired`, `charge.refunded`. Copy its signing secret into `STRIPE_WEBHOOK_SECRET`. Locally: `stripe listen --forward-to localhost:3000/api/stripe/webhook` prints a temporary `whsec_...`.
-3. In **Admin, Booking settings** set *Online payment* to `full`, `deposit_fixed` (and the amount) or `deposit_percent` (and the percent), and optionally the approved *Payment terms* text. Leave `disabled` to keep request-only bookings.
-4. Test with card 4242 4242 4242 4242 (any future date, any CVC). Check the booking in the admin: *Payment* shows the Stripe reference, and the status changes only after the verified webhook arrives. A payment never confirms a booking.
-5. Going live: create live keys and a live webhook endpoint, replace the two variables, redeploy, and run one small real payment.
-How it works: the amount is taken from the booking's saved server-calculated total and the admin settings (never from the browser); webhooks are signature-verified (5-minute tolerance) and processed once per event id; the success URL never marks anything paid; failed/expired payments keep the booking and offer a retry at `/pay/<private-token>`; refunds are made in the Stripe dashboard and reflected through the webhook. Card data never touches this application.
+### 8. Tier prices, Meet & Greet fees and online payments
+**The three tiers.** Customers choose a vehicle, and every vehicle belongs to one of exactly three tiers: **Premium, Luxury, Luxury Plus**. In **Admin, Tier prices & fees** set, for each tier:
+- the **fixed price** charged online (no price is pre-filled: you must enter all three; until a tier has one, customers cannot pay online for vehicles in it), and
+- the **Meet & Greet fee** (initial values from the business: Premium $25, Luxury $35, Luxury Plus $50).
+Tier names are fixed; vehicles are assigned to tiers under **Admin, Vehicles** (nothing is reassigned automatically, and no vehicle is assigned to Luxury Plus until you assign one).
+
+**What is charged online.** Only: fixed price of the selected tier + Meet & Greet fee (if ticked) + child seats (if requested). The mileage/hourly/duration/toll **trip estimate is still calculated and shown, but it is information only and is never part of the online charge.** Example (illustrative only): a $150 fixed price plus a $35 Meet & Greet fee is a $185 online amount. The prices a customer is shown are frozen on the booking when they submit it, so later admin changes never rewrite saved bookings or payments.
+
+**Switching payments on.** In **Admin, Booking settings** set *Online payment* (`disabled` by default; `full` charges the online amount; the deposit modes take a fixed amount or a percent of the online amount) and choose which providers to offer. A provider is shown to customers only if it is switched on there AND configured on the server. **Admin, Payments** shows provider status (no secrets) and every payment.
+
+**Stripe (cards).** Uses Stripe-hosted Checkout (Visa, Mastercard and American Express where your Stripe account supports them; card data never touches this application).
+1. Test mode: put the secret key in `STRIPE_SECRET_KEY`.
+2. Create a webhook endpoint `https://YOUR-DOMAIN/api/stripe/webhook` for: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `checkout.session.expired`, `charge.refunded`; put its signing secret in `STRIPE_WEBHOOK_SECRET`. Locally: `stripe listen --forward-to localhost:3000/api/stripe/webhook` prints a temporary `whsec_...`.
+3. Test card 4242 4242 4242 4242 (any future date, any CVC); American Express test card 3782 822463 10005.
+4. Live: create live keys and a live webhook endpoint, replace the two variables, redeploy, and run one small real payment.
+
+**PayPal.**
+1. At developer.paypal.com create a **Sandbox** app; set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` and `PAYPAL_ENV=sandbox`.
+2. In the app, add a webhook `https://YOUR-DOMAIN/api/paypal/webhook` for `PAYMENT.CAPTURE.COMPLETED`, `PAYMENT.CAPTURE.DENIED`, `PAYMENT.CAPTURE.DECLINED`, `PAYMENT.CAPTURE.REFUNDED`; set its id as `PAYPAL_WEBHOOK_ID`.
+3. Pay with a sandbox buyer account.
+4. Going live: create a **Live** app, replace the three variables with the live credentials, set `PAYPAL_ENV=live`, create the live webhook, redeploy.
+The customer approves in PayPal's pop-up; the server then captures the order and verifies amount, currency, order and booking before anything is marked paid. The webhook handles delayed completions and refunds.
+
+**Safety rules built in.** Amounts are calculated on the server from the database (the browser only sends the private booking token and the provider); a success page or button callback never marks anything paid; webhooks are verified (Stripe signature / PayPal's verification API) and processed once per event id; duplicate payments and emails are prevented; failed or expired payments keep the booking and offer a retry at `/pay/<private-token>`; a payment never confirms a booking.
 
 ### 9. Themes and accessibility
 Dark, Light and System (default) are chosen with the toggle in the header, footer and admin sidebar; the choice is saved in the browser and applied before first paint. Colours are CSS variables in `src/app/globals.css`. `npm test` checks WCAG AA contrast (4.5:1 text, 3:1 borders/focus) for both themes. See UPGRADE_NOTES_2.md for what was and was not verified.
@@ -117,10 +133,10 @@ tests/                  unit tests and end-to-end workflow tests with an in-memo
 ```
 
 ## Testing status (honest summary)
-**Run and passing in the build environment:** 73 automated tests (`npm test`): pricing engine, helpers, coverage classification, round-trip and waiting math, booking-detail validation, and end-to-end route tests against an in-memory database with mocked Google and Brevo responses (round trips, booking for someone else, contacts, Meet & Greet, out-of-area quotes, no-show/waiting actions, notification feed, email failure/retry/dedupe). These do not prove live integrations work.
+**Run and passing in the build environment:** 81 automated tests (`npm test`): pricing engine, helpers, coverage classification, round-trip and waiting math, booking-detail validation, and end-to-end route tests against an in-memory database with mocked Google and Brevo responses (round trips, booking for someone else, contacts, Meet & Greet, out-of-area quotes, no-show/waiting actions, notification feed, email failure/retry/dedupe). These do not prove live integrations work.
 A best-effort `tsc` run without the project's type packages reports only the same missing-types noise as the original project and no errors specific to the new code.
 
-**Not verified (the build environment had no network access):** live Stripe, live Cloudinary uploads, `npm install`, `next lint`, `next build`, the real `@types`-based type check, the SQL migrations on a real Postgres, live Supabase Auth/RLS/Storage, and every live integration (Google Maps/Routes/Places, Brevo delivery, browser notifications in real browsers), plus visual testing of the full app at tablet/mobile widths (the design system was previewed in a browser using static markup only). Run `npm run build` and `npm run lint` first; the first live bookings and notifications should be treated as the integration test.
+**Not verified (the build environment had no network access):** live Stripe, live PayPal, live Cloudinary uploads, `npm install`, `next lint`, `next build`, the real `@types`-based type check, the SQL migrations on a real Postgres, live Supabase Auth/RLS/Storage, and every live integration (Google Maps/Routes/Places, Brevo delivery, browser notifications in real browsers), plus visual testing of the full app at tablet/mobile widths (the design system was previewed in a browser using static markup only). Run `npm run build` and `npm run lint` first; the first live bookings and notifications should be treated as the integration test.
 
 ## Notes and assumptions
 - Pickup times are interpreted in `BUSINESS_TIMEZONE` (default America/New_York; change if needed).

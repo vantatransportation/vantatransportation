@@ -36,12 +36,12 @@ export function buildNotification(event: NotifyEvent, d: Data): BuiltNotificatio
   const id = d._id ?? "";
   switch (event) {
     case "booking.created": {
-      const fields = pick(d, ["Reference", "Customer", "Email", "Pickup", "Stops", "Destination", "When", "Passengers", "Vehicle", "Trip type", "Estimated fare", "Service region", "Needs staff review", "Requested extras", "Booking for"]);
+      const fields = pick(d, ["Reference", "Customer", "Email", "Pickup", "Stops", "Destination", "When", "Passengers", "Vehicle", "Trip type", "Estimated trip fare (information only)", "Tier", "Fixed tier price", "Meet & Greet", "Child car seats", "Online amount due", "Service region", "Needs staff review", "Requested extras", "Booking for"]);
       const cust: EmailMessage[] = d._customerEmail ? [{
         audience: "customer", to: customerTo(d), subject: `We received your booking request ${v(d, "Reference")}`,
         heading: "Booking request received",
         intro: "Thank you. This is a request, not a confirmed booking. We will review availability and confirm with you directly. No payment has been taken yet.",
-        fields: pick(d, ["Reference", "When", "Pickup", "Stops", "Destination", "Vehicle", "Passengers", "Estimated fare", "Requested extras"]),
+        fields: pick(d, ["Reference", "When", "Pickup", "Stops", "Destination", "Vehicle", "Passengers", "Estimated trip fare (information only)", "Tier", "Fixed tier price", "Meet & Greet", "Child car seats", "Online amount due"]),
         footnote: "Requested services (such as airport Meet & Greet or child car seats) are not confirmed until we confirm them with you.",
         ...(d._payUrl ? { ctaLabel: "Pay online", ctaUrl: d._payUrl } : {}),
       }] : [];
@@ -85,8 +85,8 @@ export function buildNotification(event: NotifyEvent, d: Data): BuiltNotificatio
       return {
         admin: { title: "Payment received", body: `${v(d, "Reference")}: a payment was received through Stripe. Open the dashboard to review.`, link: `/admin/bookings/${id}` },
         emails: [
-          { audience: "business", subject: `Payment received ${v(d, "Reference")}`, heading: "Payment received", intro: "Stripe confirmed a payment. The booking is NOT confirmed automatically: review and confirm it as usual.", fields: pick(d, ["Reference", "Amount paid", "Payment type", "Payment status"]), ctaLabel: "Open booking", ctaUrl: d._adminUrl },
-          ...(d._customerEmail ? [{ audience: "customer" as const, to: customerTo(d), subject: `Payment received for ${v(d, "Reference")}`, heading: "We received your payment", intro: "Thank you. Your payment was received. Your booking is confirmed only when we confirm it with you directly.", fields: pick(d, ["Reference", "Amount paid", "Payment type"]) }] : []),
+          { audience: "business", subject: `Payment received ${v(d, "Reference")}`, heading: "Payment received", intro: "Stripe confirmed a payment. The booking is NOT confirmed automatically: review and confirm it as usual.", fields: pick(d, ["Reference", "Payment provider", "Amount paid", "Payment type", "Tier", "Fixed tier price", "Meet & Greet", "Child car seats", "Payment status"]), ctaLabel: "Open booking", ctaUrl: d._adminUrl },
+          ...(d._customerEmail ? [{ audience: "customer" as const, to: customerTo(d), subject: `Payment received for ${v(d, "Reference")}`, heading: "We received your payment", intro: "Thank you. Your payment was received. Your booking is confirmed only when we confirm it with you directly.", fields: pick(d, ["Reference", "Amount paid", "Payment type", "Tier", "Fixed tier price", "Meet & Greet", "Child car seats"]) }] : []),
         ],
       };
     case "booking.status_changed": {

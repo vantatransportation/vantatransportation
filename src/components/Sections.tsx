@@ -123,7 +123,7 @@ export function ServiceNotes({ waiting, noShow, assistance, availability, meetGr
         <h2 id="policies-title" style={{ marginBottom: "2rem" }}>What to expect</h2>
         <div className="notes">
           <div><h3>Passenger assistance</h3><p>{assistance}</p></div>
-          {meetGreetEnabled && <div><h3>Airport Meet &amp; Greet</h3><p>Choose Meet &amp; Greet on an airport pickup to request that your driver meets the passenger inside the airport. It is a request until we confirm it, and any charge is shown or confirmed before service.</p></div>}
+          {meetGreetEnabled && <div><h3>Airport Meet &amp; Greet</h3><p>Tick Meet &amp; Greet in Calculate Your Fare to request that your driver meets the passenger inside the airport. It is an optional paid service: the fee depends on your vehicle tier and is shown before you submit. It is a request until we confirm it.</p></div>}
           <div><h3>Waiting time</h3><p>{waiting}</p></div>
           <div><h3>No-shows</h3><p>{noShow}</p></div>
           <div><h3>Availability</h3><p>{availability}</p></div>

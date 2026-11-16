@@ -6,7 +6,7 @@ export const stripeConfigured = () => Boolean(process.env.STRIPE_SECRET_KEY?.tri
 export const webhookSecret = () => process.env.STRIPE_WEBHOOK_SECRET?.trim() || "";
 
 export interface CheckoutInput {
-  amountCents: number; currency: string; productName: string; successUrl: string; cancelUrl: string;
+  amountCents: number; currency: string; lines: { name: string; amountCents: number }[]; successUrl: string; cancelUrl: string;
   bookingId: string; paymentId: string; customerEmail?: string; idempotencyKey: string;
 }
 export type CheckoutResult = { ok: true; id: string; url: string } | { ok: false; error: string };
@@ -23,12 +23,16 @@ export async function createCheckoutSession(i: CheckoutInput): Promise<CheckoutR
   if (!stripeConfigured()) return { ok: false, error: "Online payment is not configured." };
   const b = new URLSearchParams({
     mode: "payment", "payment_method_types[0]": "card",
-    "line_items[0][quantity]": "1", "line_items[0][price_data][currency]": i.currency.toLowerCase(),
-    "line_items[0][price_data][unit_amount]": String(i.amountCents), "line_items[0][price_data][product_data][name]": i.productName,
     success_url: i.successUrl, cancel_url: i.cancelUrl, client_reference_id: i.bookingId,
     "metadata[booking_id]": i.bookingId, "metadata[payment_id]": i.paymentId,
     "payment_intent_data[metadata][booking_id]": i.bookingId, "payment_intent_data[metadata][payment_id]": i.paymentId,
     expires_at: String(Math.floor(Date.now() / 1000) + 3600),
+  });
+  // One Checkout line per charged component; they must add up to the amount the server calculated.
+  if (i.lines.reduce((n, l) => n + l.amountCents, 0) !== i.amountCents) return { ok: false, error: "Line items do not add up to the amount." };
+  i.lines.forEach((l, n) => {
+    b.set(`line_items[${n}][quantity]`, "1"); b.set(`line_items[${n}][price_data][currency]`, i.currency.toLowerCase());
+    b.set(`line_items[${n}][price_data][unit_amount]`, String(l.amountCents)); b.set(`line_items[${n}][price_data][product_data][name]`, l.name.slice(0, 120));
   });
   if (i.customerEmail) b.set("customer_email", i.customerEmail);
   try {

@@ -53,9 +53,11 @@ export async function POST(request: Request) {
     const discount = await lookupPromo(db, trip.promoCode);
     const rtCtx = trip.returnLeg ? { returnRoutes, rules: await loadActiveRoundTripRules(db) } : undefined;
     const settings = await loadBookingSettings(db);
+    // Child seats are an add-on charged online, shown separately from the trip estimate.
     const seat = seatExtra(settings.seats, trip.childSeats, Boolean(trip.returnLeg), trip.passengers);
     if (!seat.ok) return json({ error: seat.error }, 422);
-    const vehicles = buildVehicleOptions(fleet, trip, routes, discount, rtCtx, seat.line ? [seat.line] : []);
+    const vehicles = buildVehicleOptions(fleet, trip, routes, discount, rtCtx);
+    const tierRows = await db.from("vehicle_tiers").select("id,name,fixed_price_cents,meet_greet_fee_cents,sort_order").eq("is_active", true).order("sort_order");
     const regionKey = classifyTrip([trip.pickup.text, ...trip.stops.map((s) => s.text), trip.dropoff.text, ...(trip.returnLeg ? [trip.returnLeg.pickup.text, trip.returnLeg.dropoff.text] : [])]);
     const routeOptions = (Object.keys(routes) as RouteKey[]).map((key) => {
       const r = routes[key]!;
@@ -73,6 +75,9 @@ export async function POST(request: Request) {
       vehicles,
       promo: trip.promoCode ? { code: trip.promoCode, applied: Boolean(discount), label: discount?.label ?? null } : null,
       pricingAvailable: vehicles.some((v) => v.quotable),
+      seatFeeCents: seat.line?.cents ?? 0,
+      meetGreetEnabled: settings.meetGreetEnabled,
+      tiers: (tierRows.data ?? []).map((t: Record<string, any>) => ({ name: t.name, fixedPriceCents: t.fixed_price_cents ?? null, meetGreetFeeCents: t.meet_greet_fee_cents ?? null })), // eslint-disable-line @typescript-eslint/no-explicit-any
       seatInfo: { oneWayCents: settings.seats.oneWayCents, roundTripCents: settings.seats.roundTripCents, max: settings.seats.max },
       region: { key: regionKey, label: REGION_LABEL[regionKey], manualReview: fulfilmentFor(regionKey).requiresManualReview },
     });

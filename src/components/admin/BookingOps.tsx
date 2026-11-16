@@ -51,7 +51,6 @@ export default function BookingOps(p: Props) {
           <h4 className="full">Airport Meet &amp; Greet</h4>
           <div className="field"><label htmlFor="mg-status">Status</label>
             <select id="mg-status" name="status" defaultValue={p.meetGreetStatus ?? "requested"}><option value="requested">Requested (not confirmed)</option><option value="confirmed">Confirmed by Vanta</option><option value="declined">Declined</option></select></div>
-          <div className="field"><label htmlFor="mg-charge">Approved charge ($, optional)</label><input id="mg-charge" name="chargeDollars" type="number" min={0} step="0.01" /></div>
           <div className="full"><button className="btn btn--ghost btn-sm" disabled={busy === "meet_greet"}>Save Meet &amp; Greet</button></div>
         </form>
       )}

@@ -5,9 +5,11 @@ import { DEFAULT_PAYMENT, type PaymentMode, type PaymentSettings } from "@/lib/p
 import { childSeatFee, childSeatSummary, DEFAULT_SEAT_SETTINGS, seatCount, type ChildSeats, type SeatSettings } from "@/lib/child-seats";
 
 export interface BookingSettings {
+  /** Whether airport Meet & Greet can be requested. Its fee is set per tier (vehicle_tiers.meet_greet_fee_cents). */
   meetGreetEnabled: boolean;
-  /** Only set when an admin has approved the charge. Otherwise null = "to be confirmed". */
-  meetGreetChargeCents: number | null;
+  /** Provider switches; a provider is offered only if enabled here AND configured on the server. */
+  stripeEnabled: boolean;
+  paypalEnabled: boolean;
   waitingIncludedMinutes: number;
   waitingIncrementMinutes: number;
   /** Only set when an admin has approved the rate. */
@@ -18,7 +20,7 @@ export interface BookingSettings {
 
 export type { PaymentMode, PaymentSettings } from "@/lib/payments";
 
-export const DEFAULT_SETTINGS: BookingSettings = { meetGreetEnabled: true, meetGreetChargeCents: null, waitingIncludedMinutes: 15, waitingIncrementMinutes: 15, waitingRateCents: null, seats: DEFAULT_SEAT_SETTINGS, payment: DEFAULT_PAYMENT };
+export const DEFAULT_SETTINGS: BookingSettings = { meetGreetEnabled: true, stripeEnabled: true, paypalEnabled: true, waitingIncludedMinutes: 15, waitingIncrementMinutes: 15, waitingRateCents: null, seats: DEFAULT_SEAT_SETTINGS, payment: DEFAULT_PAYMENT };
 
 export async function loadBookingSettings(db: SupabaseClient): Promise<BookingSettings> {
   try {
@@ -26,7 +28,8 @@ export async function loadBookingSettings(db: SupabaseClient): Promise<BookingSe
     if (!data) return DEFAULT_SETTINGS;
     return {
       meetGreetEnabled: data.meet_greet_enabled !== false,
-      meetGreetChargeCents: data.meet_greet_charge_approved && data.meet_greet_charge_cents != null ? Number(data.meet_greet_charge_cents) : null,
+      stripeEnabled: data.stripe_enabled !== false,
+      paypalEnabled: data.paypal_enabled !== false,
       waitingIncludedMinutes: Number(data.waiting_included_minutes ?? 15),
       waitingIncrementMinutes: Number(data.waiting_increment_minutes ?? 15) || 15,
       waitingRateCents: data.waiting_rate_approved && data.waiting_rate_cents != null ? Number(data.waiting_rate_cents) : null,
@@ -58,7 +61,7 @@ export const DEFAULT_POLICY_TEXT = {
 
 export interface PublicPolicies {
   waitingText: string; noShowText: string; assistanceText: string; availabilityText: string;
-  meetGreet: { enabled: boolean; chargeCents: number | null };
+  meetGreet: { enabled: boolean };
   roundTripDiscountActive: boolean;
 }
 
@@ -78,7 +81,7 @@ export async function loadPublicPolicies(db: SupabaseClient | null): Promise<Pub
   }
   return {
     waitingText: waitingPolicyText(s.waitingIncludedMinutes, s.waitingIncrementMinutes), noShowText: noShow, assistanceText: assistance, availabilityText: availability,
-    meetGreet: { enabled: s.meetGreetEnabled, chargeCents: s.meetGreetChargeCents }, roundTripDiscountActive: rtActive,
+    meetGreet: { enabled: s.meetGreetEnabled }, roundTripDiscountActive: rtActive,
   };
 }
 

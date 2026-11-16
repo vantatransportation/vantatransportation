@@ -7,14 +7,12 @@ export const metadata = { title: "Vehicle categories" };
 
 export default async function Categories() {
   const { db } = await adminPage();
-  const [cats, tiers] = await Promise.all([listRows(db, resources.categories), listRows(db, resources.tiers)]);
+  const cats = await listRows(db, resources.categories);
   return (
     <>
       <h1>Vehicle categories</h1>
-      <p className="adm-sub">Categories group vehicles on the website. Tiers (currently Business Class and First Class; rename them here, for example to Luxury and Premium) are separate and can be renamed or extended at any time. Use the arrows to reorder.</p>
+      <p className="adm-sub">Categories group vehicles on the website. The three service tiers (Premium, Luxury, Luxury Plus) and their fixed prices and Meet & Greet fees are under Tier prices & fees. Use the arrows to reorder categories.</p>
       <ResourceManager resource={toClient(resources.categories)} rows={cats} tz={BUSINESS_TZ} />
-      <h2>Vehicle tiers</h2>
-      <ResourceManager resource={toClient(resources.tiers)} rows={tiers} tz={BUSINESS_TZ} />
     </>
   );
 }

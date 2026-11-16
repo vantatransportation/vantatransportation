@@ -7,7 +7,7 @@ const REL = {
   bookings: { vehicles: ["one", "vehicle_id", "vehicles"] },
   quote_requests: { vehicles: ["one", "vehicle_id", "vehicles"] },
 };
-const UNIQUE = { customers: ["email_normalized"], bookings: ["submission_key", "reference"], quote_requests: ["submission_key", "access_token"], notification_logs: ["dedupe_key"], admin_notifications: ["dedupe_key"], stripe_events: ["id"], payments: ["stripe_session_id"] };
+const UNIQUE = { customers: ["email_normalized"], bookings: ["submission_key", "reference"], quote_requests: ["submission_key", "access_token"], notification_logs: ["dedupe_key"], admin_notifications: ["dedupe_key"], stripe_events: ["id"], paypal_events: ["id"], payments: ["stripe_session_id"] };
 
 function splitTop(s) { const out = []; let d = 0, cur = ""; for (const ch of s) { if (ch === "(") d++; if (ch === ")") d--; if (ch === "," && d === 0) { out.push(cur.trim()); cur = ""; } else cur += ch; } if (cur.trim()) out.push(cur.trim()); return out; }
 

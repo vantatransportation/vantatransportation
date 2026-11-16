@@ -35,3 +35,15 @@ export function statusAfterPayment(totalCents: number | null, paidCents: number)
   if (paidCents <= 0) return "unpaid";
   return totalCents != null && paidCents >= totalCents ? "paid" : "deposit_paid";
 }
+
+/** Integer cents to a decimal string for providers that use decimal amounts (PayPal): 18500 -> "185.00". No floating point. */
+export function centsToDecimal(cents: number): string {
+  if (!Number.isInteger(cents) || cents < 0) throw new Error("invalid amount");
+  return `${Math.floor(cents / 100)}.${String(cents % 100).padStart(2, "0")}`;
+}
+/** "185.00" -> 18500. Returns null for anything that is not a plain non-negative amount with at most two decimals. */
+export function decimalToCents(value: unknown): number | null {
+  if (typeof value !== "string" || !/^\d{1,9}(\.\d{1,2})?$/.test(value)) return null;
+  const [whole, frac = ""] = value.split(".");
+  return Number(whole) * 100 + Number(frac.padEnd(2, "0"));
+}

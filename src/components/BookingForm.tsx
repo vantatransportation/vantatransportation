@@ -28,7 +28,6 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
   const [status, setStatus] = useState<Status>({ kind: "idle" });
   const [bookingFor, setBookingFor] = useState<"self" | "other">("self");
   const [airportOn, setAirportOn] = useState<boolean | null>(null); // null = follow the auto-detected default
-  const [meetGreet, setMeetGreet] = useState(false);
   const [secondContact, setSecondContact] = useState(false);
 
   if (stored === undefined) return <p className="muted">Loading your trip…</p>;
@@ -48,11 +47,12 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
   const q = display.quote;
   const when = `${trip.date} at ${trip.time}`;
   const detectedAirport = looksLikeAirport(trip.pickup.text) || looksLikeAirport(trip.dropoff.text) || (trip.returnLeg ? looksLikeAirport(trip.returnLeg.pickup.text) || looksLikeAirport(trip.returnLeg.dropoff.text) : false);
-  const airport = airportOn ?? detectedAirport;
+  const meetGreet = trip.meetGreet === true; // chosen in Calculate Your Fare; the fee is the selected tier's fee
+  const airport = meetGreet ? true : (airportOn ?? detectedAirport);
   const pickupIsAirport = looksLikeAirport(trip.pickup.text);
   const airportGuess = pickupIsAirport ? trip.pickup.text : looksLikeAirport(trip.dropoff.text) ? trip.dropoff.text : "";
-  const mgCharge = policies.meetGreet.chargeCents;
-  const shownTotal = q ? q.totalCents + (airport && meetGreet && mgCharge != null ? mgCharge : 0) : null;
+  const online = display.online ?? null;
+  const onlineTotal = online && online.fixedPriceCents != null ? online.fixedPriceCents + online.meetGreetCents + online.seatFeeCents : null;
 
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -69,7 +69,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
           name: g("name"), email: g("email"), phone: g("phone"), notes: g("notes"), website: g("website"),
           bookingFor, passenger: bookingFor === "other" ? { name: g("p.name"), phone: g("p.phone"), email: g("p.email") } : null,
           luggageCount: g("luggage"), assistanceNotes: g("assistance"), pickupInstructions: g("pickupInstructions"), contacts,
-          airport: airport ? { airport: g("a.airport"), airline: g("a.airline"), flightNumber: g("a.flightNumber"), direction: g("a.direction"), flightDate: g("a.flightDate"), flightTime: g("a.flightTime"), terminal: g("a.terminal"), passengerName: g("a.passengerName"), pickupInstructions: g("a.instructions"), meetGreet: policies.meetGreet.enabled && meetGreet } : null,
+          airport: airport ? { airport: g("a.airport"), airline: g("a.airline"), flightNumber: g("a.flightNumber"), direction: g("a.direction"), flightDate: g("a.flightDate"), flightTime: g("a.flightTime"), terminal: g("a.terminal"), passengerName: g("a.passengerName"), pickupInstructions: g("a.instructions"), meetGreet } : null,
           policiesAcknowledged: fd.get("ack") === "on",
         }),
       });
@@ -77,7 +77,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
       if (!res.ok) return setStatus({ kind: "error", message: data.error ?? "Something went wrong. Please try again.", fields: data.fields });
       try {
         sessionStorage.removeItem(TRIP_STORAGE_KEY);
-        sessionStorage.setItem("vanta:confirmation", JSON.stringify({ reference: data.reference, totalCents: data.totalCents, currency: data.currency, shownTotalCents: shownTotal, payUrl: data.payUrl ?? null }));
+        sessionStorage.setItem("vanta:confirmation", JSON.stringify({ reference: data.reference, totalCents: data.totalCents, currency: data.currency, shownTotalCents: onlineTotal, payUrl: data.payUrl ?? null }));
       } catch { /* ignore */ }
       router.push(`/book/confirmation?ref=${encodeURIComponent(data.reference)}`);
     } catch {
@@ -103,16 +103,28 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
           <dt>Trip type</dt><dd>{trip.tripType === "hourly" ? `By the hour (${trip.hours} h)` : trip.returnLeg ? "Round trip" : "Point to point"}</dd>
           <dt>Route</dt><dd>{display.distanceMiles} mi, about {display.durationMinutes} min ({display.routeLabel})</dd>
         </dl>
-        {q ? (
-          <table className="lines"><tbody>
-            {q.lineItems.map((l, i) => <tr key={i}><td>{l.label}{l.detail && <small className="muted"><br />{l.detail}</small>}</td><td>{l.cents < 0 ? "−" : ""}{formatMoney(Math.abs(l.cents), q.currency)}</td></tr>)}
-            {airport && meetGreet && mgCharge != null && <tr><td>Airport Meet &amp; Greet<span className="tag">requested</span></td><td>{formatMoney(mgCharge, q.currency)}</td></tr>}
-            <tr className="total"><td>Estimated total</td><td>{formatMoney(shownTotal ?? q.totalCents, q.currency)}</td></tr>
+        <h3 className="summary__h">Charged online</h3>
+        {online && online.fixedPriceCents != null ? (
+          <table className="lines" aria-label="Amount charged online"><tbody>
+            <tr><td>Fixed {online.tierName} price</td><td>{formatMoney(online.fixedPriceCents)}</td></tr>
+            {meetGreet && <tr><td>Airport Meet &amp; Greet<span className="tag">requested</span></td><td>{formatMoney(online.meetGreetCents)}</td></tr>}
+            {online.seatFeeCents > 0 && <tr><td>Child car seats<span className="tag">requested</span></td><td>{formatMoney(online.seatFeeCents)}</td></tr>}
+            <tr className="total"><td>Total due online</td><td>{formatMoney(onlineTotal ?? 0)}</td></tr>
           </tbody></table>
-        ) : <p className="muted">Price on request. We will confirm the price with you.</p>}
-        {airport && meetGreet && mgCharge == null && <p className="muted">Meet &amp; Greet is requested. Its charge has not been set yet and is not in this estimate; we will confirm any charge with you.</p>}
+        ) : <p className="muted">An online amount is not set up for this vehicle&apos;s tier yet. We will confirm the price with you.</p>}
+        <h3 className="summary__h">Estimated trip fare</h3>
+        {q ? (
+          <>
+            <table className="lines"><tbody><tr className="total"><td>Estimated trip fare</td><td>{formatMoney(q.totalCents, q.currency)}</td></tr></tbody></table>
+            <p className="muted">Calculated from distance, time and tolls. For information only: it is not part of the online amount.</p>
+            <details><summary>How the estimate is calculated</summary>
+              <table className="lines"><tbody>{q.lineItems.map((l, i) => <tr key={i}><td>{l.label}{l.detail && <small className="muted"><br />{l.detail}</small>}</td><td>{l.cents < 0 ? "−" : ""}{formatMoney(Math.abs(l.cents), q.currency)}</td></tr>)}</tbody></table>
+            </details>
+          </>
+        ) : <p className="muted">An estimate is not available. We will confirm the price with you.</p>}
+        {meetGreet && <p className="muted">Meet &amp; Greet is requested here and is not confirmed until Vanta confirms it.</p>}
         {trip.childSeats && seatCount(trip.childSeats) > 0 && <p className="muted">{SEAT_CONFIRMATION_NOTE}</p>}
-        <p className="muted">We verify the fare again when you submit. This is a booking request, not a confirmed booking. If online payment is available you can pay after you submit.</p>
+        <p className="muted">We verify the amounts again when you submit. This is a booking request, not a confirmed booking. If online payment is available you can pay after you submit.</p>
         <p><button type="button" className="linkbtn" onClick={() => openCalculator({ pickup: trip.pickup.text, dropoff: trip.dropoff.text, date: trip.date, time: trip.time })}>Change trip details</button></p>
       </section>
 
@@ -144,7 +156,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
 
         <fieldset className="fieldset">
           <legend>Airport</legend>
-          <label className="choice"><input type="checkbox" checked={airport} onChange={(e) => setAirportOn(e.target.checked)} /><span>This trip includes an airport pickup or drop-off</span></label>
+          <label className="choice"><input type="checkbox" checked={airport} disabled={meetGreet} onChange={(e) => setAirportOn(e.target.checked)} /><span>This trip includes an airport pickup or drop-off{meetGreet ? " (required for Airport Meet & Greet)" : ""}</span></label>
           {airport && (
             <div className="form-grid" style={{ marginTop: ".75rem" }}>
               <div className="field"><label htmlFor="a-airport">Airport</label><input id="a-airport" name="a.airport" defaultValue={airportGuess} required aria-invalid={!!err["airport.airport"]} />{fe("airport.airport")}</div>
@@ -156,12 +168,6 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
               <div className="field"><label htmlFor="a-term">Terminal (if known)</label><input id="a-term" name="a.terminal" /></div>
               <div className="field"><label htmlFor="a-pname">Passenger name for the driver</label><input id="a-pname" name="a.passengerName" /></div>
               <div className="field full"><label htmlFor="a-inst">Airport pickup instructions (optional)</label><textarea id="a-inst" name="a.instructions" style={{ minHeight: 80 }} /></div>
-              {policies.meetGreet.enabled && (
-                <div className="full">
-                  <label className="choice"><input type="checkbox" checked={meetGreet} onChange={(e) => setMeetGreet(e.target.checked)} /><span><strong>Meet &amp; Greet</strong>: request that the driver meets the passenger inside the airport, rather than only waiting at the regular pickup point.<br />
-                    <small className="muted">{mgCharge != null ? `Adds ${formatMoney(mgCharge)}.` : "Charge to be confirmed by Vanta. It is not included in the estimate."} It is a request until we confirm it.</small></span></label>
-                </div>
-              )}
             </div>
           )}
         </fieldset>

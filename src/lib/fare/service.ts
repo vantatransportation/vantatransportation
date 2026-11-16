@@ -6,6 +6,7 @@ import { pickRule, type RuleRow } from "@/lib/policies";
 import type { ParsedRoute } from "@/lib/geo/parse";
 import type { Trip } from "./trip";
 import { hasRealPhoto } from "@/lib/vehicle-photo";
+import type { TierPricing } from "@/lib/tier-pricing";
 
 export type RouteKey = "fastest" | "no_tolls";
 
@@ -14,6 +15,8 @@ export interface FleetVehicle {
   name: string;
   category: string;
   categoryId: string | null;
+  /** Fixed price and Meet & Greet fee of this vehicle's tier (admin-configured; null = not set). */
+  tierPricing: TierPricing | null;
   tier: string;
   tierId: string | null;
   passengers: number;
@@ -30,7 +33,7 @@ export interface FleetVehicle {
 export async function loadFleet(db: SupabaseClient): Promise<FleetVehicle[]> {
   const { data, error } = await db
     .from("vehicles")
-    .select("id,name,description,passenger_capacity,image_url,image_public_id,similar_models,tier_id, vehicle_categories(id,name,capacity_label,sort_order), vehicle_tiers(name), pricing_configs(*, pricing_surcharges(*))")
+    .select("id,name,description,passenger_capacity,image_url,image_public_id,similar_models,tier_id, vehicle_categories(id,name,capacity_label,sort_order), vehicle_tiers(id,name,fixed_price_cents,meet_greet_fee_cents), pricing_configs(*, pricing_surcharges(*))")
     .eq("is_active", true)
     .eq("is_available", true)
     .order("sort_order");
@@ -54,6 +57,7 @@ export async function loadFleet(db: SupabaseClient): Promise<FleetVehicle[]> {
       : null;
     return {
       id: v.id, name: v.name, category: v.vehicle_categories?.name ?? "", categoryId: v.vehicle_categories?.id ?? null, tier: v.vehicle_tiers?.name ?? "", tierId: v.tier_id ?? null,
+      tierPricing: v.vehicle_tiers ? { id: v.vehicle_tiers.id ?? v.tier_id ?? null, name: v.vehicle_tiers.name, fixedPriceCents: v.vehicle_tiers.fixed_price_cents ?? null, meetGreetFeeCents: v.vehicle_tiers.meet_greet_fee_cents ?? null } : null,
       passengers: v.passenger_capacity, image: hasRealPhoto(v.image_url) ? v.image_url : null, imagePublicId: v.image_public_id ?? null,
       description: v.description ?? "", capacityLabel: v.vehicle_categories?.capacity_label ?? "", similarModels: v.similar_models ?? "", config,
     };
@@ -101,6 +105,7 @@ export const toPublicQuote = (q: Extract<QuoteResult, { ok: true }>, extras: Ext
 export interface VehicleOption {
   id: string; name: string; category: string; tier: string; passengers: number; image: string | null; similarModels: string;
   description: string; capacityLabel: string;
+  tierPricing: TierPricing | null;
   quotable: boolean;
   quotes: Partial<Record<RouteKey, PublicQuote>>;
 }
@@ -135,7 +140,7 @@ export function buildVehicleOptions(fleet: FleetVehicle[], trip: Trip, routes: P
     }
     const quotable = Object.keys(quotes).length > 0;
     if (trip.tripType === "hourly" && v.config && !quotable) continue; // vehicle has no hourly rate
-    out.push({ id: v.id, name: v.name, category: v.category, tier: v.tier, passengers: v.passengers, image: v.image, similarModels: v.similarModels, description: v.description, capacityLabel: v.capacityLabel, quotable, quotes });
+    out.push({ id: v.id, name: v.name, category: v.category, tier: v.tier, passengers: v.passengers, image: v.image, similarModels: v.similarModels, description: v.description, capacityLabel: v.capacityLabel, tierPricing: v.tierPricing, quotable, quotes });
   }
   return out;
 }

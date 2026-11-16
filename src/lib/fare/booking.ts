@@ -9,7 +9,8 @@ import { classifyTrip, fulfilmentFor, type Region } from "@/lib/coverage";
 import { loadActiveRoundTripRules, loadBookingSettings, loadPublicPolicies, pickRule, seatExtra } from "@/lib/policies";
 import { NO_SEATS, SEAT_TYPES } from "@/lib/child-seats";
 import { paymentPlan } from "@/lib/payments";
-import { stripeConfigured } from "@/lib/stripe";
+import { availableProviders } from "@/lib/payment-providers";
+import { onlineCharge, CHARGE_REASON_TEXT, type OnlineCharge } from "@/lib/tier-pricing";
 import type { BookingDetails } from "@/lib/booking-details";
 import { loadFleet, lookupPromo, routeToInput, type RouteKey } from "./service";
 import type { Trip } from "./trip";
@@ -35,6 +36,8 @@ export type CreateBookingResult =
       ok: true; id: string; reference: string; totalCents: number | null; currency: string; vehicleName: string; duplicate: boolean; customerId: string;
       region: Region; requiresReview: boolean; roundTrip: boolean; discountCents: number; meetGreetRequested: boolean; meetGreetPending: boolean;
       paymentToken: string | null; payment: { kind: "full" | "deposit"; amountCents: number } | null; childSeatFeeCents: number;
+      /** What is charged online: fixed tier price + Meet & Greet + child seats. null when the tier price is not configured. */
+      online: OnlineCharge | null;
     }
   | { ok: false; status: number; error: string };
 
@@ -51,7 +54,7 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
       const v = dup.data.vehicles as unknown as { name?: string } | null;
       return { ok: true, id: dup.data.id, reference: dup.data.reference, totalCents: dup.data.estimated_fare_cents, currency: dup.data.currency, vehicleName: v?.name ?? "", duplicate: true, customerId: dup.data.customer_id,
         region: (dup.data.service_region ?? "unknown") as Region, requiresReview: Boolean(dup.data.requires_manual_review), roundTrip: dup.data.trip_direction === "round_trip", discountCents: 0, meetGreetRequested: false, meetGreetPending: false,
-        paymentToken: dup.data.payment_token ?? null, payment: null, childSeatFeeCents: dup.data.child_seat_fee_cents ?? 0 };
+        paymentToken: dup.data.payment_token ?? null, payment: null, childSeatFeeCents: dup.data.child_seat_fee_cents ?? 0, online: null };
     }
   }
 
@@ -61,7 +64,8 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
   if (vehicle.passengers < trip.passengers) return { ok: false, status: 422, error: "That vehicle does not seat your group. Please choose a larger vehicle." };
 
   const settings = await loadBookingSettings(db);
-  if (details.airport?.meetGreet && !settings.meetGreetEnabled) return { ok: false, status: 422, error: "Airport Meet & Greet is not currently available. Please untick it or contact us." };
+  if (trip.meetGreet && !settings.meetGreetEnabled) return { ok: false, status: 422, error: "Airport Meet & Greet is not currently available. Please untick it or contact us." };
+  if (input.details && trip.meetGreet && !details.airport?.airport) return { ok: false, status: 422, error: "Enter the airport and flight details for your Meet & Greet." };
 
   // Server-side routes and fare. The browser's displayed fare is never trusted.
   const avoid = input.routeKey === "no_tolls";
@@ -80,13 +84,19 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
     returnRoute = rr.route;
   }
 
-  // Extras (Meet & Greet): priced only when an admin has approved a charge. Otherwise it is "pending approval".
-  const wantsMG = details.airport?.meetGreet === true;
-  const mgApproved = wantsMG && settings.meetGreetChargeCents != null;
+  // Add-ons charged ONLINE: Meet & Greet (the selected tier's fee) and child seats. They are NOT part of the trip estimate.
+  const wantsMG = trip.meetGreet === true;
   const seatRes = seatExtra(settings.seats, trip.childSeats ?? NO_SEATS, Boolean(rt), trip.passengers);
   if (!seatRes.ok) return { ok: false, status: 422, error: seatRes.error };
-  const mgExtras: ExtraLine[] = mgApproved ? [{ code: "meet_greet", label: "Airport Meet & Greet (requested)", cents: settings.meetGreetChargeCents!, detail: "Requested; confirmed by Vanta" }] : [];
-  const extras: ExtraLine[] = [...mgExtras, ...(seatRes.line ? [seatRes.line] : [])];
+  const seatCents = seatRes.line?.cents ?? 0;
+  // The online charge is calculated here, from the database, whatever the browser displayed. Quote conversions at an
+  // agreed price carry no online charge.
+  const chargeRes = input.priceOverrideCents != null ? null : onlineCharge(vehicle.tierPricing, { meetGreet: wantsMG, addonsCents: seatCents });
+  if (chargeRes && !chargeRes.ok && wantsMG && (chargeRes.reason === "meet_greet_unavailable" || chargeRes.reason === "tier_missing")) {
+    return { ok: false, status: 422, error: `${CHARGE_REASON_TEXT[chargeRes.reason]} Please untick Meet & Greet or contact us.` };
+  }
+  const online: OnlineCharge | null = chargeRes && chargeRes.ok ? chargeRes.charge : null;
+  const extras: ExtraLine[] = []; // the trip estimate carries no add-ons
 
   let totalCents: number | null = null;
   let snapshot: Record<string, unknown> | null = null;
@@ -116,7 +126,6 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
       legPricing = [{ leg: 1, fare: totalCents, snapshot: { lineItems, totalCents } }];
       snapshot = { ...q.snapshot, extras, route: { distanceMiles: route.distanceMiles, durationMinutes: route.durationMinutes, toll: route.toll } };
     }
-    if (wantsMG && !mgApproved) snapshot = { ...snapshot, pendingExtras: ["meet_greet_charge_pending_approval"] };
   }
   if (input.priceOverrideCents != null) {
     snapshot = { ...(snapshot ?? {}), override: { priceCents: input.priceOverrideCents, originalTotalCents: totalCents, quoteRequestId: input.quoteRequestId ?? null } };
@@ -130,7 +139,8 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
   const now = new Date().toISOString();
 
   // Online payment applies only when an admin enabled it, Stripe is configured and the price is known.
-  const plan = stripeConfigured() ? paymentPlan(settings.payment, totalCents, 0) : null;
+  const plan = availableProviders(settings).length > 0 ? paymentPlan(settings.payment, online?.totalCents ?? null, 0) : null;
+  snapshot = { ...(snapshot ?? {}), online };
   const customerId = await findOrCreateCustomer(db, input.customer);
   const currency = vehicle.config?.currency ?? "USD";
 
@@ -140,7 +150,8 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
     hours: trip.hours, distance_miles: route?.distanceMiles ?? null, duration_minutes: route?.durationMinutes ?? null, avoid_tolls: avoid,
     estimated_fare_cents: totalCents, currency, notes: input.notes, submission_key: input.submissionKey, source_quote_request_id: input.quoteRequestId ?? null,
     child_seats: SEAT_TYPES.filter((t) => (trip.childSeats ?? NO_SEATS)[t] > 0).map((t) => ({ type: t, quantity: (trip.childSeats ?? NO_SEATS)[t] })),
-    child_seat_fee_cents: input.priceOverrideCents == null ? seatRes.line?.cents ?? 0 : 0, payment_status: plan ? "unpaid" : "not_required",
+    child_seat_fee_cents: seatCents, tier_name: vehicle.tier || null, fixed_price_cents: online?.fixedPriceCents ?? null,
+    meet_greet_selected: wantsMG, meet_greet_fee_cents: online && wantsMG ? online.meetGreetCents : null, online_amount_cents: online?.totalCents ?? null, payment_status: plan ? "unpaid" : "not_required",
     trip_direction: rt ? "round_trip" : "one_way", booking_for: details.bookingFor, luggage_count: details.luggageCount,
     assistance_notes: details.assistanceNotes, pickup_instructions: details.pickupInstructions,
     service_region: region, fulfilment_mode: ful.mode, requires_manual_review: ful.requiresManualReview, review_reason: ful.reason,
@@ -151,7 +162,7 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
   if (ins.error) {
     if (ins.error.code === "23505" && input.submissionKey) {
       const again = await db.from("bookings").select("id,reference,estimated_fare_cents,currency,customer_id").eq("submission_key", input.submissionKey).maybeSingle();
-      if (again.data) return { ok: true, id: again.data.id, reference: again.data.reference, totalCents: again.data.estimated_fare_cents, currency: again.data.currency, vehicleName: vehicle.name, duplicate: true, customerId: again.data.customer_id, region, requiresReview: ful.requiresManualReview, roundTrip: Boolean(rt), discountCents: 0, meetGreetRequested: wantsMG, meetGreetPending: wantsMG && !mgApproved, paymentToken: null, payment: null, childSeatFeeCents: 0 };
+      if (again.data) return { ok: true, id: again.data.id, reference: again.data.reference, totalCents: again.data.estimated_fare_cents, currency: again.data.currency, vehicleName: vehicle.name, duplicate: true, customerId: again.data.customer_id, region, requiresReview: ful.requiresManualReview, roundTrip: Boolean(rt), discountCents: 0, meetGreetRequested: wantsMG, meetGreetPending: false, paymentToken: null, payment: null, childSeatFeeCents: 0, online: null };
     }
     console.error("[booking] insert failed", ins.error.message);
     return { ok: false, status: 500, error: "We could not save your booking. Please try again." };
@@ -177,7 +188,7 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
     await soft("airport", db.from("booking_airport_details").insert({
       booking_id: bookingId, leg_number: 1, airport: a.airport, airline: a.airline, flight_number: a.flightNumber, flight_direction: a.direction, flight_date: a.flightDate, flight_time: a.flightTime,
       terminal: a.terminal, passenger_name: a.passengerName ?? (details.passenger?.name ?? input.customer.name), pickup_instructions: a.pickupInstructions,
-      meet_greet_requested: a.meetGreet, meet_greet_status: a.meetGreet ? "requested" : "not_requested", meet_greet_charge_cents: mgApproved ? settings.meetGreetChargeCents : null,
+      meet_greet_requested: wantsMG, meet_greet_status: wantsMG ? "requested" : "not_requested", meet_greet_charge_cents: online && wantsMG ? online.meetGreetCents : null,
     }));
   }
   if (snapshot && totalCents != null) {
@@ -185,6 +196,6 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
   }
   await db.from("activity_logs").insert({ action: "booking.created", entity_type: "booking", entity_id: bookingId, meta: { reference: ins.data.reference, source: input.quoteRequestId ? "quote_conversion" : "website", region, roundTrip: Boolean(rt) } });
 
-  return { ok: true, id: bookingId, reference: ins.data.reference, totalCents, currency, vehicleName: vehicle.name, duplicate: false, customerId, region, requiresReview: ful.requiresManualReview, roundTrip: Boolean(rt), discountCents, meetGreetRequested: wantsMG, meetGreetPending: wantsMG && !mgApproved,
-    paymentToken: ins.data.payment_token ?? null, payment: plan, childSeatFeeCents: input.priceOverrideCents == null ? seatRes.line?.cents ?? 0 : 0 };
+  return { ok: true, id: bookingId, reference: ins.data.reference, totalCents, currency, vehicleName: vehicle.name, duplicate: false, customerId, region, requiresReview: ful.requiresManualReview, roundTrip: Boolean(rt), discountCents, meetGreetRequested: wantsMG, meetGreetPending: false,
+    paymentToken: ins.data.payment_token ?? null, payment: plan, childSeatFeeCents: seatCents, online };
 }

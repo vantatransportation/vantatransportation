@@ -29,7 +29,8 @@ export async function loadRefOptions(db: SupabaseClient, r: Resource): Promise<R
     if (f.type !== "ref" || !f.ref || out[f.ref]) continue;
     const target = resources[f.ref];
     if (!target) continue;
-    const rows = await listRows(db, target, 1000);
+    // Retired tiers (anything other than Premium / Luxury / Luxury Plus) cannot be assigned to vehicles.
+    const rows = (await listRows(db, target, 1000)).filter((row) => f.ref !== "tiers" || row.is_active !== false);
     out[f.ref] = rows.map((row) => ({ id: String(row.id), label: target.refLabel ? target.refLabel(row) : String(row.id) }));
   }
   return out;

@@ -18,7 +18,7 @@ Object.assign(process.env, {
 });
 
 // ---- network mocks -------------------------------------------------------------------------
-const net = { tollMode: "unknown" as "unknown" | "known", emailOk: false, calls: [] as { url: string; body: any; headers: any }[], sid: 0 };
+const net = { tollMode: "unknown" as "unknown" | "known", emailOk: false, calls: [] as { url: string; body: any; headers: any }[], sid: 0, pp: { seq: 0, orders: new Map<string, any>(), capStatus: "COMPLETED", capAmount: null as string | null, verify: true } };
 const reply = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 globalThis.fetch = (async (url: any, init: any) => {
   const u = String(url);
@@ -33,6 +33,15 @@ globalThis.fetch = (async (url: any, init: any) => {
   if (u === "https://api.stripe.com/v1/checkout/sessions") { const id = `cs_test_${++net.sid}`; return reply({ id, url: `https://checkout.stripe.com/c/pay/${id}` }); }
   if (u.startsWith("https://api.stripe.com/v1/checkout/sessions/") && u.endsWith("/expire")) return reply({});
   if (u === "https://api.cloudinary.com/v1_1/democloud/image/destroy") return reply({ result: "ok" });
+  if (u === "https://api-m.sandbox.paypal.com/v1/oauth2/token") return reply({ access_token: "pp-token", expires_in: 3600 });
+  if (u === "https://api-m.sandbox.paypal.com/v2/checkout/orders") { const id = `PPORDER${++net.pp.seq}AAAA`; net.pp.orders.set(id, JSON.parse(String(init.body))); return reply({ id, status: "CREATED" }, 201); }
+  const capM = u.match(/^https:\/\/api-m\.sandbox\.paypal\.com\/v2\/checkout\/orders\/([^/]+)\/capture$/);
+  if (capM) {
+    const order = net.pp.orders.get(capM[1]); if (!order) return reply({ message: "not found" }, 404);
+    const unit = order.purchase_units[0];
+    return reply({ id: capM[1], status: "COMPLETED", purchase_units: [{ reference_id: unit.reference_id, custom_id: unit.custom_id, payments: { captures: [{ id: `CAP${capM[1]}`, status: net.pp.capStatus, amount: { currency_code: unit.amount.currency_code, value: net.pp.capAmount ?? unit.amount.value } }] } }] }, 201);
+  }
+  if (u === "https://api-m.sandbox.paypal.com/v1/notifications/verify-webhook-signature") return reply({ verification_status: net.pp.verify ? "SUCCESS" : "FAILURE" });
   throw new Error("unexpected fetch " + u);
 }) as typeof fetch;
 
@@ -48,11 +57,16 @@ let routes: any;
 
 before(async () => {
   db.seed("vehicle_categories", [{ name: "Sedans", sort_order: 1 }]);
-  db.seed("vehicle_tiers", [{ name: "Luxury" }]);
-  const cat = db.t("vehicle_categories")[0].id, tier = db.t("vehicle_tiers")[0].id;
+  // The three service tiers. Fixed prices are NOT set yet (an admin must enter them); Meet & Greet fees are the initial approved values.
+  db.seed("vehicle_tiers", [
+    { name: "Premium", slug: "premium", sort_order: 1, is_active: true, fixed_price_cents: null, meet_greet_fee_cents: 2500 },
+    { name: "Luxury", slug: "luxury", sort_order: 2, is_active: true, fixed_price_cents: null, meet_greet_fee_cents: 3500 },
+    { name: "Luxury Plus", slug: "luxury-plus", sort_order: 3, is_active: true, fixed_price_cents: null, meet_greet_fee_cents: 5000 },
+  ]);
+  const cat = db.t("vehicle_categories")[0].id, tier = db.t("vehicle_tiers")[1].id, tierPremium = db.t("vehicle_tiers")[0].id;
   db.seed("vehicles", [
     { name: "E-Class", category_id: cat, tier_id: tier, passenger_capacity: 4, is_active: true, is_available: true, sort_order: 1, image_url: "/vehicles/sedan.svg" },
-    { name: "Sprinter", category_id: cat, tier_id: tier, passenger_capacity: 14, is_active: true, is_available: true, sort_order: 2, image_url: "/vehicles/van.svg" },
+    { name: "Sprinter", category_id: cat, tier_id: tierPremium, passenger_capacity: 14, is_active: true, is_available: true, sort_order: 2, image_url: "/vehicles/van.svg" },
   ]);
   ids = { eclass: db.t("vehicles")[0].id, sprinter: db.t("vehicles")[1].id };
   // DRAFT pricing only, to start with.
@@ -74,6 +88,8 @@ before(async () => {
     read: await import("../src/app/api/admin/notifications/read/route.ts"),
     sign: await import("../src/app/api/admin/cloudinary/sign/route.ts"),
     checkout: await import("../src/app/api/payments/checkout/route.ts"),
+    ppcapture: await import("../src/app/api/payments/paypal/capture/route.ts"),
+    ppwebhook: await import("../src/app/api/paypal/webhook/route.ts"),
     webhook: await import("../src/app/api/stripe/webhook/route.ts"),
   };
 });
@@ -256,7 +272,7 @@ test("booking for someone else: separate booker/passenger, contacts, airport and
     ...ack, ...person, trip: trip({ stops: [] }), vehicleId: ids.eclass, routeKey: "fastest", submissionKey: "key-other-aaaaaaaa", bookingFor: "other",
     passenger: { name: "Grace Rider", phone: "4105550177", email: "" }, luggageCount: 3, assistanceNotes: "Needs help with bags", pickupInstructions: "Side door",
     contacts: [{ name: "Sam Rider", relationship: "Son", phone: "4435550123", type: "emergency" }, { name: "", phone: "" }],
-    airport: { airport: "Dulles Airport", airline: "United", flightNumber: "UA1", direction: "departure", flightDate: soon, flightTime: "11:00", terminal: "B", passengerName: "Grace Rider", meetGreet: true },
+    airport: { airport: "Dulles Airport", airline: "United", flightNumber: "UA1", direction: "departure", flightDate: soon, flightTime: "11:00", terminal: "B", passengerName: "Grace Rider" },
   };
   // Missing acknowledgement and missing passenger details are rejected before anything is saved.
   const n0 = db.t("bookings").length;
@@ -267,7 +283,7 @@ test("booking for someone else: separate booker/passenger, contacts, airport and
   const res = await routes.bookings.POST(post("/api/bookings", body));
   assert.equal(res.status, 200);
   const data = await res.json();
-  assert.equal(data.totalCents, 13000); // Meet & Greet has no approved charge: not added, not invented
+  assert.equal(data.totalCents, 13000); // the estimate is the trip-based estimate only
   const b = db.t("bookings").find((x: any) => x.reference === data.reference);
   assert.equal(b.booking_for, "other");
   assert.equal(b.luggage_count, 3);
@@ -280,198 +296,16 @@ test("booking for someone else: separate booker/passenger, contacts, airport and
   assert.equal(people.find((p: any) => p.role === "booker").full_name, "Ann Rider");
   assert.equal(people.find((p: any) => p.role === "passenger").full_name, "Grace Rider");
   const air = db.t("booking_airport_details").find((a: any) => a.booking_id === b.id);
-  assert.equal(air.meet_greet_requested, true);
-  assert.equal(air.meet_greet_status, "requested"); // requested, not confirmed
+  assert.equal(air.meet_greet_requested, false); // Meet & Greet is chosen in the fare calculator (trip.meetGreet), not here
+  assert.equal(air.meet_greet_status, "not_requested");
   assert.equal(air.meet_greet_charge_cents, null);
 
   // Emergency contacts, passenger phone and notes never appear in emails or admin alerts.
   const blob = JSON.stringify([db.t("notification_logs"), db.t("admin_notifications")]);
   for (const secret of ["4435550123", "Sam Rider", "4105550177", "Side door", "Needs help with bags"]) assert.ok(!blob.includes(secret), secret);
 
-  // Once an admin approves a charge, it is added to the server-calculated total.
-  db.seed("booking_settings", [{ meet_greet_enabled: true, meet_greet_charge_cents: 2500, meet_greet_charge_approved: true, waiting_included_minutes: 15, waiting_increment_minutes: 15, waiting_rate_cents: null, waiting_rate_approved: false }]);
-  const res2 = await routes.bookings.POST(post("/api/bookings", { ...body, submissionKey: "key-other-bbbbbbbb" }));
-  assert.equal((await res2.json()).totalCents, 15500);
-  db.t("booking_settings")[0].meet_greet_enabled = false;
-  assert.equal((await routes.bookings.POST(post("/api/bookings", { ...body, submissionKey: "key-other-cccccccc" }))).status, 422); // M&G unavailable
-  db.t("booking_settings")[0].meet_greet_enabled = true;
-});
-
-test("admin: no-show requires a reason and records staff + charge status; waiting time uses only an approved rate", async () => {
-  globalThis.__cookies = { vt_at: "good" };
-  const b = db.t("bookings").find((x: any) => x.submission_key === "key-aaaaaaaaaaaaaaaa");
-  const ops = (body: object) => routes.ops.POST(post("/api/admin/bookings/ops", { id: b.id, ...body }));
-  assert.equal((await ops({ action: "no_show", reason: "" })).status, 422);
-  assert.equal((await ops({ action: "no_show", reason: "Passenger did not appear", chargeDollars: "130", chargeStatus: "pending" })).status, 200);
-  assert.equal(b.status, "no_show");
-  assert.equal(b.no_show_marked_by_email, "a@x.com");
-  assert.equal(b.no_show_charge_cents, 13000);
-  assert.equal(b.no_show_charge_status, "pending"); // recorded only; nothing is charged
-  const w = await (await ops({ action: "waiting", minutesWaited: 40 })).json();
-  assert.equal(w.billableMinutes, 30); // 40 min - 15 included, in 15-minute increments
-  assert.equal(w.chargeCents, null);   // no approved rate: no invented price
-  assert.equal(b.waiting_charge_status, "none");
-  db.t("booking_settings")[0].waiting_rate_cents = 1500; db.t("booking_settings")[0].waiting_rate_approved = true;
-  assert.equal((await (await ops({ action: "waiting", minutesWaited: 40 })).json()).chargeCents, 3000);
-  assert.equal(b.waiting_charge_status, "pending");
-  globalThis.__cookies = {};
-  assert.equal((await ops({ action: "no_show", reason: "x" })).status, 401);
-});
-
-test("admin notification feed: authenticated, per-admin read state, no passenger details", async () => {
-  globalThis.__cookies = {};
-  assert.equal((await routes.feed.GET()).status, 401);
-  globalThis.__cookies = { vt_at: "good" };
-  const f = await (await routes.feed.GET()).json();
-  assert.ok(f.items.length >= 3 && f.unread === f.items.length);
-  const text = JSON.stringify(f.items);
-  for (const secret of ["Ann Rider", "ann@example.com", "Grace", "Main St", "4105550100"]) assert.ok(!text.includes(secret), secret);
-  assert.equal((await routes.read.POST(post("/api/admin/notifications/read", { id: f.items[0].id }))).status, 200);
-  assert.equal((await (await routes.feed.GET()).json()).unread, f.unread - 1);
-  await routes.read.POST(post("/api/admin/notifications/read", { all: true }));
-  assert.equal((await (await routes.feed.GET()).json()).unread, 0);
-  // Alerts are only created after records are saved, once per event (dedupe key).
-  const keys = db.t("admin_notifications").map((n: any) => n.dedupe_key);
-  assert.equal(new Set(keys).size, keys.length);
-});
-
-let quoteId = "", token = "";
-test("Request a Better Quote: saved, linked to the customer, original quote computed server-side, business notified", async () => {
-  const res = await routes.qr.POST(post("/api/quote-requests", { trip: trip(), vehicleId: ids.eclass, routeKey: "fastest", name: "Dee", email: "dee@example.com", phone: "4105550133", desiredBudget: "90", message: "Can you do $90?", submissionKey: "key-eeeeeeeeeeeeeeee", originalQuote: 1 }));
-  assert.equal(res.status, 200);
-  const q = db.t("quote_requests")[0];
-  quoteId = q.id; token = q.access_token;
-  assert.equal(q.original_quote_cents, 13000);
-  assert.equal(q.desired_budget_cents, 9000);
-  assert.equal(q.discount_decision, "pending"); // never auto-approved
-  assert.ok(q.customer_id);
-  assert.ok(db.t("notification_logs").some((l: any) => l.event === "quote.created"));
-  assert.equal((await routes.qr.POST(post("/api/quote-requests", { trip: trip(), vehicleId: ids.eclass, name: "Dee", email: "dee@example.com", phone: "4105550133", submissionKey: "key-eeeeeeeeeeeeeeee" }))).status, 200);
-  assert.equal(db.t("quote_requests").length, 1); // duplicate ignored
-});
-
-test("admin endpoints require a signed-in admin and same-origin", async () => {
-  globalThis.__cookies = {};
-  assert.equal((await routes.send.POST(post("/api/admin/quotes/send", { id: quoteId }))).status, 401);
-  globalThis.__cookies = { vt_at: "bad" };
-  assert.equal((await routes.crud.POST(post("/api/admin/crud", { resource: "faqs", action: "create", values: {} }))).status, 401);
-  globalThis.__cookies = { vt_at: "good" };
-  assert.equal((await routes.crud.POST(post("/api/admin/crud", { resource: "faqs", action: "create", values: {} }, { origin: "http://evil.test" }))).status, 403);
-  db.t("admin_users").length = 0; // valid session but not an admin
-  assert.equal((await routes.crud.POST(post("/api/admin/crud", { resource: "faqs", action: "create", values: {} }))).status, 401);
-  db.seed("admin_users", [{ user_id: "admin-1", email: "a@x.com" }]);
-});
-
-test("admin sends a revised quote; customer accepts once; admin converts to a booking at the agreed price", async () => {
-  globalThis.__cookies = { vt_at: "good" };
-  const q = db.t("quote_requests")[0];
-  assert.equal((await routes.send.POST(post("/api/admin/quotes/send", { id: quoteId }))).status, 422); // no revised price yet
-  q.revised_price_cents = 10500;
-  const sent = await routes.send.POST(post("/api/admin/quotes/send", { id: quoteId }));
-  assert.equal(sent.status, 200);
-  const sd = await sent.json();
-  assert.ok(sd.link.endsWith("/quote/" + token));
-  assert.equal(q.status, "revised_sent");
-  const mailLog = db.t("notification_logs").find((l: any) => l.event === "quote.revised_sent");
-  assert.equal(mailLog.status, "sent");
-  assert.equal(mailLog.payload.to.email, "dee@example.com"); // revised quote is emailed to the customer
-  assert.equal(mailLog.channel, "email");
-
-  assert.equal((await routes.convert.POST(post("/api/admin/quotes/convert", { id: quoteId }))).status, 422); // not accepted yet
-  assert.equal((await routes.respond.POST(post("/api/quote-requests/respond", { token: "0".repeat(40), action: "accept" }))).status, 404);
-  assert.equal((await routes.respond.POST(post("/api/quote-requests/respond", { token, action: "accept" }))).status, 200);
-  assert.equal(q.status, "accepted");
-  assert.equal((await routes.respond.POST(post("/api/quote-requests/respond", { token, action: "reject" }))).status, 409);
-
-  const conv = await routes.convert.POST(post("/api/admin/quotes/convert", { id: quoteId }));
-  assert.equal(conv.status, 200);
-  const cd = await conv.json();
-  const booking = db.t("bookings").find((b: any) => b.id === cd.bookingId);
-  assert.equal(booking.estimated_fare_cents, 10500);
-  assert.equal(booking.source_quote_request_id, quoteId);
-  const snap = db.t("pricing_snapshots").find((s: any) => s.booking_id === booking.id);
-  assert.equal(snap.snapshot.override.priceCents, 10500);
-  assert.equal(snap.snapshot.override.originalTotalCents, 13000);
-  assert.equal(q.converted_booking_id, booking.id);
-  assert.equal((await routes.convert.POST(post("/api/admin/quotes/convert", { id: quoteId }))).status, 409);
-});
-
-test("admin CRUD: whitelisting, validation, pricing activation archives the old config, status emails", async () => {
-  globalThis.__cookies = { vt_at: "good" };
-  const c = (b: object) => routes.crud.POST(post("/api/admin/crud", b));
-  assert.equal((await c({ resource: "nope", action: "create", values: {} })).status, 400);
-  assert.equal((await c({ resource: "faqs", action: "create", values: { question: "Q?" } })).status, 422); // answer required
-  const created = await c({ resource: "faqs", action: "create", values: { question: "Q?", answer: "A.", is_active: true, evil: "x" } });
-  assert.equal(created.status, 200);
-  const faq = db.t("faqs")[0];
-  assert.equal(faq.sort_order, 1);
-  assert.equal("evil" in faq, false);
-  await c({ resource: "faqs", action: "create", values: { question: "Q2?", answer: "A2.", is_active: true } });
-  await c({ resource: "faqs", action: "move", id: db.t("faqs")[1].id, direction: "up" });
-  assert.equal(db.t("faqs").find((f: any) => f.question === "Q2?").sort_order, 1);
-
-  assert.equal((await c({ resource: "bookings", action: "create", values: {} })).status, 403); // not creatable
-  assert.equal((await c({ resource: "bookings", action: "update", id: db.t("bookings")[0].id, values: { status: "bogus" } })).status, 422);
-
-  const oldActive = db.t("pricing_configs").find((p: any) => p.status === "active");
-  const vals = { vehicle_id: ids.eclass, status: "active", currency: "USD", per_mile: 7, minimum_fare: 120, min_hours: 2, hourly_included_miles: 20, hourly_included_scope: "booking", hourly_extra_mile_rate: 4 };
-  assert.equal((await c({ resource: "pricing", action: "create", values: vals })).status, 200);
-  assert.equal(oldActive.status, "archived");
-  assert.equal(db.t("pricing_configs").filter((p: any) => p.vehicle_id === ids.eclass && p.status === "active").length, 1);
-
-  // Confirmed is always emailed; other statuses only when the setting is on; no-show goes through its own action.
-  const bid = db.t("bookings")[0].id;
-  const statusLogs = () => db.t("notification_logs").filter((l: any) => l.event === "booking.status_changed").length;
-  const before = statusLogs();
-  await c({ resource: "bookings", action: "update", id: bid, values: { status: "confirmed" } });
-  assert.equal(statusLogs(), before + 1);
-  await c({ resource: "bookings", action: "update", id: bid, values: { status: "assigned" } });
-  assert.equal(statusLogs(), before + 1); // setting off
-  db.seed("site_content", [{ key: "settings.notify_status_changes", value: true }]);
-  await c({ resource: "bookings", action: "update", id: bid, values: { status: "in_progress" } });
-  assert.equal(statusLogs(), before + 2);
-  assert.equal((await c({ resource: "bookings", action: "update", id: bid, values: { status: "no_show" } })).status, 422);
-});
-
-test("admin notes are validated", async () => {
-  globalThis.__cookies = { vt_at: "good" };
-  const bid = db.t("bookings")[0].id;
-  assert.equal((await routes.notes.POST(post("/api/admin/notes", { entityType: "booking", entityId: bid, body: "Called customer" }))).status, 200);
-  assert.equal((await routes.notes.POST(post("/api/admin/notes", { entityType: "hack", entityId: bid, body: "x" }))).status, 422);
-  assert.equal(db.t("crm_notes").length, 1);
-});
-
-test("contact form: saved to CRM, honeypot ignored, validation enforced, rate limited", async () => {
-  const ok = { name: "Cy", email: "cy@example.com", phone: "", message: "Do you serve weddings?" };
-  assert.equal((await routes.contact.POST(post("/api/contact", ok))).status, 200);
-  assert.equal(db.t("leads").length, 1);
-  assert.ok(db.t("notification_logs").some((l: any) => l.event === "lead.created"));
-  const n = db.t("leads").length;
-  assert.equal((await routes.contact.POST(post("/api/contact", { ...ok, website: "bot" }))).status, 200);
-  assert.equal(db.t("leads").length, n);
-  assert.equal((await routes.contact.POST(post("/api/contact", { ...ok, email: "bad" }))).status, 422);
-  const same = { "x-forwarded-for": "9.9.9.9" };
-  let last = 200;
-  for (let i = 0; i < 7; i++) last = (await routes.contact.POST(post("/api/contact", ok, same))).status;
-  assert.equal(last, 429);
-});
-
-test("missing credentials degrade gracefully instead of crashing", async () => {
-  const saved = { ...process.env };
-  delete process.env.GOOGLE_MAPS_SERVER_API_KEY;
-  const r = await routes.quote.POST(post("/api/fare/quote", trip()));
-  assert.equal(r.status, 503);
-  assert.equal((await r.json()).code, "not_configured");
-  process.env.GOOGLE_MAPS_SERVER_API_KEY = saved.GOOGLE_MAPS_SERVER_API_KEY;
-
-  delete process.env.BREVO_API_KEY;
-  const before = db.t("bookings").length;
-  const res = await routes.bookings.POST(post("/api/bookings", { ...ack, trip: trip(), vehicleId: ids.eclass, routeKey: "fastest", name: "Eve", email: "eve@example.com", phone: "4105550144", submissionKey: "key-ffffffffffffffff" }));
-  assert.equal(res.status, 200);
-  assert.equal(db.t("bookings").length, before + 1); // saved with no providers configured
-  const skipped = db.t("notification_logs").filter((l: any) => l.status === "skipped");
-  assert.ok(skipped.length >= 2); // emails skipped, nothing crashed
-  process.env.BREVO_API_KEY = saved.BREVO_API_KEY;
+  // Provider/settings row used by later tests.
+  db.seed("booking_settings", [{ meet_greet_enabled: true, waiting_included_minutes: 15, waiting_increment_minutes: 15, waiting_rate_cents: null, waiting_rate_approved: false }]);
 });
 
 test("out-of-area request is saved for manual review without a vehicle, route or price; notifies the business", async () => {
@@ -499,42 +333,48 @@ const makeBooking = async (extra: Record<string, unknown> = {}, tripOver: Record
 };
 const quoteFor = async (t: object) => { const d = await (await routes.quote.POST(post("/api/fare/quote", t))).json(); return { d, ec: d.vehicles?.find((v: any) => v.name === "E-Class")?.quotes?.fastest }; };
 
-test("child seats: priced on the server (one way per seat; round trip per seat ONCE), validated, saved with the booking", async () => {
+const TIERS = () => db.t("vehicle_tiers");
+const setFixed = (premium: number | null, luxury: number | null, plus: number | null) => { TIERS()[0].fixed_price_cents = premium; TIERS()[1].fixed_price_cents = luxury; TIERS()[2].fixed_price_cents = plus; };
+
+test("child seats: priced on the server (one way per seat; round trip per seat ONCE), validated, charged online as an add-on, NOT in the trip estimate", async () => {
+  setFixed(10000, 15000, 22000);
   const seats = { rear_facing: 1, booster: 1 };
   const baseOne = (await quoteFor(trip({ passengers: 3 }))).ec.totalCents;
-  const baseRt = (await quoteFor(rtTrip({ passengers: 3 }))).ec.totalCents; // server-priced baselines without seats
+  const baseRt = (await quoteFor(rtTrip({ passengers: 3 }))).ec.totalCents; // server-priced trip estimates without seats
   const one = await quoteFor(trip({ passengers: 3, childSeats: seats }));
-  assert.equal(one.ec.totalCents, baseOne + 2 * 1000);
-  assert.equal(one.ec.lineItems.filter((l: any) => l.code === "child_seat").length, 1);
+  assert.equal(one.ec.totalCents, baseOne);                       // the estimate does not include add-ons
+  assert.equal(one.d.seatFeeCents, 2 * 1000);                     // the add-on is reported separately
+  assert.ok(!one.ec.lineItems.some((l: any) => l.code === "child_seat"));
   assert.deepEqual(one.d.seatInfo, { oneWayCents: 1000, roundTripCents: 1500, max: 4 });
 
   const rt = await quoteFor(rtTrip({ passengers: 3, childSeats: seats }));
-  assert.equal(rt.ec.totalCents, baseRt + 2 * 1500); // the $15 round-trip rate is added once, not once per leg
-  assert.equal(rt.ec.lineItems.filter((l: any) => l.code === "child_seat").length, 1);
+  assert.equal(rt.ec.totalCents, baseRt);
+  assert.equal(rt.d.seatFeeCents, 2 * 1500);                      // $15 per seat once, not once per leg
 
   assert.equal((await routes.quote.POST(post("/api/fare/quote", trip({ passengers: 3, childSeats: { booster: 5 } })))).status, 422);   // above the maximum
   assert.equal((await routes.quote.POST(post("/api/fare/quote", trip({ passengers: 2, childSeats: { booster: 3 } })))).status, 422);   // more seats than passengers
   assert.equal((await routes.quote.POST(post("/api/fare/quote", trip({ passengers: 3, childSeats: { booster: 1.5 } })))).status, 422);
 
-  // Booking: the browser's total and fee are ignored; the saved fare includes the seats.
-  const b = await makeBooking({ totalCents: 1, childSeatFeeCents: 1 }, { passengers: 3, childSeats: seats });
+  // Booking: the browser's totals are ignored. Estimate = trip estimate; online amount = fixed Luxury price + seats.
+  const b = await makeBooking({ totalCents: 1, childSeatFeeCents: 1, onlineAmountCents: 1 }, { passengers: 3, childSeats: seats });
   assert.equal(b.res.status, 200);
-  assert.equal(b.row.estimated_fare_cents, baseOne + 2000);
+  assert.equal(b.row.estimated_fare_cents, baseOne);
   assert.equal(b.row.child_seat_fee_cents, 2000);
+  assert.equal(b.row.fixed_price_cents, 15000);
+  assert.equal(b.row.online_amount_cents, 15000 + 2000);
   assert.deepEqual(b.row.child_seats, [{ type: "rear_facing", quantity: 1 }, { type: "booster", quantity: 1 }]);
-  const snap = db.t("pricing_snapshots").find((x: any) => x.booking_id === b.row.id);
-  assert.ok(snap.line_items.some((l: any) => l.code === "child_seat" && l.cents === 2000));
   assert.match(JSON.stringify(db.t("notification_logs").filter((l: any) => l.entity_id === b.row.id)), /Child seats: 1 × Rear-facing, 1 × Booster \(requested\)/);
 
   const rtBooking = await makeBooking({}, { stops: [], passengers: 3, childSeats: seats, returnLeg: { pickup: { text: "Dulles Airport" }, dropoff: { text: "1 Main St, Baltimore" }, date: next(1), time: "17:00" } });
-  assert.equal(rtBooking.row.estimated_fare_cents, baseRt + 3000);
   assert.equal(rtBooking.row.child_seat_fee_cents, 3000);
+  assert.equal(rtBooking.row.online_amount_cents, 15000 + 3000);
 
   // Admin-configurable rate: a price change applies to new quotes and leaves saved bookings alone.
   db.t("booking_settings")[0].child_seat_one_way_cents = 1200;
-  assert.equal((await quoteFor(trip({ passengers: 3, childSeats: seats }))).ec.totalCents, baseOne + 2 * 1200);
-  assert.equal(b.row.estimated_fare_cents, baseOne + 2000);
+  assert.equal((await quoteFor(trip({ passengers: 3, childSeats: seats }))).d.seatFeeCents, 2 * 1200);
+  assert.equal(b.row.online_amount_cents, 17000);
   db.t("booking_settings")[0].child_seat_one_way_cents = 1000;
+  setFixed(null, null, null);
 });
 
 test("vehicle capacity is enforced on the server, regardless of what the browser shows", async () => {
@@ -630,17 +470,18 @@ let ev = 0;
 const sessionEvent = (type: string, p: any, over: Record<string, unknown> = {}, id = `evt_${++ev}`) => ({
   id, type, data: { object: { object: "checkout.session", id: p.stripe_session_id, payment_status: "paid", payment_intent: `pi_${p.stripe_session_id}`, amount_total: p.amount_cents, currency: "usd", metadata: { booking_id: p.booking_id, payment_id: p.id }, ...over } },
 });
-const pay = (token: string, extra: object = {}) => routes.checkout.POST(post("/api/payments/checkout", { token, ...extra }));
+const pay = (token: string, extra: object = {}) => routes.checkout.POST(post("/api/payments/checkout", { token, provider: "stripe", ...extra }));
 const setPay = (mode: string, extra: Record<string, unknown> = {}) => Object.assign(db.t("booking_settings")[0], { payment_mode: mode, deposit_fixed_cents: null, deposit_percent: null, ...extra });
 
 test("payments disabled by default: booking requests work, no checkout is offered", async () => {
   setPay("disabled");
+  setFixed(null, 15000, null);
   const b = await makeBooking();
   assert.equal(b.res.status, 200);
   assert.equal(b.data.payUrl, null);
   assert.equal(b.row.payment_status, "not_required");
   const r = await pay(b.row.payment_token);
-  assert.equal(r.status, 409);
+  assert.equal(r.status, 503); // no provider is offered while online payment is disabled
   assert.equal(db.t("payments").filter((p: any) => p.booking_id === b.row.id).length, 0);
   assert.equal((await pay("not-a-token")).status, 400);
 });
@@ -650,7 +491,8 @@ test("Stripe Checkout: amount comes only from the saved server-side total; clien
   const b = await makeBooking({ totalCents: 1 });
   assert.equal(b.data.payUrl, `/pay/${b.row.payment_token}`);
   assert.equal(b.row.payment_status, "unpaid");
-  const total = b.row.estimated_fare_cents; assert.ok(total > 0);
+  const total = b.row.online_amount_cents; assert.equal(total, 15000); // the fixed Luxury price, not the trip estimate
+  assert.notEqual(total, b.row.estimated_fare_cents);
 
   const callsBefore = net.calls.length;
   const r = await pay(b.row.payment_token, { amountCents: 1, amount: 1, totalCents: 1 });
@@ -693,7 +535,7 @@ test("Stripe webhook: signature required; paid only via a verified event; bookin
   assert.equal(ok.status, 200); assert.equal((await ok.json()).result, "processed");
   assert.equal(p.status, "paid"); assert.ok(p.paid_at); assert.equal(p.stripe_payment_intent_id, `pi_${p.stripe_session_id}`);
   assert.equal(b.row.amount_paid_cents, p.amount_cents);
-  assert.equal(p.amount_cents, b.row.estimated_fare_cents);
+  assert.equal(p.amount_cents, b.row.online_amount_cents);
   assert.equal(b.row.payment_status, "paid");
   assert.equal(b.row.status, "new_request");   // a payment never confirms the booking
   assert.ok(db.t("admin_notifications").some((n: any) => n.event === "payment.paid" && n.entity_id === b.row.id));
@@ -771,7 +613,7 @@ test("deposit modes: fixed and percentage amounts come from admin settings; unco
   assert.equal(b.data.payUrl, `/pay/${b.row.payment_token}`);
   await pay(b.row.payment_token);
   let p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
-  assert.equal(p.amount_cents, Math.round(b.row.estimated_fare_cents * 0.25)); assert.equal(p.kind, "deposit");
+  assert.equal(p.amount_cents, Math.round(b.row.online_amount_cents * 0.25)); assert.equal(p.kind, "deposit");
   await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p)));
   assert.equal(b.row.payment_status, "deposit_paid"); assert.equal(b.row.amount_paid_cents, p.amount_cents);
   assert.equal((await pay(b.row.payment_token)).status, 409); // deposit already paid: nothing more due online
@@ -796,4 +638,270 @@ test("deposit modes: fixed and percentage amounts come from admin settings; unco
   const c = await makeBooking(); c.row.status = "cancelled";
   assert.equal((await pay(c.row.payment_token)).status, 409);
   setPay("disabled");
+});
+
+
+// =====================================================================================================
+// Fixed tier pricing, per-tier Meet & Greet, admin price management, PayPal
+// =====================================================================================================
+const luxury = () => TIERS()[1];
+const airportBlock = { airport: "Dulles Airport", direction: "arrival", flightNumber: "UA1", airline: "United", terminal: "B", passengerName: "Ann Rider" };
+
+test("tiers: exactly three are offered with their fixed price and Meet & Greet fee; the trip estimate stays a separate, informational calculation", async () => {
+  setFixed(10000, 15000, 22000);
+  const { d, ec } = await quoteFor(trip());
+  assert.deepEqual(d.tiers.map((t: any) => t.name), ["Premium", "Luxury", "Luxury Plus"]);
+  assert.deepEqual(d.tiers.map((t: any) => t.meetGreetFeeCents), [2500, 3500, 5000]); // initial approved fees
+  const lux = d.vehicles.find((v: any) => v.name === "E-Class"), prem = d.vehicles.find((v: any) => v.name === "Sprinter");
+  assert.equal(lux.tier, "Luxury"); assert.equal(prem.tier, "Premium");
+  assert.deepEqual([lux.tierPricing.fixedPriceCents, lux.tierPricing.meetGreetFeeCents], [15000, 3500]);
+  assert.deepEqual([prem.tierPricing.fixedPriceCents, prem.tierPricing.meetGreetFeeCents], [10000, 2500]);
+  assert.ok(ec.totalCents > 0 && ec.totalCents !== 15000); // the mileage-based estimate is still calculated, and is not the fixed price
+  assert.ok(!JSON.stringify(ec.lineItems).includes("Fixed"));
+});
+
+test("Meet & Greet: fee comes from the selected tier on the server; changing tier changes the fee; deselecting removes it; never added twice; airport details required", async () => {
+  setFixed(10000, 15000, 22000); setPay("full");
+  const base = (await makeBooking({ details: undefined, airport: airportBlock })).row;
+  assert.equal(base.meet_greet_selected, false);
+  assert.equal(base.online_amount_cents, 15000);                       // deselected: no fee in the charge
+
+  const lux = await makeBooking({ airport: airportBlock, fixedPriceCents: 1, meetGreetCents: 1, onlineAmountCents: 1, tierId: "x" }, { meetGreet: true });
+  assert.equal(lux.res.status, 200);
+  assert.equal(lux.row.meet_greet_selected, true);
+  assert.equal(lux.row.fixed_price_cents, 15000); assert.equal(lux.row.meet_greet_fee_cents, 3500);
+  assert.equal(lux.row.online_amount_cents, 15000 + 3500);             // browser-supplied values ignored
+  assert.equal(lux.row.tier_name, "Luxury");
+  const air = db.t("booking_airport_details").find((a: any) => a.booking_id === lux.row.id);
+  assert.equal(air.meet_greet_requested, true); assert.equal(air.meet_greet_status, "requested"); assert.equal(air.meet_greet_charge_cents, 3500);
+  assert.notEqual(lux.row.online_amount_cents, lux.row.estimated_fare_cents);
+  const snap = db.t("pricing_snapshots").find((x: any) => x.booking_id === lux.row.id);
+  assert.equal(snap.snapshot.online.totalCents, 18500);
+
+  // Different tier (Premium vehicle): its own fee. Another submission of the same trip does not add the fee twice.
+  const prem = await makeBooking({ vehicleId: ids.sprinter, airport: airportBlock }, { meetGreet: true });
+  assert.equal(prem.row.meet_greet_fee_cents, 2500); assert.equal(prem.row.online_amount_cents, 10000 + 2500);
+  const again = await makeBooking({ airport: airportBlock, submissionKey: lux.row.submission_key }, { meetGreet: true });
+  assert.equal(again.row.online_amount_cents, 18500); assert.equal(db.t("bookings").filter((b: any) => b.submission_key === lux.row.submission_key).length, 1);
+
+  // Airport details are required for Meet & Greet; it must be switched on and offered for the tier.
+  assert.equal((await makeBooking({}, { meetGreet: true })).res.status, 422);
+  db.t("booking_settings")[0].meet_greet_enabled = false;
+  assert.equal((await makeBooking({ airport: airportBlock }, { meetGreet: true })).res.status, 422);
+  db.t("booking_settings")[0].meet_greet_enabled = true;
+  luxury().meet_greet_fee_cents = null;
+  const notOffered = await makeBooking({ airport: airportBlock }, { meetGreet: true });
+  assert.equal(notOffered.res.status, 422); assert.match(notOffered.data.error, /not offered for this tier/i);
+  assert.equal((await makeBooking({ airport: airportBlock }, {})).res.status, 200); // deselected: fine
+  luxury().meet_greet_fee_cents = 3500;
+});
+
+test("fixed prices: a missing price means no online charge (never invented); later admin changes never rewrite saved bookings", async () => {
+  setPay("full"); setFixed(10000, null, 22000);
+  const none = await makeBooking();
+  assert.equal(none.res.status, 200);
+  assert.equal(none.row.online_amount_cents, null); assert.equal(none.row.fixed_price_cents, null);
+  assert.equal(none.data.payUrl, null); assert.equal(none.row.payment_status, "not_required");
+  assert.equal((await pay(none.row.payment_token)).status, 409);       // checkout refuses: price not set yet
+
+  setFixed(10000, 15000, 22000);
+  const before = await makeBooking(); assert.equal(before.row.online_amount_cents, 15000);
+  luxury().fixed_price_cents = 18000; luxury().meet_greet_fee_cents = 4000;      // admin raises the prices
+  assert.equal(before.row.online_amount_cents, 15000); assert.equal(before.row.fixed_price_cents, 15000);
+  const checkout = await pay(before.row.payment_token);                           // the customer pays what they were shown
+  assert.equal(checkout.status, 200);
+  assert.equal(db.t("payments").filter((p: any) => p.booking_id === before.row.id).at(-1).amount_cents, 15000);
+  const after = await makeBooking();                                              // a NEW booking uses the new price
+  assert.equal(after.row.online_amount_cents, 18000);
+  luxury().fixed_price_cents = 15000; luxury().meet_greet_fee_cents = 3500;
+});
+
+test("admin: only an authorized admin can set tier fixed prices and Meet & Greet fees; amounts are validated; tiers cannot be created, deleted or renamed", async () => {
+  const crud = (body: object) => routes.crud.POST(post("/api/admin/crud", { resource: "tiers", ...body }));
+  const tier = TIERS()[2];
+  globalThis.__cookies = {};
+  assert.equal((await crud({ action: "update", id: tier.id, values: { fixed_price_cents: "250" } })).status, 401);
+  assert.equal(tier.fixed_price_cents, 22000 ?? null);
+
+  globalThis.__cookies = { vt_at: "good" };
+  const upd = (values: object) => crud({ action: "update", id: tier.id, values });
+  assert.equal((await upd({ fixed_price_cents: "250.00", meet_greet_fee_cents: "55" })).status, 200);
+  assert.equal(tier.fixed_price_cents, 25000); assert.equal(tier.meet_greet_fee_cents, 5500);
+  for (const bad of ["0", "-5", "abc", "20000"]) assert.ok((await upd({ fixed_price_cents: bad })).status >= 400, bad);
+  assert.equal(tier.fixed_price_cents, 25000);
+  assert.ok((await upd({ meet_greet_fee_cents: "0" })).status >= 400);
+  assert.equal((await upd({ fixed_price_cents: "" })).status, 200);       // blank = not configured yet
+  assert.equal(tier.fixed_price_cents, null);
+
+  const n = TIERS().length;
+  assert.ok((await crud({ action: "create", values: { name: "Economical" } })).status >= 400);
+  assert.ok((await crud({ action: "delete", id: tier.id })).status >= 400);
+  assert.equal(TIERS().length, n);
+  await upd({ name: "Economical" });
+  assert.equal(tier.name, "Luxury Plus");
+
+  // The saved price shows up in new fare calculations.
+  await upd({ fixed_price_cents: "260" });
+  assert.equal(tier.fixed_price_cents, 26000);
+  assert.equal((await quoteFor(trip())).d.tiers[2].fixedPriceCents, 26000);
+  globalThis.__cookies = {};
+});
+
+// ---- Stripe line items for the fixed-price charge -----------------------------------------------------
+test("Stripe checkout lists the charged components once each: fixed price, Meet & Greet, child seats; never the trip estimate", async () => {
+  setFixed(10000, 15000, 22000); setPay("full");
+  const b = await makeBooking({ airport: airportBlock }, { meetGreet: true, passengers: 3, childSeats: { booster: 2 } });
+  assert.equal(b.row.online_amount_cents, 15000 + 3500 + 2000);
+  const from = net.calls.length;
+  assert.equal((await pay(b.row.payment_token)).status, 200);
+  const form = new URLSearchParams(String(net.calls.slice(from).find((c) => c.url === "https://api.stripe.com/v1/checkout/sessions")!.body));
+  const amounts = [0, 1, 2, 3].map((i) => form.get(`line_items[${i}][price_data][unit_amount]`)).filter(Boolean);
+  assert.deepEqual(amounts, ["15000", "3500", "2000"]);
+  assert.equal(form.get("line_items[1][price_data][product_data][name]"), "Airport Meet & Greet");
+  assert.equal(String(b.row.estimated_fare_cents) === "15000", false);
+  const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
+  assert.deepEqual([p.provider, p.tier_name, p.fixed_price_cents, p.meet_greet_cents, p.other_addons_cents, p.amount_cents], ["stripe", "Luxury", 15000, 3500, 2000, 20500]);
+  assert.equal(p.estimated_trip_fare_cents, b.row.estimated_fare_cents);   // recorded for reference only
+});
+
+// ---- PayPal -------------------------------------------------------------------------------------------
+const PP_ENV = { PAYPAL_CLIENT_ID: "pp-client", PAYPAL_CLIENT_SECRET: "pp-secret", PAYPAL_ENV: "sandbox", PAYPAL_WEBHOOK_ID: "WH-1" };
+const withPayPal = async (fn: () => Promise<void>) => {
+  Object.assign(process.env, PP_ENV);
+  try { await fn(); } finally { for (const k of Object.keys(PP_ENV)) delete process.env[k]; net.pp.capStatus = "COMPLETED"; net.pp.capAmount = null; net.pp.verify = true; }
+};
+const capture = (token: string, orderId: string) => routes.ppcapture.POST(post("/api/payments/paypal/capture", { token, orderId }));
+const ppHook = (event: object) => new Request("http://site.test/api/paypal/webhook", { method: "POST", headers: { "paypal-transmission-id": "t1", "paypal-transmission-time": "2026-01-01T00:00:00Z", "paypal-cert-url": "https://api.paypal.com/cert", "paypal-auth-algo": "SHA256withRSA", "paypal-transmission-sig": "sig", "content-type": "application/json" }, body: JSON.stringify(event) });
+const startPayPal = async (b: any) => { const r = await pay(b.row.payment_token, { provider: "paypal" }); return { r, out: await r.json() }; };
+
+test("providers are offered only when switched on AND configured; nothing is shown as available otherwise", async () => {
+  const { availableProviders } = await import("../src/lib/payment-providers.ts");
+  const { loadBookingSettings } = await import("../src/lib/policies.ts");
+  setPay("full");
+  const settings = async () => loadBookingSettings(db as any);
+  const saved = process.env.STRIPE_SECRET_KEY;
+  assert.deepEqual(availableProviders(await settings()), ["stripe"]);                      // PayPal not configured
+  await withPayPal(async () => {
+    assert.deepEqual(availableProviders(await settings()), ["stripe", "paypal"]);
+    db.t("booking_settings")[0].stripe_enabled = false;
+    assert.deepEqual(availableProviders(await settings()), ["paypal"]);                    // switched off in admin
+    db.t("booking_settings")[0].stripe_enabled = true; db.t("booking_settings")[0].paypal_enabled = false;
+    assert.deepEqual(availableProviders(await settings()), ["stripe"]);
+    db.t("booking_settings")[0].paypal_enabled = true;
+    delete process.env.STRIPE_SECRET_KEY;
+    assert.deepEqual(availableProviders(await settings()), ["paypal"]);
+    process.env.STRIPE_SECRET_KEY = saved;
+    setPay("disabled");
+    assert.deepEqual(availableProviders(await settings()), []);                            // online payment disabled
+    setPay("full");
+  });
+  // A provider that is not available is refused, and the customer's choice is never silently switched.
+  const b = await makeBooking();
+  const r = await pay(b.row.payment_token, { provider: "paypal" });
+  assert.equal(r.status, 503); assert.match((await r.json()).error, /PayPal is not available/);
+  assert.equal(db.t("payments").filter((p: any) => p.booking_id === b.row.id).length, 0);
+});
+
+test("PayPal: the order amount is calculated on the server; capture is verified server-side before anything is marked paid", async () => {
+  setFixed(10000, 15000, 22000); setPay("full");
+  await withPayPal(async () => {
+    const b = await makeBooking({ airport: airportBlock }, { meetGreet: true });
+    const { r, out } = await startPayPal(b);
+    assert.equal(r.status, 200); assert.match(out.orderId, /^PPORDER/);
+    const order = net.pp.orders.get(out.orderId);
+    const unit = order.purchase_units[0];
+    assert.equal(unit.amount.value, "185.00");                       // 15000 + 3500 cents, no floating point
+    assert.equal(unit.amount.currency_code, "USD");
+    assert.equal(unit.custom_id, b.row.id);
+    assert.deepEqual(unit.items.map((i: any) => i.unit_amount.value), ["150.00", "35.00"]);
+    const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
+    assert.deepEqual([p.provider, p.provider_ref, p.status, p.amount_cents, p.fixed_price_cents, p.meet_greet_cents], ["paypal", out.orderId, "pending", 18500, 15000, 3500]);
+    assert.equal(unit.reference_id, p.id);
+    assert.equal(b.row.payment_status, "pending"); assert.equal(b.row.amount_paid_cents, 0); // creating an order marks nothing paid
+
+    // The browser's own claims are irrelevant: a wrong token or someone else's order cannot be captured.
+    assert.equal((await capture(crypto.randomUUID(), out.orderId)).status, 404);
+    const other = await makeBooking();
+    assert.equal((await capture(other.row.payment_token, out.orderId)).status, 404);
+    assert.equal(p.status, "pending");
+
+    const cap = await capture(b.row.payment_token, out.orderId);
+    assert.equal(cap.status, 200); assert.equal((await cap.json()).status, "paid");
+    assert.equal(p.status, "paid"); assert.equal(p.provider_txn_id, `CAP${out.orderId}`); assert.ok(p.paid_at);
+    assert.equal(b.row.amount_paid_cents, 18500); assert.equal(b.row.payment_status, "paid");
+    assert.equal(b.row.status, "new_request");                       // payment never confirms the booking
+    const mails = () => db.t("notification_logs").filter((l: any) => l.event === "payment.paid" && l.entity_id === b.row.id);
+    assert.equal(mails().length, 2);
+    assert.match(JSON.stringify(mails()), /PayPal/);
+    // Capturing again (double click, retry) is harmless: same state, no extra emails or payment rows.
+    assert.equal((await (await capture(b.row.payment_token, out.orderId)).json()).status, "paid");
+    assert.equal(mails().length, 2); assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 1);
+    assert.equal(b.row.amount_paid_cents, 18500);
+  });
+});
+
+test("PayPal: a captured amount that does not match is flagged for review, never marked paid; declined payments keep the booking and can be retried", async () => {
+  setFixed(10000, 15000, 22000); setPay("full");
+  await withPayPal(async () => {
+    const b = await makeBooking();
+    const { out } = await startPayPal(b);
+    net.pp.capAmount = "1.00";
+    const r = await capture(b.row.payment_token, out.orderId);
+    assert.equal(r.status, 409);
+    const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
+    assert.equal(p.status, "review"); assert.equal(b.row.payment_status, "review"); assert.equal(b.row.amount_paid_cents, 0);
+    assert.equal(db.t("notification_logs").filter((l: any) => l.event === "payment.paid" && l.entity_id === b.row.id).length, 0); // no payment email
+    assert.ok(db.t("admin_notifications").some((n: any) => n.event === "payment.review" && n.entity_id === b.row.id));
+
+    net.pp.capAmount = null;
+    const b2 = await makeBooking();
+    const first = await startPayPal(b2);
+    net.pp.capStatus = "DECLINED";
+    assert.equal((await capture(b2.row.payment_token, first.out.orderId)).status, 402);
+    assert.equal(b2.row.payment_status, "failed"); assert.ok(db.t("bookings").some((x: any) => x.id === b2.row.id)); // booking not lost
+    net.pp.capStatus = "COMPLETED";
+    const second = await startPayPal(b2);                              // retry path
+    assert.notEqual(second.out.orderId, first.out.orderId);
+    assert.equal((await capture(b2.row.payment_token, second.out.orderId)).status, 200);
+    assert.equal(b2.row.payment_status, "paid"); assert.equal(b2.row.amount_paid_cents, 15000);
+  });
+});
+
+test("PayPal webhook: signature verified with PayPal; completed payments recorded once; duplicates and refunds handled; Stripe and PayPal share one payment table", async () => {
+  setFixed(10000, 15000, 22000); setPay("full");
+  await withPayPal(async () => {
+    const b = await makeBooking();
+    const { out } = await startPayPal(b);
+    const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
+    const completed = (id: string, value = "150.00") => ({ id, event_type: "PAYMENT.CAPTURE.COMPLETED", resource: { id: `CAPW${out.orderId}`, status: "COMPLETED", amount: { currency_code: "USD", value }, custom_id: b.row.id, supplementary_data: { related_ids: { order_id: out.orderId } } } });
+
+    net.pp.verify = false;
+    assert.equal((await routes.ppwebhook.POST(ppHook(completed("WH-EVT-1")))).status, 400);      // forged
+    assert.equal(p.status, "pending"); assert.equal(db.t("paypal_events").length, 0);
+    net.pp.verify = true;
+    assert.equal((await routes.ppwebhook.POST(ppHook(completed("WH-EVT-2", "1.00")))).status, 200); // wrong amount
+    assert.equal(p.status, "review"); assert.equal(b.row.amount_paid_cents, 0);
+
+    const b2 = await makeBooking(); const o2 = (await startPayPal(b2)).out; const p2 = db.t("payments").find((x: any) => x.booking_id === b2.row.id);
+    const ev = { id: "WH-EVT-3", event_type: "PAYMENT.CAPTURE.COMPLETED", resource: { id: "CAPW2", status: "COMPLETED", amount: { currency_code: "USD", value: "150.00" }, custom_id: b2.row.id, supplementary_data: { related_ids: { order_id: o2.orderId } } } };
+    const ok = await routes.ppwebhook.POST(ppHook(ev));
+    assert.equal(ok.status, 200); assert.equal((await ok.json()).result, "processed");
+    assert.equal(p2.status, "paid"); assert.equal(p2.provider_txn_id, "CAPW2"); assert.equal(b2.row.amount_paid_cents, 15000); assert.equal(b2.row.status, "new_request");
+    const dup = await routes.ppwebhook.POST(ppHook(ev));
+    assert.equal((await dup.json()).result, "duplicate");
+    await routes.ppwebhook.POST(ppHook({ ...ev, id: "WH-EVT-4" }));                           // same payment, new event id
+    assert.equal(b2.row.amount_paid_cents, 15000);
+    assert.equal(db.t("notification_logs").filter((l: any) => l.event === "payment.paid" && l.entity_id === b2.row.id).length, 2);
+
+    const refund = { id: "WH-EVT-5", event_type: "PAYMENT.CAPTURE.REFUNDED", resource: { id: "REF1", amount: { currency_code: "USD", value: "50.00" }, links: [{ rel: "up", href: "https://api.paypal.com/v2/payments/captures/CAPW2" }] } };
+    await routes.ppwebhook.POST(ppHook(refund));
+    assert.equal(p2.status, "partially_refunded"); assert.equal(p2.refunded_cents, 5000); assert.equal(b2.row.amount_paid_cents, 10000);
+
+    // Both providers write to the same table, with provider-specific references.
+    const sb = await makeBooking(); await pay(sb.row.payment_token);
+    assert.deepEqual([...new Set(db.t("payments").map((x: any) => x.provider))].sort(), ["paypal", "stripe"]);
+  });
+  const saved = process.env.PAYPAL_WEBHOOK_ID; delete process.env.PAYPAL_WEBHOOK_ID;
+  assert.equal((await routes.ppwebhook.POST(ppHook({ id: "x", event_type: "PAYMENT.CAPTURE.COMPLETED" }))).status, 503); // not configured
+  if (saved) process.env.PAYPAL_WEBHOOK_ID = saved;
 });

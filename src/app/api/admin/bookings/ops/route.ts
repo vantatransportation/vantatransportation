@@ -77,9 +77,8 @@ export async function POST(request: Request) {
     case "meet_greet": {
       const st = ["requested", "confirmed", "declined"].includes(String(body.status)) ? String(body.status) : null;
       if (!st) return json({ error: "Choose a status." }, 422);
-      const charge = cents(body.chargeDollars);
-      if (charge === "bad") return json({ error: "Enter a valid charge amount or leave it blank." }, 422);
-      const upd = await g.db.from("booking_airport_details").update({ meet_greet_status: st, ...(charge !== null ? { meet_greet_charge_cents: charge } : {}) }).eq("booking_id", id).eq("meet_greet_requested", true);
+      // The Meet & Greet fee is the tier fee frozen when the customer requested it; staff change only the status here.
+      const upd = await g.db.from("booking_airport_details").update({ meet_greet_status: st }).eq("booking_id", id).eq("meet_greet_requested", true);
       if (upd.error) return json({ error: "Could not save." }, 500);
       await log("booking.meet_greet", { status: st });
       return json({ ok: true });

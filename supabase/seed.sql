@@ -4,8 +4,9 @@
 -- pricing config to "active".
 
 insert into public.vehicle_tiers (name, slug, description, sort_order) values
-  ('Business Class', 'business-class', 'Comfortable luxury vehicles for business and everyday travel.', 1),
-  ('First Class', 'first-class', 'Premium vehicles and the full chauffeur experience.', 2);
+  ('Premium', 'premium', 'Comfortable luxury vehicles for business and everyday travel.', 1),
+  ('Luxury', 'luxury', 'Our luxury vehicles with the full chauffeur experience.', 2),
+  ('Luxury Plus', 'luxury-plus', 'Our highest service tier.', 3);
 
 insert into public.vehicle_categories (name, slug, description, capacity_label, image_url, sort_order) values
   ('Vans', 'vans', 'Group travel for larger parties, with room for everyone and their luggage.', '11–14 passengers', '/vehicles/van.svg', 1),
@@ -17,12 +18,12 @@ with c as (select id, slug from public.vehicle_categories), t as (select id, slu
 insert into public.vehicles (category_id, tier_id, name, slug, similar_models, description, features, passenger_capacity, luggage_capacity, image_url, sort_order)
 select (select id from c where c.slug = v.cat), (select id from t where t.slug = v.tier), v.name, v.slug, v.similar, v.descr, v.feats, v.pax, v.bags, v.img, v.ord
 from (values
-  ('vans','first-class','Mercedes-Benz Sprinter','mercedes-benz-sprinter','Similar models allowed','Premium van for larger groups.', array['Black exterior','Black leather interior'], 14, null::int, '/vehicles/van.svg', 1),
-  ('vans','business-class','Ford Transit','ford-transit','Similar models allowed','Spacious van for larger groups.', array['Black exterior','Black leather interior'], 14, null, '/vehicles/van.svg', 2),
-  ('large-suvs','business-class','Chevrolet Suburban','chevrolet-suburban','GMC Yukon XL, Ford Expedition or similar','Full-size SUV with generous space.', array['Black exterior','Black leather interior'], 8, null, '/vehicles/suv.svg', 3),
-  ('large-suvs','first-class','Cadillac Escalade ESV','cadillac-escalade-esv','Lincoln Navigator L or similar','Luxury full-size SUV.', array['Black exterior','Black leather interior'], 8, null, '/vehicles/suv.svg', 4),
-  ('full-size-sedans','first-class','Mercedes-Benz S-Class','mercedes-benz-s-class','BMW 7 Series or similar','Flagship executive sedan.', array['Black exterior','Black leather interior'], 4, null, '/vehicles/sedan.svg', 5),
-  ('mid-size-sedans','business-class','Mercedes-Benz E-Class','mercedes-benz-e-class','BMW 5 Series or similar','Refined mid-size sedan.', array['Black exterior','Black leather interior'], 4, null, '/vehicles/sedan.svg', 6)
+  ('vans','luxury','Mercedes-Benz Sprinter','mercedes-benz-sprinter','Similar models allowed','Premium van for larger groups.', array['Black exterior','Black leather interior'], 14, null::int, '/vehicles/van.svg', 1),
+  ('vans','premium','Ford Transit','ford-transit','Similar models allowed','Spacious van for larger groups.', array['Black exterior','Black leather interior'], 14, null, '/vehicles/van.svg', 2),
+  ('large-suvs','premium','Chevrolet Suburban','chevrolet-suburban','GMC Yukon XL, Ford Expedition or similar','Full-size SUV with generous space.', array['Black exterior','Black leather interior'], 8, null, '/vehicles/suv.svg', 3),
+  ('large-suvs','luxury','Cadillac Escalade ESV','cadillac-escalade-esv','Lincoln Navigator L or similar','Luxury full-size SUV.', array['Black exterior','Black leather interior'], 8, null, '/vehicles/suv.svg', 4),
+  ('full-size-sedans','luxury','Mercedes-Benz S-Class','mercedes-benz-s-class','BMW 7 Series or similar','Flagship executive sedan.', array['Black exterior','Black leather interior'], 4, null, '/vehicles/sedan.svg', 5),
+  ('mid-size-sedans','premium','Mercedes-Benz E-Class','mercedes-benz-e-class','BMW 5 Series or similar','Refined mid-size sedan.', array['Black exterior','Black leather interior'], 4, null, '/vehicles/sedan.svg', 6)
 ) as v(cat, tier, name, slug, similar, descr, feats, pax, bags, img, ord);
 
 -- DRAFT pricing: second client reference table (per mile / hourly / minimum fare).
@@ -80,3 +81,8 @@ insert into public.site_content (key, label, group_name, value, is_placeholder) 
   ('pillars', 'Why choose us points', 'Home', '[{"title":"See the fare first","description":"Enter your trip and get an itemized estimate before you send a request."},{"title":"Room to negotiate","description":"If a quote does not suit your budget, tell us. We review every request personally."},{"title":"Fares by distance or by the hour","description":"Hourly bookings include a mileage allowance, and any extra miles are shown in your quote."}]', true),
   ('settings.notify_status_changes', 'Email customers on every booking status change', 'Settings', 'false', false)
 on conflict (key) do nothing;
+
+-- Business-approved initial Meet & Greet fees per tier. Fixed prices are NOT seeded: set them in Admin, Tier prices & fees.
+update public.vehicle_tiers set meet_greet_fee_cents = 2500 where slug = 'premium';
+update public.vehicle_tiers set meet_greet_fee_cents = 3500 where slug = 'luxury';
+update public.vehicle_tiers set meet_greet_fee_cents = 5000 where slug = 'luxury-plus';

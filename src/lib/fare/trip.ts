@@ -16,6 +16,8 @@ export interface Trip {
   returnLeg?: ReturnLeg | null;
   /** Requested child car seats (quantities per type). The fee is computed on the server. */
   childSeats: ChildSeats;
+  /** Optional paid airport Meet & Greet. Its fee is the selected tier's fee, looked up on the server. */
+  meetGreet: boolean;
 }
 
 export interface ReturnLeg { pickup: Place; dropoff: Place; date: string; time: string; pickupAtIso: string }
@@ -102,6 +104,6 @@ export function validateTrip(
   }
   return {
     ok: true,
-    trip: { pickup, dropoff, stops, date, time, pickupAtIso: when.toISOString(), tripType, hours, passengers, promoCode: promo || null, returnLeg, childSeats: seats.seats },
+    trip: { pickup, dropoff, stops, date, time, pickupAtIso: when.toISOString(), tripType, hours, passengers, promoCode: promo || null, returnLeg, childSeats: seats.seats, meetGreet: r.meetGreet === true },
   };
 }
