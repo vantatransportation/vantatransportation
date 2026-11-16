@@ -51,6 +51,16 @@ select id, email from auth.users where email = 'you@example.com';
 ```
 3. Sign in at `/admin/login`. Sessions use HttpOnly cookies, are re-validated against Supabase and `admin_users` on every request, and every admin API checks the same-origin header.
 
+**Sign-in messages (each failure now reports its own cause):**
+| Message | Meaning / fix |
+|---|---|
+| Incorrect email or password | Supabase rejected the credentials (also shown for an unknown email). Reset the password in Authentication, Users. |
+| Your password is correct, but this account is not authorized as an administrator | Login worked but there is no matching row in `admin_users`. Run the SQL above. If it reports `INSERT 0 0`, the email in `auth.users` did not match; check with `select id, email from auth.users;`. |
+| Email address has not been confirmed | Tick/confirm the user in Authentication, Users. |
+| Server configuration error / Database error while checking administrator access | `SUPABASE_SERVICE_ROLE_KEY` is missing, wrong, or is the anon key. Details are in the server log. |
+| Database is not set up: admin_users table is missing | Run the migrations in order. |
+| Sign-in service error | Check `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` (details in the server log). |
+
 ### 3. Google Maps
 Create a Google Cloud project with billing enabled and two keys:
 - **Server key** (`GOOGLE_MAPS_SERVER_API_KEY`): enable **Routes API** and **Places API (New)**. Restrict by API (and by IP if your host has fixed egress IPs).
