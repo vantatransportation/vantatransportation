@@ -504,6 +504,7 @@ test("Stripe Checkout: amount comes only from the saved server-side total; clien
   assert.equal(form.get("line_items[0][price_data][unit_amount]"), String(total));
   assert.equal(form.get("line_items[0][price_data][currency]"), "usd");
   assert.equal(form.get("metadata[booking_id]"), b.row.id);
+  assert.equal([...form.keys()].some((k) => k.startsWith("payment_method_types")), false); // Stripe no longer accepts this on Checkout Sessions
   assert.equal(form.get("customer_email"), "ann@example.com");
   assert.match(String(sc.headers["Idempotency-Key"]), /^pay-/);
   assert.equal(sc.headers.Authorization, "Bearer sk_test_x");
