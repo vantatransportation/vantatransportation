@@ -22,7 +22,7 @@ async function stripe(path: string, body: URLSearchParams, idempotencyKey?: stri
 export async function createCheckoutSession(i: CheckoutInput): Promise<CheckoutResult> {
   if (!stripeConfigured()) return { ok: false, error: "Online payment is not configured." };
   const b = new URLSearchParams({
-    mode: "payment", // Payment methods are chosen dynamically from the Stripe Dashboard settings (payment_method_types is no longer supported).
+    mode: "payment", "payment_method_types[0]": "card",
     success_url: i.successUrl, cancel_url: i.cancelUrl, client_reference_id: i.bookingId,
     "metadata[booking_id]": i.bookingId, "metadata[payment_id]": i.paymentId,
     "payment_intent_data[metadata][booking_id]": i.bookingId, "payment_intent_data[metadata][payment_id]": i.paymentId,

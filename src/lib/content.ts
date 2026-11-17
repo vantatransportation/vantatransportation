@@ -22,6 +22,8 @@ export const getSiteData = cache(async (): Promise<SiteData> => {
       db.from("promotions").select("*").order("created_at", { ascending: false }).limit(1),
     ]);
     if (cats.error || vehs.error || stds.error || faqs.error || content.error) {
+      // Do not hide this: the built-in defaults have no photos, so a failed query makes edits look "not saved".
+      console.error("[site] Supabase read failed; showing built-in defaults", { categories: cats.error?.message, vehicles: vehs.error?.message, standards: stds.error?.message, faqs: faqs.error?.message, content: content.error?.message });
       return defaultSiteData;
     }
 
@@ -50,7 +52,8 @@ export const getSiteData = cache(async (): Promise<SiteData> => {
       faqs: (faqs.data ?? []).map((f) => ({ id: f.id, question: f.question, answer: f.answer })),
       content: contentMap,
     };
-  } catch {
+  } catch (e) {
+    console.error("[site] Loading site data failed; showing built-in defaults", e);
     return defaultSiteData;
   }
 });

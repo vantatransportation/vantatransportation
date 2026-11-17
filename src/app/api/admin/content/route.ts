@@ -1,5 +1,6 @@
 import { json, readJson } from "@/lib/http";
 import { guard } from "@/lib/admin/guard";
+import { revalidateSite } from "@/lib/admin/revalidate";
 
 export const runtime = "nodejs";
 
@@ -24,8 +25,9 @@ export async function POST(request: Request) {
       return json({ error: "The value must keep the same kind as before." }, 422);
     }
   }
-  const upd = await g.db.from("site_content").update({ value: value as never, is_placeholder: false }).eq("key", key);
-  if (upd.error) return json({ error: "Could not save." }, 500);
+  const upd = await g.db.from("site_content").update({ value: value as never, is_placeholder: false }).eq("key", key).select("key");
+  if (upd.error || !upd.data?.length) { console.error("[admin/content]", upd.error); return json({ error: "Could not save." }, 500); }
+  revalidateSite();
   await g.db.from("activity_logs").insert({ actor_id: g.admin.id, action: "content.update", entity_type: "site_content", meta: { key } });
   return json({ ok: true });
 }

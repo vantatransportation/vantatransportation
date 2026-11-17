@@ -1,14 +1,19 @@
+"use client";
+
 import Image from "next/image";
+import { useState } from "react";
 import { hasRealPhoto, photoUrl } from "@/lib/vehicle-photo";
 
 /**
  * A vehicle's photograph, or a branded placeholder when no photo has been assigned yet.
  * The placeholder never shows an illustration of a different vehicle, so nothing is misrepresented.
+ * If the photo URL fails to load (deleted asset, blocked host), the placeholder is shown instead of a broken image.
  */
 export default function VehiclePhoto({ src, name, width = 800, height = 500, sizes, priority = false, className = "" }: {
   src: string | null | undefined; name: string; width?: number; height?: number; sizes?: string; priority?: boolean; className?: string;
 }) {
-  if (!hasRealPhoto(src)) {
+  const [failed, setFailed] = useState<string | null>(null); // the src that failed, so a NEW photo gets a fresh try
+  if (!hasRealPhoto(src) || failed === src) {
     return (
       <div className={`vphoto vphoto--placeholder ${className}`} style={{ aspectRatio: `${width} / ${height}` }} role="img" aria-label={`${name}: photo coming soon`}>
         <span className="vphoto__mark" aria-hidden="true">VANTA</span>
@@ -18,7 +23,7 @@ export default function VehiclePhoto({ src, name, width = 800, height = 500, siz
   }
   return (
     <div className={`vphoto ${className}`} style={{ aspectRatio: `${width} / ${height}` }}>
-      <Image src={photoUrl(src, width, height)} alt={`${name}`} width={width} height={height} sizes={sizes ?? "(max-width: 700px) 100vw, 400px"} priority={priority} loading={priority ? undefined : "lazy"} />
+      <Image src={photoUrl(src, width, height)} alt={`${name}`} width={width} height={height} sizes={sizes ?? "(max-width: 700px) 100vw, 400px"} priority={priority} loading={priority ? undefined : "lazy"} onError={() => setFailed(src)} />
     </div>
   );
 }

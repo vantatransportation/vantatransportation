@@ -461,6 +461,30 @@ test("Cloudinary: photo assignment persists url + public id; foreign URLs reject
   globalThis.__cookies = {};
 });
 
+test("Vehicle saves refresh the cached public site and never report success when no row was written", async () => {
+  globalThis.__cookies = { vt_at: "good" };
+  const crud = (id: string, values: object) => routes.crud.POST(post("/api/admin/crud", { resource: "vehicles", action: "update", id, values }));
+  const g = globalThis as unknown as { __revalidated?: number };
+  const eclass = db.t("vehicles")[0];
+
+  g.__revalidated = 0;
+  assert.equal((await crud(eclass.id, { description: "Fresh description" })).status, 200);
+  assert.equal(eclass.description, "Fresh description");
+  assert.equal(g.__revalidated, 1, "a successful vehicle save must invalidate the cached public pages");
+
+  g.__revalidated = 0;
+  const missing = await crud("00000000-0000-4000-8000-000000000000", { description: "x" });
+  assert.equal(missing.status, 404);
+  assert.equal(g.__revalidated, 0, "a failed save must not claim success or revalidate");
+
+  // A non-public table (bookings settings etc.) does not trigger a site refresh.
+  g.__revalidated = 0;
+  await routes.crud.POST(post("/api/admin/crud", { resource: "customers", action: "update", id: "00000000-0000-4000-8000-000000000000", values: { name: "x" } }));
+  assert.equal(g.__revalidated, 0);
+  eclass.description = null;
+  globalThis.__cookies = {};
+});
+
 // ---- Stripe ---------------------------------------------------------------------------------------
 const hook = (event: object, opts: { secret?: string; at?: number } = {}) => {
   const raw = JSON.stringify(event);
@@ -504,7 +528,6 @@ test("Stripe Checkout: amount comes only from the saved server-side total; clien
   assert.equal(form.get("line_items[0][price_data][unit_amount]"), String(total));
   assert.equal(form.get("line_items[0][price_data][currency]"), "usd");
   assert.equal(form.get("metadata[booking_id]"), b.row.id);
-  assert.equal([...form.keys()].some((k) => k.startsWith("payment_method_types")), false); // Stripe no longer accepts this on Checkout Sessions
   assert.equal(form.get("customer_email"), "ann@example.com");
   assert.match(String(sc.headers["Idempotency-Key"]), /^pay-/);
   assert.equal(sc.headers.Authorization, "Bearer sk_test_x");

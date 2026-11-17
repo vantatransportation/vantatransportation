@@ -4,6 +4,7 @@ import { resources } from "@/lib/admin/resources";
 import { coerceValues } from "@/lib/admin/coerce";
 import { notify } from "@/lib/notify";
 import { normalizePhotoFields, releaseAsset } from "@/lib/cloudinary";
+import { PUBLIC_TABLES, revalidateSite } from "@/lib/admin/revalidate";
 import { validateTierPricing } from "@/lib/tier-pricing";
 import { BUSINESS_TZ } from "@/lib/config";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -39,8 +40,12 @@ export async function POST(request: Request) {
   const id = typeof body.id === "string" && UUID_RE.test(body.id) ? body.id : null;
   const values = (body.values && typeof body.values === "object" ? body.values : {}) as Record<string, unknown>;
 
-  const log = (act: string, entityId: string | null) =>
-    db.from("activity_logs").insert({ actor_id: admin.id, action: `${resource.slug}.${act}`, entity_type: resource.table, entity_id: entityId, meta: {} });
+  const log = async (act: string, entityId: string | null) => {
+    const r = await db.from("activity_logs").insert({ actor_id: admin.id, action: `${resource.slug}.${act}`, entity_type: resource.table, entity_id: entityId, meta: {} });
+    if (r.error) console.error("[admin/crud] activity log failed", r.error);
+  };
+  /** Public pages are cached; refresh them as soon as a public table has really changed. */
+  const publish = () => { if (PUBLIC_TABLES.has(resource.table)) revalidateSite(); };
 
   if (action === "create") {
     if (!resource.canCreate) return json({ error: "Not allowed." }, 403);
@@ -55,6 +60,7 @@ export async function POST(request: Request) {
     const ins = await db.from(resource.table).insert(c.data).select("id").single();
     if (ins.error) return dbError(ins.error);
     await log("create", ins.data.id);
+    publish();
     return json({ ok: true, id: ins.data.id });
   }
 
@@ -73,9 +79,17 @@ export async function POST(request: Request) {
     if (resource.table === "pricing_configs" && c.data.status === "active") {
       await archiveOtherActive(db, String(c.data.vehicle_id ?? before.data.vehicle_id), id);
     }
-    const upd = await db.from(resource.table).update(c.data).eq("id", id);
+    // Ask the database to return the row it wrote. An update that matches no row (or is blocked) is NOT a success.
+    const upd = await db.from(resource.table).update(c.data).eq("id", id).select("*");
     if (upd.error) return dbError(upd.error);
+    const written = (upd.data ?? [])[0] as Record<string, unknown> | undefined;
+    if (!written) { console.error("[admin/crud] update matched no row", resource.table, id); return json({ error: "The change was not saved: the record could not be updated. Reload the page and try again." }, 409); }
+    if (resource.table === "vehicles" && "image_url" in c.data && (written.image_url ?? null) !== (c.data.image_url ?? null)) {
+      console.error("[admin/crud] vehicle image_url did not persist", id);
+      return json({ error: "The photo was not saved to the database. Please try again." }, 500);
+    }
     await log("update", id);
+    publish();
     // A replaced or removed photo is deleted from Cloudinary only when no other vehicle still uses it.
     if (resource.table === "vehicles" && "image_public_id" in c.data && before.data.image_public_id && before.data.image_public_id !== c.data.image_public_id) await releaseAsset(db, before.data.image_public_id);
 
@@ -106,6 +120,7 @@ export async function POST(request: Request) {
     if (del.error) return dbError(del.error);
     if (prior?.data?.image_public_id) await releaseAsset(db, prior.data.image_public_id);
     await log("delete", id);
+    publish();
     return json({ ok: true });
   }
 
@@ -119,7 +134,10 @@ export async function POST(request: Request) {
     const j = i + dir;
     if (i < 0 || j < 0 || j >= list.length) return json({ ok: true });
     [list[i], list[j]] = [list[j], list[i]];
-    await Promise.all(list.map((r, n) => (r.sort_order !== n + 1 ? db.from(resource.table).update({ sort_order: n + 1 }).eq("id", r.id) : null)));
+    const moved = await Promise.all(list.map((r, n) => (r.sort_order !== n + 1 ? db.from(resource.table).update({ sort_order: n + 1 }).eq("id", r.id) : null)));
+    const failed = moved.find((m) => m?.error);
+    if (failed?.error) return dbError(failed.error);
+    publish();
     return json({ ok: true });
   }
 

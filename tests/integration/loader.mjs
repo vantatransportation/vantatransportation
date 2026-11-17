@@ -12,7 +12,7 @@ export async function resolve(specifier, context, next) {
   if (specifier === "next/server") return { url: stub("next-server.mjs"), shortCircuit: true };
   if (specifier === "next/headers") return { url: stub("next-headers.mjs"), shortCircuit: true };
   if (specifier === "next/navigation") return { url: stub("next-navigation.mjs"), shortCircuit: true };
-  if (specifier === "next/cache") return { url: "data:text/javascript,export {}", shortCircuit: true };
+  if (specifier === "next/cache") return { url: "data:text/javascript,export const revalidatePath=()=>{globalThis.__revalidated=(globalThis.__revalidated||0)+1}", shortCircuit: true };
   if (specifier === "react") return { url: stub("react.mjs"), shortCircuit: true };
   if (specifier === "@supabase/supabase-js") return { url: stub("supabase.mjs"), shortCircuit: true };
   if (specifier.startsWith("@/")) {
