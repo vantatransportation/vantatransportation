@@ -3,7 +3,8 @@
  * phone numbers, passenger instructions and emergency contacts (staff open the admin record for those).
  */
 export type NotifyEvent =
-  | "booking.created" | "lead.created" | "quote.created" | "quote.responded" | "quote.revised_sent" | "booking.status_changed" | "payment.paid";
+  | "booking.created" | "lead.created" | "quote.created" | "quote.responded" | "quote.revised_sent" | "booking.status_changed" | "payment.paid"
+  | "booking.approved" | "booking.reassigned" | "booking.rejected" | "driver.assigned" | "driver.unassigned";
 
 export interface EmailMessage {
   audience: "business" | "customer";
@@ -25,6 +26,7 @@ export const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&
 const v = (d: Data, k: string) => d[k] ?? "";
 const pick = (d: Data, keys: string[]) => Object.fromEntries(keys.filter((k) => d[k]).map((k) => [k, d[k]!]));
 const customerTo = (d: Data) => (d._customerEmail ? { email: d._customerEmail, name: d._customerName } : undefined);
+const driverTo = (d: Data) => (d._driverEmail ? { email: d._driverEmail, name: d._driverName } : undefined);
 const STATUS_COPY: Record<string, { subject: string; intro: string }> = {
   confirmed: { subject: "Your Vanta booking is confirmed", intro: "Good news: your booking is now confirmed." },
   assigned: { subject: "A driver has been assigned to your booking", intro: "A driver or partner has been assigned to your booking." },
@@ -88,6 +90,55 @@ export function buildNotification(event: NotifyEvent, d: Data): BuiltNotificatio
           { audience: "business", subject: `Payment received ${v(d, "Reference")}`, heading: "Payment received", intro: "Stripe confirmed a payment. The booking is NOT confirmed automatically: review and confirm it as usual.", fields: pick(d, ["Reference", "Payment provider", "Amount paid", "Payment type", "Tier", "Fixed tier price", "Meet & Greet", "Child car seats", "Payment status"]), ctaLabel: "Open booking", ctaUrl: d._adminUrl },
           ...(d._customerEmail ? [{ audience: "customer" as const, to: customerTo(d), subject: `Payment received for ${v(d, "Reference")}`, heading: "We received your payment", intro: "Thank you. Your payment was received. Your booking is confirmed only when we confirm it with you directly.", fields: pick(d, ["Reference", "Amount paid", "Payment type", "Tier", "Fixed tier price", "Meet & Greet", "Child car seats"]) }] : []),
         ],
+      };
+    case "booking.approved": {
+      const ctaUrl = d._payUrl ?? d["Booking page"];
+      return {
+        admin: null,
+        emails: d._customerEmail ? [{
+          audience: "customer", to: customerTo(d), subject: `Your Vanta booking is approved (${v(d, "Reference")})`, heading: "Your booking is approved",
+          intro: d._payUrl ? "Good news: your booking has been approved and a driver has been assigned. You can now complete payment online using the secure link below." : "Good news: your booking has been approved and a driver has been assigned.",
+          fields: pick(d, ["Reference", "When", "Pickup", "Destination", "Driver", "Driver phone", "Vehicle plate", "Amount due online"]),
+          ...(ctaUrl ? { ctaLabel: d._payUrl ? "Pay online" : "View your booking", ctaUrl } : {}),
+        }] : [],
+      };
+    }
+    case "booking.reassigned":
+      return {
+        admin: null,
+        emails: d._customerEmail ? [{
+          audience: "customer", to: customerTo(d), subject: `Your driver has changed (${v(d, "Reference")})`, heading: "Your driver has changed",
+          intro: "A different driver has been assigned to your booking. Your pickup details have not changed.",
+          fields: pick(d, ["Reference", "When", "Pickup", "Destination", "Driver", "Driver phone", "Vehicle plate"]),
+        }] : [],
+      };
+    case "booking.rejected":
+      return {
+        admin: null,
+        emails: d._customerEmail ? [{
+          audience: "customer", to: customerTo(d), subject: `Update on your Vanta booking request (${v(d, "Reference")})`, heading: "We could not accept your booking request",
+          intro: "Unfortunately we are unable to accept this booking request. No payment is due for it.",
+          fields: pick(d, ["Reference", "When", "Pickup", "Destination", "Reason"]),
+        }] : [],
+      };
+    case "driver.assigned":
+      return {
+        admin: null,
+        emails: d._driverEmail ? [{
+          audience: "customer", to: driverTo(d), subject: `New trip assigned (${v(d, "Reference")})`, heading: "A trip has been assigned to you",
+          intro: "You have been assigned to the trip below. Open the booking record for any further details.",
+          fields: pick(d, ["Reference", "When", "Pickup", "Destination", "Passengers", "Luggage"]),
+          ...(d._driverUrl ? { ctaLabel: "Open driver page", ctaUrl: d._driverUrl } : {}),
+        }] : [],
+      };
+    case "driver.unassigned":
+      return {
+        admin: null,
+        emails: d._driverEmail ? [{
+          audience: "customer", to: driverTo(d), subject: `Trip no longer assigned to you (${v(d, "Reference")})`, heading: "A trip was removed from you",
+          intro: "You are no longer assigned to the trip below. No action is needed.",
+          fields: pick(d, ["Reference", "When"]),
+        }] : [],
       };
     case "booking.status_changed": {
       const copy = STATUS_COPY[d._status ?? ""] ?? { subject: `Your booking is now ${v(d, "Status")}`, intro: `The status of your booking is now: ${v(d, "Status")}.` };
