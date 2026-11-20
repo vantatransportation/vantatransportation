@@ -3,6 +3,9 @@ import { guard } from "@/lib/admin/guard";
 import { resources } from "@/lib/admin/resources";
 import { coerceValues } from "@/lib/admin/coerce";
 import { notify } from "@/lib/notify";
+import { EMAIL_RE, phoneDigits } from "@/lib/validation";
+import { validateRush, type RushWindow } from "@/lib/pricing/surcharge";
+import { canTransition, type BookingStatus } from "@/lib/booking-status";
 import { normalizePhotoFields, releaseAsset } from "@/lib/cloudinary";
 import { PUBLIC_TABLES, revalidateSite } from "@/lib/admin/revalidate";
 import { validateTierPricing } from "@/lib/tier-pricing";
@@ -26,6 +29,29 @@ async function archiveOtherActive(db: SupabaseClient, vehicleId: string, exceptI
   let q = db.from("pricing_configs").update({ status: "archived" }).eq("vehicle_id", vehicleId).eq("status", "active");
   if (exceptId) q = q.neq("id", exceptId);
   await q;
+}
+
+/** Server-side checks for tables whose fields need more than type coercion. Returns an error message or null; may normalise c.data. */
+function validateSpecial(table: string, data: Record<string, unknown>, before: Record<string, unknown> | null): string | null {
+  if (table === "drivers") {
+    if ("email" in data) {
+      const email = String(data.email ?? "").trim().toLowerCase();
+      if (!EMAIL_RE.test(email)) return "Enter a valid driver email address.";
+      data.email = email;
+    }
+    if ("phone" in data && data.phone && phoneDigits(String(data.phone)).length < 10) return "Enter a valid phone number or leave it blank.";
+  }
+  if (table === "booking_settings" && Object.keys(data).some((k) => k.startsWith("rush_"))) {
+    let windows: unknown = "rush_windows" in data ? data.rush_windows : before?.rush_windows;
+    if (typeof windows === "string") { try { windows = JSON.parse(windows); } catch { return "Rush-hour windows must be valid JSON, for example [{\"start\":\"08:00\",\"end\":\"10:00\"}]."; } }
+    if (windows == null) windows = [];
+    const cand = { enabled: ("rush_enabled" in data ? data.rush_enabled : before?.rush_enabled) !== false, percent: Number("rush_percent" in data ? data.rush_percent : before?.rush_percent ?? 5), windows: windows as RushWindow[], timeZone: String(("rush_timezone" in data ? data.rush_timezone : before?.rush_timezone) || "America/New_York") };
+    const bad = validateRush(cand);
+    if (bad) return bad;
+    if ("rush_windows" in data) data.rush_windows = cand.windows;
+    if ("rush_timezone" in data) data.rush_timezone = cand.timeZone;
+  }
+  return null;
 }
 
 export async function POST(request: Request) {
@@ -55,6 +81,7 @@ export async function POST(request: Request) {
       const last = await db.from(resource.table).select("sort_order").order("sort_order", { ascending: false }).limit(1).maybeSingle();
       c.data.sort_order = ((last.data?.sort_order as number | undefined) ?? 0) + 1;
     }
+    { const bad = validateSpecial(resource.table, c.data, null); if (bad) return json({ error: bad }, 422); }
     if (resource.table === "vehicles") { const bad = normalizePhotoFields(c.data); if (bad) return json({ error: bad }, 422); }
     if (resource.table === "pricing_configs" && c.data.status === "active") await archiveOtherActive(db, String(c.data.vehicle_id));
     const ins = await db.from(resource.table).insert(c.data).select("id").single();
@@ -73,8 +100,18 @@ export async function POST(request: Request) {
     if (resource.table === "bookings" && c.data.status === "no_show") return json({ error: "Use the Mark as no-show action on the booking page. It records the reason and charges." }, 422);
     const before = await db.from(resource.table).select("*").eq("id", id).maybeSingle();
     if (!before.data) return json({ error: "Not found." }, 404);
+    { const bad = validateSpecial(resource.table, c.data, before.data); if (bad) return json({ error: bad }, 422); }
     if (resource.table === "vehicles") { const bad = normalizePhotoFields(c.data, before.data); if (bad) return json({ error: bad }, 422); }
     if (resource.table === "vehicle_tiers") { const bad = validateTierPricing(c.data); if (bad) return json({ error: bad }, 422); }
+    if (resource.table === "bookings" && typeof c.data.status === "string" && c.data.status !== before.data.status) {
+      // Approval, driver assignment, rejection and cancellation have dedicated checked operations (they release payment, record who
+      // acted and notify people). Free-form status edits can only make ordinary, valid progress steps.
+      const to = c.data.status as BookingStatus, from = before.data.status as BookingStatus;
+      if (["assigned", "rejected", "cancelled"].includes(to) || !canTransition("admin", from, to)) {
+        return json({ error: "That status change is not allowed here. Use Approve & assign, Decline or Cancel on the booking page; other changes must follow the ride workflow." }, 422);
+      }
+      await db.from("booking_status_history").insert({ booking_id: id, from_status: from, to_status: to, actor_type: "admin", actor_id: admin.id, note: "Status edited in Bookings" });
+    }
 
     if (resource.table === "pricing_configs" && c.data.status === "active") {
       await archiveOtherActive(db, String(c.data.vehicle_id ?? before.data.vehicle_id), id);

@@ -12,6 +12,8 @@ export interface BookingDetails {
   bookingFor: "self" | "other";
   passenger: PassengerInfo | null;
   luggageCount: number | null;
+  checkedBags: number | null;
+  carryOnBags: number | null;
   assistanceNotes: string | null;
   pickupInstructions: string | null;
   contacts: ContactInfo[];
@@ -43,6 +45,16 @@ export function validateBookingDetails(body: Record<string, unknown>): DetailsRe
     if (!Number.isFinite(n) || n < 0 || n > 50) fields.luggageCount = "Enter a number of bags between 0 and 50.";
     else luggageCount = n;
   }
+
+  const bagField = (v: unknown, key: string, label: string): number | null => {
+    if (v === undefined || v === null || v === "") return null;
+    const n = Number(v);
+    if (!Number.isInteger(n) || n < 0 || n > 50) { fields[key] = `Enter a whole number of ${label} between 0 and 50.`; return null; }
+    return n;
+  };
+  const checkedBags = bagField(body.checkedBags, "checkedBags", "checked bags");
+  const carryOnBags = bagField(body.carryOnBags, "carryOnBags", "carry-on bags");
+  if (luggageCount === null && (checkedBags !== null || carryOnBags !== null)) luggageCount = (checkedBags ?? 0) + (carryOnBags ?? 0);
 
   const contacts: ContactInfo[] = [];
   const rawContacts = Array.isArray(body.contacts) ? body.contacts.slice(0, 2) : [];
@@ -77,7 +89,7 @@ export function validateBookingDetails(body: Record<string, unknown>): DetailsRe
   return {
     ok: true,
     details: {
-      bookingFor, passenger, luggageCount, assistanceNotes: opt(body.assistanceNotes, 1000), pickupInstructions: opt(body.pickupInstructions, 1000),
+      bookingFor, passenger, luggageCount, checkedBags, carryOnBags, assistanceNotes: opt(body.assistanceNotes, 1000), pickupInstructions: opt(body.pickupInstructions, 1000),
       contacts, airport, policiesAcknowledged: true,
     },
   };

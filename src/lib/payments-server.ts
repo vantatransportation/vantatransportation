@@ -33,19 +33,20 @@ export async function chargeForBooking(db: SupabaseClient, b: Row): Promise<{ ok
     const mg = b.meet_greet_selected ? b.meet_greet_fee_cents : 0;
     if (b.meet_greet_selected && (mg == null || mg <= 0)) return { ok: false, error: "The Meet & Greet fee for this booking is missing. Please contact us." };
     const addons = b.child_seat_fee_cents ?? 0;
-    const total = b.fixed_price_cents + (mg ?? 0) + addons;
+    const rush = b.rush_surcharge_cents ?? 0, tip = b.tip_cents ?? 0;
+    const total = b.fixed_price_cents + rush + tip + (mg ?? 0) + addons;
     if (total !== b.online_amount_cents) return { ok: false, error: "The saved amount for this booking is inconsistent. Please contact us." };
-    return { ok: true, charge: { tierId: b.tier_id ?? null, tierName: b.tier_name ?? "", fixedPriceCents: b.fixed_price_cents, meetGreetCents: mg ?? 0, addonsCents: addons, totalCents: total } };
+    return { ok: true, charge: { tierId: b.tier_id ?? null, tierName: b.tier_name ?? "", fixedPriceCents: b.fixed_price_cents, meetGreetCents: mg ?? 0, addonsCents: addons, rushCents: rush, tipCents: tip, totalCents: total } };
   }
   if (!b.tier_id) return { ok: false, error: "Online payment is not available for this booking. We will arrange payment with you directly." };
   const { data: t } = await db.from("vehicle_tiers").select("id,name,fixed_price_cents,meet_greet_fee_cents").eq("id", b.tier_id).maybeSingle();
-  const r = onlineCharge(t ? { id: t.id, name: t.name, fixedPriceCents: t.fixed_price_cents ?? null, meetGreetFeeCents: t.meet_greet_fee_cents ?? null } : null, { meetGreet: Boolean(b.meet_greet_selected), addonsCents: b.child_seat_fee_cents ?? 0 });
+  const r = onlineCharge(t ? { id: t.id, name: t.name, fixedPriceCents: t.fixed_price_cents ?? null, meetGreetFeeCents: t.meet_greet_fee_cents ?? null } : null, { meetGreet: Boolean(b.meet_greet_selected), addonsCents: b.child_seat_fee_cents ?? 0, rushCents: b.rush_surcharge_cents ?? 0, tipCents: b.tip_cents ?? 0 });
   if (!r.ok) return { ok: false, error: r.reason === "price_not_set" ? "Online payment is not available for this booking yet." : CHARGE_REASON_TEXT[r.reason] };
   await db.from("bookings").update({ tier_name: r.charge.tierName, fixed_price_cents: r.charge.fixedPriceCents, meet_greet_fee_cents: b.meet_greet_selected ? r.charge.meetGreetCents : null, online_amount_cents: r.charge.totalCents }).eq("id", b.id);
   return r;
 }
 
-const BOOKING_COLUMNS = "id,reference,status,currency,estimated_fare_cents,amount_paid_cents,customer_id,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,child_seat_fee_cents,online_amount_cents";
+const BOOKING_COLUMNS = "id,reference,status,driver_id,approved_at,payment_released_at,rush_surcharge_cents,tip_cents,currency,estimated_fare_cents,amount_paid_cents,customer_id,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,child_seat_fee_cents,online_amount_cents";
 
 /**
  * Starts a payment with the chosen provider. The amount is recalculated here from the database; the only things the
@@ -55,6 +56,8 @@ export async function startCheckout(db: SupabaseClient, token: string, provider:
   const { data: b } = await db.from("bookings").select(BOOKING_COLUMNS).eq("payment_token", token).maybeSingle();
   if (!b) return { ok: false, status: 404, error: "We could not find that booking." };
   if (b.status === "cancelled" || b.status === "no_show") return { ok: false, status: 409, error: "This booking can no longer be paid online. Please contact us." };
+  // Approve-then-pay: no payment session exists until an admin has approved the booking AND assigned a driver.
+  if (!b.payment_released_at || !b.driver_id) return { ok: false, status: 409, error: "Your request is still being reviewed. We will email you a payment link once your booking is approved and a driver is assigned." };
   const settings = await loadBookingSettings(db);
   if (!availableProviders(settings).includes(provider)) {
     return { ok: false, status: 503, error: `${provider === "stripe" ? "Card payment" : "PayPal"} is not available right now. Please choose another way to pay, or contact us.` };
@@ -84,7 +87,7 @@ export async function startCheckout(db: SupabaseClient, token: string, provider:
   // Line items shown to the customer by the provider. A deposit is a single line.
   const full = plan.amountCents === charge.totalCents;
   const lines = full
-    ? [{ name: `Fixed ${charge.tierName} price (${b.reference})`, amountCents: charge.fixedPriceCents }, ...(charge.meetGreetCents > 0 ? [{ name: "Airport Meet & Greet", amountCents: charge.meetGreetCents }] : []), ...(charge.addonsCents > 0 ? [{ name: "Child car seats", amountCents: charge.addonsCents }] : [])]
+    ? [{ name: `Fixed ${charge.tierName} price (${b.reference})`, amountCents: charge.fixedPriceCents }, ...(charge.rushCents > 0 ? [{ name: "Rush-hour surcharge", amountCents: charge.rushCents }] : []), ...(charge.tipCents > 0 ? [{ name: "Driver tip", amountCents: charge.tipCents }] : []), ...(charge.meetGreetCents > 0 ? [{ name: "Airport Meet & Greet", amountCents: charge.meetGreetCents }] : []), ...(charge.addonsCents > 0 ? [{ name: "Child car seats", amountCents: charge.addonsCents }] : [])]
     : [{ name: `Deposit for booking ${b.reference}`, amountCents: plan.amountCents }];
   const fail = async (error: string, status: number): Promise<CheckoutOutcome> => {
     console.error(`[payments] ${provider} checkout failed`, error);

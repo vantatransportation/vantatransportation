@@ -7,6 +7,7 @@ import { adminPage, loadRefOptions } from "@/lib/admin/data";
 import { resources, toClient } from "@/lib/admin/resources";
 import { BUSINESS_TZ } from "@/lib/config";
 import BookingOps from "@/components/admin/BookingOps";
+import BookingWorkflow from "@/components/admin/BookingWorkflow";
 import { loadBookingSettings } from "@/lib/policies";
 import { REGION_LABEL, type Region } from "@/lib/coverage";
 
@@ -33,6 +34,12 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
   const airports = (airportQ.data ?? []) as Record<string, string | number | boolean | null>[];
   const passenger = people.find((x) => x.role === "passenger");
   const contacts = people.filter((x) => x.role === "emergency_contact" || x.role === "secondary_contact");
+  const msgsQ = await db.from("booking_messages").select("sender_role,body,created_at").eq("booking_id", id).order("created_at", { ascending: true }).limit(200);
+  const [driversQ, historyQ] = await Promise.all([
+    db.from("drivers").select("id,full_name,vehicle_plate,is_active").order("full_name"),
+    db.from("booking_status_history").select("to_status,created_at,note,actor_type").eq("booking_id", id).order("created_at", { ascending: false }),
+  ]);
+  const driverRows = (driversQ.data ?? []) as { id: string; full_name: string; vehicle_plate: string | null; is_active: boolean }[];
   const [stops, snaps, notes, refs] = await Promise.all([
     db.from("booking_stops").select("position,address").eq("booking_id", id).order("position"),
     db.from("pricing_snapshots").select("line_items,total_cents,snapshot,created_at").eq("booking_id", id).order("created_at"),
@@ -47,12 +54,24 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
       <p><Link href="/admin/bookings" className="muted">← Bookings</Link></p>
       <h1>Booking {b.reference}</h1>
       <p className="adm-sub"><span className="pill">{label(b.status)}</span> · Received {fmtDate(b.created_at, BUSINESS_TZ)}</p>
+      <BookingWorkflow id={id} status={b.status} driverId={b.driver_id ?? null} driverName={driverRows.find((d) => d.id === b.driver_id)?.full_name ?? null} paymentReleased={Boolean(b.payment_released_at)}
+        drivers={driverRows.map((d) => ({ id: d.id, name: d.full_name, plate: d.vehicle_plate, active: d.is_active }))}
+        history={((historyQ.data ?? []) as { to_status: string; created_at: string; note: string | null; actor_type: string }[]).map((h) => ({ to: h.to_status, at: h.created_at, note: h.note, actor: h.actor_type }))} />
+      <div className="panel">
+        <h3>Customer and driver messages</h3>
+        <p className="muted">Read only. Administrators can review conversations for support and disputes; the customer and driver are told in the chat that Vanta may review messages.</p>
+        {((msgsQ.data ?? []) as { sender_role: string; body: string; created_at: string }[]).length === 0 ? <p className="muted">No messages.</p> : (
+          <table className="lines"><tbody>{((msgsQ.data ?? []) as { sender_role: string; body: string; created_at: string }[]).map((m, i) => <tr key={i}><td style={{ whiteSpace: "nowrap" }}>{fmtDate(m.created_at, BUSINESS_TZ)}</td><td><strong>{m.sender_role === "driver" ? "Driver" : "Customer"}:</strong> {m.body}</td></tr>)}</tbody></table>
+        )}
+      </div>
       <div className="panel">
         <h3>Pricing and payment</h3>
         <dl className="kv">
           <dt>Tier</dt><dd>{b.tier_name ?? "Not recorded"}</dd>
           <dt>Estimated trip fare</dt><dd>{b.estimated_fare_cents != null ? fmtMoney(b.estimated_fare_cents) : "To be confirmed"} <span className="muted">(calculated from mileage/hours/tolls; information only, not charged online)</span></dd>
-          <dt>Charged online</dt><dd>{b.online_amount_cents != null ? `${fmtMoney(b.online_amount_cents)} = fixed tier price ${fmtMoney(b.fixed_price_cents ?? 0)}${b.meet_greet_selected ? ` + Meet & Greet ${fmtMoney(b.meet_greet_fee_cents ?? 0)}` : ""}${(b.child_seat_fee_cents ?? 0) > 0 ? ` + child seats ${fmtMoney(b.child_seat_fee_cents)}` : ""}` : "Not set up (tier fixed price was not configured when this was requested)"}</dd>
+          <dt>Charged online</dt><dd>{b.online_amount_cents != null ? `${fmtMoney(b.online_amount_cents)} = fixed tier price ${fmtMoney(b.fixed_price_cents ?? 0)}${(b.rush_surcharge_cents ?? 0) > 0 ? ` + rush-hour surcharge ${fmtMoney(b.rush_surcharge_cents)}${b.rush_surcharge_percent ? ` (${b.rush_surcharge_percent}%)` : ""}` : ""}${(b.tip_cents ?? 0) > 0 ? ` + tip ${fmtMoney(b.tip_cents)}${b.tip_percent ? ` (${b.tip_percent}%)` : ""}` : ""}${b.meet_greet_selected ? ` + Meet & Greet ${fmtMoney(b.meet_greet_fee_cents ?? 0)}` : ""}${(b.child_seat_fee_cents ?? 0) > 0 ? ` + child seats ${fmtMoney(b.child_seat_fee_cents)}` : ""}` : "Not set up (tier fixed price was not configured when this was requested)"}</dd>
+          <dt>Tip</dt><dd>{b.tip_kind === "none" || !b.tip_kind ? "No tip selected" : `${fmtMoney(b.tip_cents ?? 0)} (${b.tip_kind === "percent" ? `${b.tip_percent}% of the fixed price` : "custom amount"}) · counted as paid only when the payment is confirmed`}</dd>
+          <dt>Luggage</dt><dd>{b.checked_bags != null || b.carry_on_bags != null ? `${b.checked_bags ?? 0} checked, ${b.carry_on_bags ?? 0} carry-on` : "Not provided"}</dd>
           <dt>Meet &amp; Greet</dt><dd>{b.meet_greet_selected ? "Selected (fee frozen at request time)" : "Not selected"}</dd>
           <dt>Payment status</dt><dd>{String(b.payment_status).replace(/_/g, " ")} · collected {fmtMoney(b.amount_paid_cents ?? 0)}</dd>
           <dt>Child seats</dt><dd>{seats.length ? `${seats.map((x) => `${x.quantity} × ${x.type.replace(/_/g, "-")}`).join(", ")} (requested, subject to confirmation)` : "None requested"}</dd>

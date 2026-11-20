@@ -4,15 +4,15 @@ import { randomUUID } from "node:crypto";
 const REL = {
   vehicles: { vehicle_categories: ["one", "category_id", "vehicle_categories"], vehicle_tiers: ["one", "tier_id", "vehicle_tiers"], pricing_configs: ["many", "vehicle_id", "pricing_configs"] },
   pricing_configs: { pricing_surcharges: ["many", "pricing_config_id", "pricing_surcharges"], vehicles: ["one", "vehicle_id", "vehicles"] },
-  bookings: { vehicles: ["one", "vehicle_id", "vehicles"] },
+  bookings: { vehicles: ["one", "vehicle_id", "vehicles"], customers: ["one", "customer_id", "customers"] },
   quote_requests: { vehicles: ["one", "vehicle_id", "vehicles"] },
 };
-const UNIQUE = { customers: ["email_normalized"], bookings: ["submission_key", "reference"], quote_requests: ["submission_key", "access_token"], notification_logs: ["dedupe_key"], admin_notifications: ["dedupe_key"], stripe_events: ["id"], paypal_events: ["id"], payments: ["stripe_session_id"] };
+const UNIQUE = { customers: ["email_normalized"], bookings: ["submission_key", "reference"], quote_requests: ["submission_key", "access_token"], notification_logs: ["dedupe_key"], admin_notifications: ["dedupe_key"], stripe_events: ["id"], paypal_events: ["id"], payments: ["stripe_session_id"], booking_messages: ["dedupe_key"] };
 
 function splitTop(s) { const out = []; let d = 0, cur = ""; for (const ch of s) { if (ch === "(") d++; if (ch === ")") d--; if (ch === "," && d === 0) { out.push(cur.trim()); cur = ""; } else cur += ch; } if (cur.trim()) out.push(cur.trim()); return out; }
 
 export class FakeDb {
-  constructor() { this.tables = {}; this.seq = 1000; this.auth = { getUser: async (t) => (t === "good" ? { data: { user: { id: "admin-1", email: "a@x.com" } }, error: null } : { data: { user: null }, error: { message: "bad" } }) }; this.storage = {}; }
+  constructor() { this.tables = {}; this.seq = 1000; this.auth = { getUser: async (t) => (t === "good" ? { data: { user: { id: "admin-1", email: "a@x.com" } }, error: null } : /^drv-/.test(t ?? "") ? { data: { user: { id: "user-" + t, email: t + "@d.test" } }, error: null } : { data: { user: null }, error: { message: "bad" } }), admin: { updateUserById: async () => ({ error: null }) } }; this.storage = {}; }
   t(name) { return (this.tables[name] ??= []); }
   seed(name, rows) { for (const r of rows) this.t(name).push({ id: randomUUID(), created_at: new Date().toISOString(), ...r }); }
   from(name) { return new Query(this, name); }
@@ -64,6 +64,8 @@ class Query {
         if (this.table === "payments") { row.refunded_cents ??= 0; row.status ??= "pending"; }
         if (this.table === "quote_requests") { row.access_token ??= randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, ""); row.status ??= "new"; row.customer_response ??= "pending"; row.discount_decision ??= "pending"; }
         if (this.table === "notification_logs") { row.attempts ??= 0; }
+        // booking_assignments: at most one OPEN assignment (unassigned_at is null) per booking, like the partial unique index.
+        if (this.table === "booking_assignments" && row.unassigned_at == null && rows.some((x) => x.booking_id === row.booking_id && x.unassigned_at == null)) { error = { code: "23505", message: "duplicate open assignment" }; result = null; break; }
         const dup = (UNIQUE[this.table] ?? []).find((c) => row[c] != null && rows.some((x) => x[c] === row[c]));
         if (dup) { error = { code: "23505", message: "duplicate " + dup }; result = null; break; }
         rows.push(row); result.push(row);

@@ -26,7 +26,7 @@ export default async function PayPage({ params, searchParams }: { params: Promis
   const sp = await searchParams;
   const back = Array.isArray(sp.checkout) ? sp.checkout[0] : sp.checkout;
   const db = validToken(token) ? getAdminClient() : null;
-  const { data: b } = db ? await db.from("bookings").select("id,reference,status,pickup_at,estimated_fare_cents,currency,amount_paid_cents,payment_status,child_seat_fee_cents,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,online_amount_cents").eq("payment_token", token).maybeSingle() : { data: null };
+  const { data: b } = db ? await db.from("bookings").select("id,reference,status,pickup_at,estimated_fare_cents,currency,amount_paid_cents,payment_status,child_seat_fee_cents,driver_id,payment_released_at,rush_surcharge_cents,tip_cents,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,online_amount_cents").eq("payment_token", token).maybeSingle() : { data: null };
 
   if (!db || !b) {
     return (
@@ -38,7 +38,8 @@ export default async function PayPage({ params, searchParams }: { params: Promis
   const c = await chargeForBooking(db, b); // the same server calculation the payment endpoints use
   const charge = c.ok ? c.charge : null;
   const plan = charge && providers.length ? paymentPlan(settings.payment, charge.totalCents, b.amount_paid_cents ?? 0) : null;
-  const closed = b.status === "cancelled" || b.status === "no_show";
+  const closed = b.status === "cancelled" || b.status === "no_show" || b.status === "rejected";
+  const released = Boolean(b.payment_released_at && b.driver_id); // approve-then-pay: no payment before approval + driver assignment
   const status = String(b.payment_status);
   const retry = status === "failed" || status === "unpaid" || status === "pending";
 
@@ -59,6 +60,8 @@ export default async function PayPage({ params, searchParams }: { params: Promis
             {charge ? (
               <table className="lines"><tbody>
                 <tr><td>Fixed {charge.tierName} price</td><td>{formatMoney(charge.fixedPriceCents, b.currency)}</td></tr>
+                {charge.rushCents > 0 && <tr><td>Rush-hour surcharge</td><td>{formatMoney(charge.rushCents, b.currency)}</td></tr>}
+                {charge.tipCents > 0 && <tr><td>Driver tip</td><td>{formatMoney(charge.tipCents, b.currency)}</td></tr>}
                 {charge.meetGreetCents > 0 && <tr><td>Airport Meet &amp; Greet</td><td>{formatMoney(charge.meetGreetCents, b.currency)}</td></tr>}
                 {charge.addonsCents > 0 && <tr><td>Child car seats</td><td>{formatMoney(charge.addonsCents, b.currency)}</td></tr>}
                 <tr className="total"><td>Total online amount</td><td>{formatMoney(charge.totalCents, b.currency)}</td></tr>
@@ -72,6 +75,7 @@ export default async function PayPage({ params, searchParams }: { params: Promis
           </dl>
           {settings.payment.terms && <p className="muted" style={{ marginTop: "1rem" }}>{settings.payment.terms}</p>}
           {closed ? <div className="notice">This booking can no longer be paid online. Please contact us.</div>
+            : !released ? <div className="notice" role="status">Your request is being reviewed. You have not been charged. We will email you when it is approved and a driver is assigned, and you can pay from this page then.</div>
             : plan && retry ? (
               <div style={{ marginTop: "1.5rem" }}>
                 <p style={{ marginBottom: "1rem" }}>{plan.kind === "deposit" ? "Deposit due now: " : "Amount due now: "}<strong>{formatMoney(plan.amountCents, b.currency)}</strong></p>

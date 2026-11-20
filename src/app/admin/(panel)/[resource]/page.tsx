@@ -4,8 +4,9 @@ import { adminPage, listRows, loadRefOptions } from "@/lib/admin/data";
 import { resources, toClient } from "@/lib/admin/resources";
 import { BUSINESS_TZ } from "@/lib/config";
 import TierStatus from "@/components/admin/TierStatus";
+import DriverAccounts from "@/components/admin/DriverAccounts";
 
-const GENERIC = ["vehicles", "standards", "faqs", "promotions", "follow-ups", "bookings", "customers", "leads", "quotes", "booking-settings", "round-trip", "tiers"];
+const GENERIC = ["vehicles", "standards", "faqs", "promotions", "follow-ups", "bookings", "customers", "leads", "quotes", "booking-settings", "round-trip", "tiers", "drivers"];
 const BLURB: Record<string, string> = {
   vehicles: "Add and edit vehicles, upload images, set capacity, and control whether each is shown and bookable. Pricing is managed under Pricing management.",
   standards: "These appear in the Standards section of the public website. Add or edit them as requirements change.",
@@ -18,6 +19,7 @@ const BLURB: Record<string, string> = {
   tiers: "The three service tiers. Each has ONE fixed price, charged online instead of the mileage/hourly estimate, and its own Meet & Greet fee. The trip estimate itself is still calculated from Pricing management and is shown for information only. Assign vehicles to tiers under Vehicles.",
   "booking-settings": "Meet & Greet availability, child seat prices, waiting-time allowance and rate, and online payment (mode and which providers are offered). Meet & Greet fees are per tier, under Tier prices & fees.",
   "round-trip": "Round-trip discount rules. No discount applies until you create and activate a rule. Customers always see both legs, the discount and the final total.",
+  drivers: "Everyone who can be assigned rides. Add a driver, then send a sign-in invitation so they can see only their own rides on their phone.",
   quotes: "Customers asking for a better price. Open one to review, set a revised price and respond.",
 };
 
@@ -32,6 +34,7 @@ export default async function Page({ params }: { params: Promise<{ resource: str
       <h1>{r.title}</h1>
       <p className="adm-sub">{BLURB[slug]}</p>
       {slug === "tiers" && <TierStatus rows={rows} db={db} />}
+      {slug === "drivers" && <DriverAccounts drivers={rows.map((d) => ({ id: String(d.id), name: String(d.full_name), email: String(d.email), active: d.is_active !== false, hasAccount: Boolean(d.user_id) }))} />}
       <ResourceManager resource={toClient(r)} rows={rows} refOptions={refOptions} tz={BUSINESS_TZ} />
     </>
   );
