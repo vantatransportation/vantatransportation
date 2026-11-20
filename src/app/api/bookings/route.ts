@@ -10,7 +10,6 @@ import { clean, EMAIL_RE, phoneDigits } from "@/lib/validation";
 import { formatMoney } from "@/lib/pricing/engine";
 import { validateBookingDetails } from "@/lib/booking-details";
 import { REGION_LABEL } from "@/lib/coverage";
-import { parseTip } from "@/lib/pricing/surcharge";
 import { childSeatSummary, NO_SEATS } from "@/lib/child-seats";
 
 export const runtime = "nodejs";
@@ -40,9 +39,6 @@ export async function POST(request: Request) {
   const det = validateBookingDetails(body);
   if (!det.ok) return json({ error: det.error, fields: det.fields }, 422);
 
-  const tip = parseTip(body.tip);
-  if (!tip) return json({ error: "Check your tip selection.", fields: { tip: "Choose a tip option or enter a valid amount." } }, 422);
-
   const parsed = validateTrip(body.trip, new Date(), (d, t) => zonedToUtc(d, t, BUSINESS_TZ));
   if (!parsed.ok) return json({ error: parsed.error }, 422);
 
@@ -50,13 +46,15 @@ export async function POST(request: Request) {
   if (!db) return json({ error: "Booking is temporarily unavailable. Please contact us directly." }, 503);
 
   try {
-    const result = await createBooking(db, { trip: parsed.trip, vehicleId, routeKey, customer: { name, email, phone }, notes, submissionKey, details: det.details, tip });
+    const result = await createBooking(db, { trip: parsed.trip, vehicleId, routeKey, customer: { name, email, phone }, notes, submissionKey, details: det.details });
     if (!result.ok) return json({ error: result.error }, result.status);
 
     // The booking is already saved. Notifications can fail without affecting it.
     if (!result.duplicate) {
       const t = parsed.trip;
       const seatText = childSeatSummary(t.childSeats ?? NO_SEATS);
+      const site = (process.env.NEXT_PUBLIC_SITE_URL || "").replace(/\/$/, "");
+      const payUrl = result.payment && result.paymentToken && site ? `${site}/pay/${result.paymentToken}` : undefined;
       const extrasText = [t.returnLeg ? "Round trip" : "", seatText ? `Child seats: ${seatText} (requested)` : "", result.meetGreetRequested ? "Meet & Greet requested" : ""].filter(Boolean).join(", ");
       // Alerts intentionally omit phone numbers, notes, passenger instructions and emergency contacts.
       await notify(db, "booking.created", { type: "booking", id: result.id }, {
@@ -66,18 +64,15 @@ export async function POST(request: Request) {
         "Trip type": t.tripType === "hourly" ? `Hourly (${t.hours} h)` : t.returnLeg ? "Round trip" : "Point to point",
         "Estimated trip fare (information only)": result.totalCents != null ? formatMoney(result.totalCents, result.currency) : "To be confirmed",
         Tier: result.online?.tierName, "Fixed tier price": result.online ? formatMoney(result.online.fixedPriceCents, result.currency) : undefined,
-        "Rush-hour surcharge": result.online && result.online.rushCents > 0 ? formatMoney(result.online.rushCents, result.currency) : undefined,
-        Tip: result.online && result.online.tipCents > 0 ? formatMoney(result.online.tipCents, result.currency) : undefined,
-        Luggage: det.details.checkedBags != null || det.details.carryOnBags != null ? `${det.details.checkedBags ?? 0} checked, ${det.details.carryOnBags ?? 0} carry-on` : undefined,
         "Meet & Greet": result.online && result.online.meetGreetCents > 0 ? formatMoney(result.online.meetGreetCents, result.currency) : result.meetGreetRequested ? "Requested" : undefined,
         "Child car seats": result.childSeatFeeCents > 0 ? formatMoney(result.childSeatFeeCents, result.currency) : undefined,
         "Online amount due": result.online ? formatMoney(result.online.totalCents, result.currency) : "Not set up yet",
         "Service region": REGION_LABEL[result.region], "Needs staff review": result.requiresReview ? "Yes" : undefined,
         "Requested extras": extrasText || undefined, "Booking for": det.details.bookingFor === "other" ? "Someone else" : undefined,
-        _customerEmail: email, _customerName: name, _tripUrl: result.paymentToken && process.env.NEXT_PUBLIC_SITE_URL ? `${process.env.NEXT_PUBLIC_SITE_URL.replace(/\/$/, "")}/trip/${result.paymentToken}` : undefined,
+        _customerEmail: email, _customerName: name, _payUrl: payUrl,
       });
     }
-    return json({ ok: true, reference: result.reference, totalCents: result.totalCents, onlineAmountCents: result.online?.totalCents ?? null, currency: result.currency, payUrl: null, tripUrl: result.paymentToken ? `/trip/${result.paymentToken}` : null }); // payment starts only after admin approval and driver assignment
+    return json({ ok: true, reference: result.reference, totalCents: result.totalCents, onlineAmountCents: result.online?.totalCents ?? null, currency: result.currency, payUrl: result.payment && result.paymentToken ? `/pay/${result.paymentToken}` : null });
   } catch (e) {
     console.error("[bookings] unexpected error", e);
     return json({ error: "We could not save your booking. Please try again." }, 500);

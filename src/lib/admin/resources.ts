@@ -51,7 +51,7 @@ export interface Resource {
 
 export type ClientResource = Omit<Resource, "refLabel" | "select" | "orderBy" | "table">;
 
-export const BOOKING_STATUSES = ["new_request", "pending_confirmation", "confirmed", "assigned", "getting_ready", "on_the_way", "arrived", "picked_up", "in_progress", "completed", "cancelled", "rejected", "no_show"];
+export const BOOKING_STATUSES = ["new_request", "pending_confirmation", "confirmed", "assigned", "in_progress", "completed", "cancelled", "no_show"];
 export const LEAD_STATUSES = ["new", "contacted", "follow_up", "converted", "not_interested", "closed"];
 export const QUOTE_STATUSES = ["new", "reviewing", "revised_sent", "accepted", "rejected", "closed"];
 
@@ -255,21 +255,6 @@ export const resources: Record<string, Resource> = {
       { label: "Vehicle", path: "vehicles.name" }, { label: "Fare", path: "estimated_fare_cents", kind: "money" }, { label: "Status", path: "status", kind: "status" },
     ],
   },
-  drivers: {
-    slug: "drivers", table: "drivers", title: "Drivers", singular: "driver",
-    select: "*", orderBy: "full_name", ascending: true, canCreate: true, canDelete: false,
-    filterField: "is_active", searchPaths: ["full_name", "email", "phone", "vehicle_plate"],
-    fields: [
-      { name: "full_name", label: "Full name", type: "text", required: true },
-      { name: "email", label: "Email", type: "text", required: true, help: "Ride assignments are emailed here. Must be unique." },
-      { name: "phone", label: "Phone", type: "text", help: "Shown to the customer only after a ride is assigned, and to the driver's own customers." },
-      { name: "vehicle_plate", label: "License plate", type: "text" },
-      { name: "vehicle_description", label: "Vehicle (make, model, colour)", type: "text" },
-      { name: "is_active", label: "Active (can be assigned rides)", type: "bool", help: "Deactivating does not remove rides already assigned: reassign them from the booking page." },
-      { name: "notes", label: "Internal notes", type: "textarea" },
-    ],
-    columns: [{ label: "Name", path: "full_name" }, { label: "Email", path: "email" }, { label: "Phone", path: "phone" }, { label: "Plate", path: "vehicle_plate" }, { label: "Active", path: "is_active", kind: "bool" }],
-  },
   "booking-settings": {
     slug: "booking-settings", table: "booking_settings", title: "Booking settings", singular: "setting",
     select: "*", orderBy: "updated_at", ascending: false, canCreate: false, canDelete: false,
@@ -287,10 +272,6 @@ export const resources: Record<string, Resource> = {
       { name: "paypal_enabled", label: "Offer PayPal", type: "bool", help: "Also needs the PayPal credentials on the server." },
       { name: "deposit_fixed_cents", label: "Deposit: fixed amount ($)", type: "money", help: "Used when Online payment is deposit_fixed. Leave blank until approved." },
       { name: "deposit_percent", label: "Deposit: percent of the total", type: "number", step: 0.01, help: "Used when Online payment is deposit_percent (1 to 100)." },
-      { name: "rush_enabled", label: "Rush-hour surcharge enabled", type: "bool", help: "Applied once per booking, on the fixed tier price, when the journey overlaps a window below." },
-      { name: "rush_percent", label: "Rush-hour surcharge (%)", type: "number", step: 0.01, help: "Initial requested rule: 5." },
-      { name: "rush_windows", label: "Rush-hour windows (JSON)", type: "textarea", help: 'Local times, e.g. [{"start":"08:00","end":"10:00"},{"start":"16:00","end":"18:00"}]. A window whose end is not after its start crosses midnight.' },
-      { name: "rush_timezone", label: "Rush-hour time zone", type: "text", help: "IANA name, e.g. America/New_York. Pickup times are evaluated in this zone." },
       { name: "payment_terms", label: "Payment terms shown to customers", type: "textarea", help: "Only wording the business has approved (refunds, cancellations). Leave blank to show none." },
     ],
     columns: [

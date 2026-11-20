@@ -2,8 +2,7 @@
  * Fixed tier pricing and the ONLINE charge. Pure.
  *
  * The online charge is deliberately separate from the trip estimate. It is exactly:
- *   fixed price of the selected tier  +  rush-hour surcharge (if any)  +  tip  +  Meet & Greet fee of that tier (if selected)  +  child seats.
- * The surcharge and percentage tips are calculated on the fixed price only (see pricing/surcharge.ts).
+ *   fixed price of the selected tier  +  Meet & Greet fee of that tier (if selected)  +  other explicit add-ons (child seats).
  * Mileage, hourly, duration, toll and other trip-based amounts are NEVER part of it.
  */
 export const TIER_SLUGS = ["premium", "luxury", "luxury-plus"] as const;
@@ -16,9 +15,7 @@ export interface TierPricing { id: string | null; name: string; fixedPriceCents:
 
 export interface OnlineCharge {
   tierId: string | null; tierName: string;
-  fixedPriceCents: number; meetGreetCents: number; addonsCents: number;
-  /** Rush-hour surcharge and tip, both calculated on the fixed price only. */
-  rushCents: number; tipCents: number; totalCents: number;
+  fixedPriceCents: number; meetGreetCents: number; addonsCents: number; totalCents: number;
 }
 export type ChargeResult =
   | { ok: true; charge: OnlineCharge }
@@ -26,18 +23,17 @@ export type ChargeResult =
 
 const isCents = (n: unknown): n is number => typeof n === "number" && Number.isInteger(n) && n >= 0;
 
-export function onlineCharge(tier: TierPricing | null, opts: { meetGreet: boolean; addonsCents: number; rushCents?: number; tipCents?: number }): ChargeResult {
+export function onlineCharge(tier: TierPricing | null, opts: { meetGreet: boolean; addonsCents: number }): ChargeResult {
   if (!tier) return { ok: false, reason: "tier_missing" };
   if (tier.fixedPriceCents == null) return { ok: false, reason: "price_not_set" };
-  const rush = opts.rushCents ?? 0, tip = opts.tipCents ?? 0;
-  if (!isCents(tier.fixedPriceCents) || !isCents(opts.addonsCents) || !isCents(rush) || !isCents(tip)) return { ok: false, reason: "invalid" };
+  if (!isCents(tier.fixedPriceCents) || !isCents(opts.addonsCents)) return { ok: false, reason: "invalid" };
   let mg = 0;
   if (opts.meetGreet) {
     if (tier.meetGreetFeeCents == null) return { ok: false, reason: "meet_greet_unavailable" };
     if (!isCents(tier.meetGreetFeeCents)) return { ok: false, reason: "invalid" };
     mg = tier.meetGreetFeeCents; // added exactly once, whatever the customer changed before
   }
-  return { ok: true, charge: { tierId: tier.id, tierName: tier.name, fixedPriceCents: tier.fixedPriceCents, meetGreetCents: mg, addonsCents: opts.addonsCents, rushCents: rush, tipCents: tip, totalCents: tier.fixedPriceCents + rush + tip + mg + opts.addonsCents } };
+  return { ok: true, charge: { tierId: tier.id, tierName: tier.name, fixedPriceCents: tier.fixedPriceCents, meetGreetCents: mg, addonsCents: opts.addonsCents, totalCents: tier.fixedPriceCents + mg + opts.addonsCents } };
 }
 
 /** Validates admin-entered tier amounts (in cents, after money coercion). Blank (null) means "not configured yet". */

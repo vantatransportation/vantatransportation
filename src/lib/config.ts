@@ -2,4 +2,4 @@
 export const BUSINESS_TZ = process.env.BUSINESS_TIMEZONE || "America/New_York";
 
 /** Initial business notification recipient (not a secret). Override with BUSINESS_NOTIFICATION_EMAIL. */
-export const DEFAULT_BUSINESS_EMAIL = "vantatransportation.1@gmail.com";
+export const DEFAULT_BUSINESS_EMAIL = "vantaholdings.1@gmail.com";

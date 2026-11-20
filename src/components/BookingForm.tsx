@@ -9,8 +9,7 @@ import { openCalculator } from "@/lib/calculator-events";
 import { looksLikeAirport } from "@/lib/coverage";
 import { TRIP_STORAGE_KEY, type StoredTrip } from "@/lib/fare/client-types";
 import type { PublicPolicies } from "@/lib/policies";
-import { SEAT_CONFIRMATION_NOTE, CLEANUP_POLICY_TEXT, LUGGAGE_CAPACITY_NOTE } from "@/lib/policy-text";
-import { TIP_PERCENTS, parseTip } from "@/lib/pricing/surcharge";
+import { SEAT_CONFIRMATION_NOTE } from "@/lib/policy-text";
 import { seatCount } from "@/lib/child-seats";
 
 type Status = { kind: "idle" } | { kind: "sending" } | { kind: "error"; message: string; fields?: Record<string, string> };
@@ -30,9 +29,6 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
   const [bookingFor, setBookingFor] = useState<"self" | "other">("self");
   const [airportOn, setAirportOn] = useState<boolean | null>(null); // null = follow the auto-detected default
   const [secondContact, setSecondContact] = useState(false);
-  const [tipKind, setTipKind] = useState<"none" | "percent" | "custom">("none");
-  const [tipPercent, setTipPercent] = useState<number>(TIP_PERCENTS[0]);
-  const [tipDollars, setTipDollars] = useState("");
 
   if (stored === undefined) return <p className="muted">Loading your trip…</p>;
   if (!stored) {
@@ -56,13 +52,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
   const pickupIsAirport = looksLikeAirport(trip.pickup.text);
   const airportGuess = pickupIsAirport ? trip.pickup.text : looksLikeAirport(trip.dropoff.text) ? trip.dropoff.text : "";
   const online = display.online ?? null;
-  const tipSel = tipKind === "percent" ? { kind: "percent" as const, percent: tipPercent } : tipKind === "custom" ? { kind: "custom" as const, dollars: tipDollars } : { kind: "none" as const };
-  // Display only: the server recalculates the tip and surcharge from the fixed price when you submit.
-  const parsedTip = parseTip(tipSel);
-  const tipCents = online && online.fixedPriceCents != null && parsedTip ? (parsedTip.kind === "percent" ? Math.round((online.fixedPriceCents * parsedTip.percent) / 100) : parsedTip.kind === "custom" ? parsedTip.cents : 0) : 0;
-  const tipInvalid = tipKind === "custom" && !parsedTip;
-  const rushCents = online?.rushCents ?? 0;
-  const onlineTotal = online && online.fixedPriceCents != null ? online.fixedPriceCents + rushCents + tipCents + online.meetGreetCents + online.seatFeeCents : null;
+  const onlineTotal = online && online.fixedPriceCents != null ? online.fixedPriceCents + online.meetGreetCents + online.seatFeeCents : null;
 
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -70,7 +60,6 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
     const fd = new FormData(e.currentTarget);
     const g = (k: string) => String(fd.get(k) ?? "");
     const contacts = [0, 1].map((i) => ({ name: g(`c${i}.name`), relationship: g(`c${i}.relationship`), phone: g(`c${i}.phone`), type: g(`c${i}.type`) || (i === 0 ? "emergency" : "secondary") }));
-    if (tipInvalid) return setStatus({ kind: "error", message: "Check your tip selection.", fields: { tip: "Enter a tip amount in dollars, for example 10 or 12.50." } });
     setStatus({ kind: "sending" });
     try {
       const res = await fetch("/api/bookings", {
@@ -79,7 +68,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
           trip: stored.trip, vehicleId: stored.vehicleId, routeKey: stored.routeKey, submissionKey: stored.submissionKey,
           name: g("name"), email: g("email"), phone: g("phone"), notes: g("notes"), website: g("website"),
           bookingFor, passenger: bookingFor === "other" ? { name: g("p.name"), phone: g("p.phone"), email: g("p.email") } : null,
-          checkedBags: g("checkedBags"), carryOnBags: g("carryOnBags"), tip: tipSel, assistanceNotes: g("assistance"), pickupInstructions: g("pickupInstructions"), contacts,
+          luggageCount: g("luggage"), assistanceNotes: g("assistance"), pickupInstructions: g("pickupInstructions"), contacts,
           airport: airport ? { airport: g("a.airport"), airline: g("a.airline"), flightNumber: g("a.flightNumber"), direction: g("a.direction"), flightDate: g("a.flightDate"), flightTime: g("a.flightTime"), terminal: g("a.terminal"), passengerName: g("a.passengerName"), pickupInstructions: g("a.instructions"), meetGreet } : null,
           policiesAcknowledged: fd.get("ack") === "on",
         }),
@@ -88,7 +77,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
       if (!res.ok) return setStatus({ kind: "error", message: data.error ?? "Something went wrong. Please try again.", fields: data.fields });
       try {
         sessionStorage.removeItem(TRIP_STORAGE_KEY);
-        sessionStorage.setItem("vanta:confirmation", JSON.stringify({ reference: data.reference, totalCents: data.totalCents, currency: data.currency, shownTotalCents: onlineTotal, payUrl: data.payUrl ?? null, tripUrl: data.tripUrl ?? null }));
+        sessionStorage.setItem("vanta:confirmation", JSON.stringify({ reference: data.reference, totalCents: data.totalCents, currency: data.currency, shownTotalCents: onlineTotal, payUrl: data.payUrl ?? null }));
       } catch { /* ignore */ }
       router.push(`/book/confirmation?ref=${encodeURIComponent(data.reference)}`);
     } catch {
@@ -118,8 +107,6 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
         {online && online.fixedPriceCents != null ? (
           <table className="lines" aria-label="Amount charged online"><tbody>
             <tr><td>Fixed {online.tierName} price</td><td>{formatMoney(online.fixedPriceCents)}</td></tr>
-            {rushCents > 0 && <tr><td>Rush-hour surcharge{online.rushPercent ? ` (${online.rushPercent}%)` : ""}</td><td>{formatMoney(rushCents)}</td></tr>}
-            {tipCents > 0 && <tr><td>Tip{tipKind === "percent" ? ` (${tipPercent}%)` : ""}</td><td>{formatMoney(tipCents)}</td></tr>}
             {meetGreet && <tr><td>Airport Meet &amp; Greet<span className="tag">requested</span></td><td>{formatMoney(online.meetGreetCents)}</td></tr>}
             {online.seatFeeCents > 0 && <tr><td>Child car seats<span className="tag">requested</span></td><td>{formatMoney(online.seatFeeCents)}</td></tr>}
             <tr className="total"><td>Total due online</td><td>{formatMoney(onlineTotal ?? 0)}</td></tr>
@@ -137,7 +124,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
         ) : <p className="muted">An estimate is not available. We will confirm the price with you.</p>}
         {meetGreet && <p className="muted">Meet &amp; Greet is requested here and is not confirmed until Vanta confirms it.</p>}
         {trip.childSeats && seatCount(trip.childSeats) > 0 && <p className="muted">{SEAT_CONFIRMATION_NOTE}</p>}
-        <p className="muted">We verify the amounts again when you submit. This is a booking request, not a confirmed booking. You are not charged when you submit: we email you a secure payment link only after your request is approved and a driver is assigned.</p>
+        <p className="muted">We verify the amounts again when you submit. This is a booking request, not a confirmed booking. If online payment is available you can pay after you submit.</p>
         <p><button type="button" className="linkbtn" onClick={() => openCalculator({ pickup: trip.pickup.text, dropoff: trip.dropoff.text, date: trip.date, time: trip.time })}>Change trip details</button></p>
       </section>
 
@@ -161,9 +148,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
             </div>
           )}
           <div className="form-grid" style={{ marginTop: ".75rem" }}>
-            <div className="field"><label htmlFor="b-chk">Checked bags</label><input id="b-chk" name="checkedBags" type="number" inputMode="numeric" min={0} max={50} step={1} defaultValue={0} aria-invalid={!!err.checkedBags} />{fe("checkedBags")}</div>
-            <div className="field"><label htmlFor="b-carry">Carry-on bags</label><input id="b-carry" name="carryOnBags" type="number" inputMode="numeric" min={0} max={50} step={1} defaultValue={0} aria-invalid={!!err.carryOnBags} />{fe("carryOnBags")}</div>
-            <p className="muted full">{LUGGAGE_CAPACITY_NOTE}</p>
+            <div className="field"><label htmlFor="b-lug">Bags / luggage (optional)</label><input id="b-lug" name="luggage" type="number" min={0} max={50} />{fe("luggageCount")}</div>
             <div className="field full"><label htmlFor="b-assist">Assistance notes (optional)</label><textarea id="b-assist" name="assistance" style={{ minHeight: 90 }} /><span className="help muted">For example: help with bags or stairs. {policies.assistanceText}</span></div>
             <div className="field full"><label htmlFor="b-pi">Pickup instructions (optional)</label><textarea id="b-pi" name="pickupInstructions" style={{ minHeight: 90 }} placeholder="Door number, building entrance, gate code…" /></div>
           </div>
@@ -203,24 +188,10 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
 
         <div className="field full"><label htmlFor="b-notes">Other notes or special requests (optional)</label><textarea id="b-notes" name="notes" /></div>
 
-        <fieldset className="fieldset">
-          <legend>Tip for your driver (optional)</legend>
-          <p className="muted" style={{ marginBottom: ".75rem" }}>Percentages are calculated on the fixed price. Your tip is charged with your payment only after your booking is approved.</p>
-          <div className="choices">
-            {TIP_PERCENTS.map((pct) => (
-              <label className="choice" key={pct}><input type="radio" name="tip" checked={tipKind === "percent" && tipPercent === pct} onChange={() => { setTipKind("percent"); setTipPercent(pct); }} /><span>{pct}%{online && online.fixedPriceCents != null ? ` (${formatMoney(Math.round((online.fixedPriceCents * pct) / 100))})` : ""}</span></label>
-            ))}
-            <label className="choice"><input type="radio" name="tip" checked={tipKind === "custom"} onChange={() => setTipKind("custom")} /><span>Custom amount</span></label>
-            <label className="choice"><input type="radio" name="tip" checked={tipKind === "none"} onChange={() => setTipKind("none")} /><span>No thanks, I&apos;ll take care of my driver</span></label>
-          </div>
-          {tipKind === "custom" && <div className="field" style={{ marginTop: ".75rem" }}><label htmlFor="b-tip">Tip amount ($)</label><input id="b-tip" inputMode="decimal" value={tipDollars} onChange={(e) => setTipDollars(e.target.value)} aria-invalid={tipInvalid || !!err.tip} placeholder="0.00" />{(tipInvalid || err.tip) && <span className="field__error" role="alert">{err.tip ?? "Enter a tip amount in dollars, for example 10 or 12.50."}</span>}</div>}
-        </fieldset>
-
         <div className="policy-box" role="region" aria-label="Policies">
           <p><strong>Waiting time.</strong> {policies.waitingText}</p>
           <p><strong>No-shows.</strong> {policies.noShowText}</p>
           <p><strong>Availability.</strong> {policies.availabilityText}</p>
-          <p><strong>Vehicle cleanliness.</strong> {CLEANUP_POLICY_TEXT}</p>
         </div>
         <div className="full">
           <label className="choice"><input type="checkbox" name="ack" aria-invalid={!!err.policiesAcknowledged} /><span>I have read the waiting-time and no-show policies.</span></label>

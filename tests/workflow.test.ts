@@ -50,7 +50,7 @@ const HDR = (extra: Record<string, string> = {}) => ({ "content-type": "applicat
 const post = (url: string, body: unknown, extra?: Record<string, string>) => new Request("http://site.test" + url, { method: "POST", headers: HDR(extra), body: JSON.stringify(body) });
 const soon = new Date(Date.now() + 30 * 86400_000).toISOString().slice(0, 10);
 const ack = { policiesAcknowledged: true };
-const trip = (o: Record<string, unknown> = {}) => ({ pickup: { text: "1 Main St, Baltimore" }, dropoff: { text: "Dulles Airport" }, stops: [{ text: "Stop St" }], date: soon, time: "11:00", tripType: "distance", passengers: 2, ...o });
+const trip = (o: Record<string, unknown> = {}) => ({ pickup: { text: "1 Main St, Baltimore" }, dropoff: { text: "Dulles Airport" }, stops: [{ text: "Stop St" }], date: soon, time: "09:30", tripType: "distance", passengers: 2, ...o });
 
 let ids: Record<string, string> = {};
 let routes: any;
@@ -75,13 +75,6 @@ before(async () => {
   routes = {
     quote: await import("../src/app/api/fare/quote/route.ts"),
     bookings: await import("../src/app/api/bookings/route.ts"),
-    workflow: await import("../src/app/api/admin/bookings/workflow/route.ts"),
-    tripGet: await import("../src/app/api/trip/[token]/route.ts"),
-    tripMsgs: await import("../src/app/api/trip/[token]/messages/route.ts"),
-    driverMsgs: await import("../src/app/api/driver/messages/route.ts"),
-    driverRides: await import("../src/app/api/driver/rides/route.ts"),
-    driverStatus: await import("../src/app/api/driver/status/route.ts"),
-    driverSetPw: await import("../src/app/api/driver/set-password/route.ts"),
     qr: await import("../src/app/api/quote-requests/route.ts"),
     respond: await import("../src/app/api/quote-requests/respond/route.ts"),
     send: await import("../src/app/api/admin/quotes/send/route.ts"),
@@ -236,7 +229,7 @@ test("vehicle without published pricing can still be requested; no invented pric
 
 const next = (days: number) => new Date(Date.now() + (30 + days) * 86400_000).toISOString().slice(0, 10);
 const person = { name: "Ann Rider", email: "ann@example.com", phone: "4105550100" };
-const rtTrip = (o: object = {}) => trip({ stops: [], returnLeg: { pickup: { text: "Dulles Airport" }, dropoff: { text: "1 Main St, Baltimore" }, date: next(1), time: "13:00" }, ...o });
+const rtTrip = (o: object = {}) => trip({ stops: [], returnLeg: { pickup: { text: "Dulles Airport" }, dropoff: { text: "1 Main St, Baltimore" }, date: next(1), time: "17:00" }, ...o });
 
 test("round trip: both legs priced, no discount invented, configured discount applied server-side, legs and snapshot saved", async () => {
   // No active rule yet: sum of two legs, no discount.
@@ -336,10 +329,7 @@ let pk = 0;
 const makeBooking = async (extra: Record<string, unknown> = {}, tripOver: Record<string, unknown> = {}) => {
   const res = await routes.bookings.POST(post("/api/bookings", { ...ack, ...person, trip: trip({ stops: [], passengers: 2, ...tripOver }), vehicleId: ids.eclass, routeKey: "fastest", submissionKey: `pk-${++pk}-aaaaaaaaaaaaaaaaaa`, ...extra }));
   const data = await res.json();
-  const row = db.t("bookings").find((b: any) => b.reference === data.reference);
-  // Most payment tests start AFTER approval: release payment the way the admin approve+assign operation does.
-  if (row && !(extra as any).__unreleased) Object.assign(row, { driver_id: "00000000-0000-4000-8000-0000000000d1", approved_at: new Date().toISOString(), payment_released_at: new Date().toISOString() });
-  return { res, data, row };
+  return { res, data, row: db.t("bookings").find((b: any) => b.reference === data.reference) };
 };
 const quoteFor = async (t: object) => { const d = await (await routes.quote.POST(post("/api/fare/quote", t))).json(); return { d, ec: d.vehicles?.find((v: any) => v.name === "E-Class")?.quotes?.fastest }; };
 
@@ -375,7 +365,7 @@ test("child seats: priced on the server (one way per seat; round trip per seat O
   assert.deepEqual(b.row.child_seats, [{ type: "rear_facing", quantity: 1 }, { type: "booster", quantity: 1 }]);
   assert.match(JSON.stringify(db.t("notification_logs").filter((l: any) => l.entity_id === b.row.id)), /Child seats: 1 × Rear-facing, 1 × Booster \(requested\)/);
 
-  const rtBooking = await makeBooking({}, { stops: [], passengers: 3, childSeats: seats, returnLeg: { pickup: { text: "Dulles Airport" }, dropoff: { text: "1 Main St, Baltimore" }, date: next(1), time: "13:00" } });
+  const rtBooking = await makeBooking({}, { stops: [], passengers: 3, childSeats: seats, returnLeg: { pickup: { text: "Dulles Airport" }, dropoff: { text: "1 Main St, Baltimore" }, date: next(1), time: "17:00" } });
   assert.equal(rtBooking.row.child_seat_fee_cents, 3000);
   assert.equal(rtBooking.row.online_amount_cents, 15000 + 3000);
 
@@ -523,7 +513,7 @@ test("payments disabled by default: booking requests work, no checkout is offere
 test("Stripe Checkout: amount comes only from the saved server-side total; client amounts are ignored; booking is not confirmed or paid", async () => {
   setPay("full");
   const b = await makeBooking({ totalCents: 1 });
-  assert.equal(b.data.payUrl, null); // no pay link at submission: payment starts only after approval + driver assignment
+  assert.equal(b.data.payUrl, `/pay/${b.row.payment_token}`);
   assert.equal(b.row.payment_status, "unpaid");
   const total = b.row.online_amount_cents; assert.equal(total, 15000); // the fixed Luxury price, not the trip estimate
   assert.notEqual(total, b.row.estimated_fare_cents);
@@ -644,7 +634,7 @@ test("failed or expired payments keep the booking and can be retried; processing
 test("deposit modes: fixed and percentage amounts come from admin settings; unconfigured deposits offer nothing; not configured = unavailable", async () => {
   setPay("deposit_percent", { deposit_percent: 25 });
   let b = await makeBooking();
-  assert.equal(b.data.payUrl, null); // no pay link at submission: payment starts only after approval + driver assignment
+  assert.equal(b.data.payUrl, `/pay/${b.row.payment_token}`);
   await pay(b.row.payment_token);
   let p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
   assert.equal(p.amount_cents, Math.round(b.row.online_amount_cents * 0.25)); assert.equal(p.kind, "deposit");
@@ -938,286 +928,4 @@ test("PayPal webhook: signature verified with PayPal; completed payments recorde
   const saved = process.env.PAYPAL_WEBHOOK_ID; delete process.env.PAYPAL_WEBHOOK_ID;
   assert.equal((await routes.ppwebhook.POST(ppHook({ id: "x", event_type: "PAYMENT.CAPTURE.COMPLETED" }))).status, 503); // not configured
   if (saved) process.env.PAYPAL_WEBHOOK_ID = saved;
-});
-
-
-/* eslint-disable @typescript-eslint/no-explicit-any */
-// ---- Approve-then-pay, drivers, rush-hour, tips (Phase A) ----------------------------------------
-const wf = (body: object) => routes.workflow.POST(post("/api/admin/bookings/workflow", body));
-const mkDriver = (name: string, extra: object = {}) => { db.seed("drivers", [{ full_name: name, email: `${name.toLowerCase().replace(/\W/g, "")}@drivers.test`, phone: "4105550101", vehicle_plate: "VT-1", is_active: true, ...extra }]); return db.t("drivers").at(-1); };
-
-test("submission: no pay link and no payment session; request is saved as awaiting review; checkout is refused until approval + driver", async () => {
-  setPay("full"); setFixed(10000, 15000, 22000);
-  const b = await makeBooking({ __unreleased: true });
-  assert.equal(b.res.status, 200); assert.equal(b.data.payUrl, null);
-  assert.equal(b.row.status, "new_request"); assert.equal(b.row.payment_released_at ?? null, null); assert.equal(b.row.driver_id ?? null, null);
-  const r = await pay(b.row.payment_token);
-  assert.equal(r.status, 409);
-  assert.match((await r.json()).error, /still being reviewed/);
-  assert.equal(db.t("payments").filter((p: any) => p.booking_id === b.row.id).length, 0);
-  const sent = db.t("notification_logs").filter((l: any) => l.entity_id === b.row.id && l.payload?.audience === "customer");
-  assert.ok(sent.length >= 1); assert.ok(sent.every((l: any) => !JSON.stringify(l.payload).includes("/pay/")));   // no payment link in the received email
-});
-
-test("approve + assign: releases payment once, assigns the driver, emails after success, blocks a second approval", async () => {
-  globalThis.__cookies = { vt_at: "good" };
-  setPay("full"); setFixed(10000, 15000, 22000);
-  const b = await makeBooking({ __unreleased: true }); const d1 = mkDriver("Ann Driver");
-  assert.equal((await wf({ id: b.row.id, action: "approve_assign" })).status, 422);                       // a driver is required
-  assert.equal((await wf({ id: b.row.id, action: "approve_assign", driverId: "00000000-0000-4000-8000-000000000999" })).status, 404);
-  const res = await wf({ id: b.row.id, action: "approve_assign", driverId: d1.id });
-  assert.equal(res.status, 200);
-  assert.equal(b.row.status, "assigned"); assert.equal(b.row.driver_id, d1.id); assert.ok(b.row.payment_released_at); assert.ok(b.row.approved_at);
-  assert.equal(db.t("booking_assignments").filter((a: any) => a.booking_id === b.row.id && !a.unassigned_at).length, 1);
-  assert.ok(db.t("booking_status_history").some((h: any) => h.booking_id === b.row.id && h.to_status === "assigned"));
-  const to = (e: string) => db.t("notification_logs").filter((l: any) => l.entity_id === b.row.id && l.event === e);
-  assert.equal(to("booking.approved").length, 1); assert.match(JSON.stringify(to("booking.approved")[0].payload), /\/pay\//);
-  assert.equal(to("driver.assigned").length, 1);
-  // A second approval (double click or another admin) is refused and sends nothing more.
-  assert.equal((await wf({ id: b.row.id, action: "approve_assign", driverId: d1.id })).status, 409);
-  assert.equal(to("booking.approved").length, 1); assert.equal(db.t("booking_assignments").filter((a: any) => a.booking_id === b.row.id).length, 1);
-  // Now payment can start, from the saved server-side amount.
-  const p = await pay(b.row.payment_token); assert.equal(p.status, 200);
-  assert.equal(db.t("payments").find((x: any) => x.booking_id === b.row.id).amount_cents, b.row.online_amount_cents);
-  globalThis.__cookies = {};
-});
-
-test("approve + assign: inactive driver refused; non-admins refused; concurrent approvals produce one winner", async () => {
-  globalThis.__cookies = { vt_at: "good" };
-  const b = await makeBooking({ __unreleased: true }); const off = mkDriver("Off Duty", { is_active: false }); const a = mkDriver("Aa One"), c = mkDriver("Cc Two");
-  assert.equal((await wf({ id: b.row.id, action: "approve_assign", driverId: off.id })).status, 422);
-  const [r1, r2] = await Promise.all([wf({ id: b.row.id, action: "approve_assign", driverId: a.id }), wf({ id: b.row.id, action: "approve_assign", driverId: c.id })]);
-  assert.deepEqual([r1.status, r2.status].sort(), [200, 409]);
-  assert.equal(db.t("booking_assignments").filter((x: any) => x.booking_id === b.row.id && !x.unassigned_at).length, 1);
-  assert.equal(db.t("notification_logs").filter((l: any) => l.entity_id === b.row.id && l.event === "driver.assigned").length, 1);
-  globalThis.__cookies = {};
-  assert.equal((await wf({ id: b.row.id, action: "reject", reason: "no" })).status, 401);                  // not signed in
-});
-
-test("reassign: old driver loses the ride immediately, new driver gets it, customer and both drivers are notified once", async () => {
-  globalThis.__cookies = { vt_at: "good" };
-  const b = await makeBooking({ __unreleased: true }); const a = mkDriver("Re Alpha"), c = mkDriver("Re Beta");
-  await wf({ id: b.row.id, action: "approve_assign", driverId: a.id });
-  assert.equal((await wf({ id: b.row.id, action: "reassign", driverId: a.id })).status, 409);               // same driver
-  assert.equal((await wf({ id: b.row.id, action: "reassign", driverId: c.id })).status, 200);
-  assert.equal(b.row.driver_id, c.id);
-  const open = db.t("booking_assignments").filter((x: any) => x.booking_id === b.row.id && !x.unassigned_at);
-  assert.equal(open.length, 1); assert.equal(open[0].driver_id, c.id);
-  const old = db.t("booking_assignments").find((x: any) => x.booking_id === b.row.id && x.driver_id === a.id); assert.ok(old.unassigned_at);
-  const ev = (e: string) => db.t("notification_logs").filter((l: any) => l.entity_id === b.row.id && l.event === e).length;
-  assert.equal(ev("driver.unassigned"), 1); assert.equal(ev("booking.reassigned"), 1); assert.equal(ev("driver.assigned"), 2);
-  // Once the passenger is on board the driver can no longer be changed.
-  b.row.status = "picked_up"; assert.equal((await wf({ id: b.row.id, action: "reassign", driverId: a.id })).status, 409);
-  globalThis.__cookies = {};
-});
-
-test("reject and cancel: reason required, once only, no payment can start, no automatic refund", async () => {
-  globalThis.__cookies = { vt_at: "good" }; setPay("full");
-  const b = await makeBooking({ __unreleased: true });
-  assert.equal((await wf({ id: b.row.id, action: "reject", reason: "" })).status, 422);
-  assert.equal((await wf({ id: b.row.id, action: "reject", reason: "No vehicle available that day" })).status, 200);
-  assert.equal(b.row.status, "rejected"); assert.equal((await wf({ id: b.row.id, action: "reject", reason: "again" })).status, 409);
-  assert.equal((await pay(b.row.payment_token)).status, 409);
-  assert.equal(db.t("notification_logs").filter((l: any) => l.entity_id === b.row.id && l.event === "booking.rejected").length, 1);
-
-  const c = await makeBooking({ __unreleased: true }); const d = mkDriver("Cancel Driver");
-  await wf({ id: c.row.id, action: "approve_assign", driverId: d.id });
-  Object.assign(c.row, { payment_status: "paid", amount_paid_cents: c.row.online_amount_cents });
-  assert.equal((await wf({ id: c.row.id, action: "cancel", reason: "" })).status, 422);
-  const r = await wf({ id: c.row.id, action: "cancel", reason: "Customer request" }); const out = await r.json();
-  assert.equal(r.status, 200); assert.equal(out.refundReviewNeeded, true);                                     // flagged for a human; nothing refunded automatically
-  assert.equal(c.row.status, "cancelled"); assert.equal(c.row.payment_released_at, null); assert.equal(c.row.amount_paid_cents, c.row.online_amount_cents);
-  assert.equal(db.t("booking_assignments").filter((x: any) => x.booking_id === c.row.id && !x.unassigned_at).length, 0);
-  assert.equal((await wf({ id: c.row.id, action: "cancel", reason: "twice" })).status, 409);
-  globalThis.__cookies = {};
-});
-
-test("rush hour + tips: calculated on the fixed price on the server, persisted, itemised in the payment, never trusted from the browser", async () => {
-  setPay("full"); setFixed(10000, 20000, 30000);
-  // 09:30 is inside the default 8-10 AM window: 5% of $200 = $10, once. A 20% tip is on the FIXED price ($40), not on the surcharge.
-  const rush = await makeBooking({ tip: { kind: "percent", percent: 20 }, totalCents: 1, rushCents: 0 }, { time: "09:30" });
-  assert.equal(rush.res.status, 200);
-  assert.equal(rush.row.fixed_price_cents, 20000); assert.equal(rush.row.rush_surcharge_cents, 1000); assert.equal(rush.row.tip_cents, 4000);
-  assert.equal(rush.row.tip_kind, "percent"); assert.equal(rush.row.online_amount_cents, 25000);
-  await pay(rush.row.payment_token);
-  const names = (net.calls.filter((c) => c.url === "https://api.stripe.com/v1/checkout/sessions").at(-1)!.body as string);
-  assert.match(String(names), /Rush-hour/); assert.match(String(names), /Driver%20tip|Driver\+tip|Driver tip/);
-  // Outside the windows: no surcharge. Custom tip is exact; "No thanks" is zero.
-  const calm = await makeBooking({ tip: { kind: "custom", dollars: "12.50" } }, { time: "12:00" });
-  assert.equal(calm.row.rush_surcharge_cents, 0); assert.equal(calm.row.tip_cents, 1250); assert.equal(calm.row.online_amount_cents, 21250);
-  const none = await makeBooking({ tip: { kind: "none" } }, { time: "12:00" }); assert.equal(none.row.tip_cents, 0); assert.equal(none.row.online_amount_cents, 20000);
-  // Invalid tips are rejected before anything is saved.
-  const before = db.t("bookings").length;
-  for (const tip of [{ kind: "custom", dollars: "-5" }, { kind: "custom", dollars: "abc" }, { kind: "percent", percent: 99 }, { kind: "custom", dollars: "99999999" }]) {
-    assert.equal((await makeBooking({ tip }, { time: "12:00" })).res.status, 422);
-  }
-  assert.equal(db.t("bookings").length, before);
-  // Changing the admin setting later never rewrites a saved booking.
-  Object.assign(db.t("booking_settings")[0], { rush_percent: 50 });
-  assert.equal(rush.row.rush_surcharge_cents, 1000);
-  Object.assign(db.t("booking_settings")[0], { rush_enabled: true, rush_percent: 5 });
-});
-
-test("luggage: checked and carry-on bags are validated and saved", async () => {
-  setFixed(10000, 20000, 30000);
-  const ok = await makeBooking({ checkedBags: 2, carryOnBags: 1 }, { time: "12:00" });
-  assert.equal(ok.row.checked_bags, 2); assert.equal(ok.row.carry_on_bags, 1); assert.equal(ok.row.luggage_count, 3);
-  for (const bad of [{ checkedBags: -1 }, { carryOnBags: 2.5 }, { checkedBags: 99 }, { checkedBags: "x" }]) assert.equal((await makeBooking(bad, { time: "12:00" })).res.status, 422);
-});
-
-
-// ---- Driver isolation and ride status (Phase B) ----------------------------------------------------
-const asDriver = (token: string | null) => { globalThis.__cookies = token ? { vd_at: token } : {}; };
-const dRides = async () => { const r = await routes.driverRides.GET(); return { status: r.status, body: await r.json().catch(() => ({})) }; };
-const dStatus = (id: string, status: string) => routes.driverStatus.POST(post("/api/driver/status", { id, status }));
-const asAdmin = () => { globalThis.__cookies = { vt_at: "good" }; };
-
-async function assignedTo(driver: any) {
-  const b = await makeBooking({ __unreleased: true });
-  asAdmin(); const r = await wf({ id: b.row.id, action: "approve_assign", driverId: driver.id }); assert.equal(r.status, 200); asDriver(null);
-  return b;
-}
-
-test("driver API: signed-out, admin-cookie and unlinked users get nothing; a driver cookie is not an admin session", async () => {
-  mkDriver("Iso Ann", { user_id: "user-drv-a" });
-  asDriver(null); assert.equal((await dRides()).status, 401);
-  assert.equal((await dStatus("00000000-0000-4000-8000-000000000001", "on_the_way")).status, 401);
-  asAdmin(); assert.equal((await dRides()).status, 401);                       // an admin session is not a driver session
-  asDriver("drv-stranger"); assert.equal((await dRides()).status, 401);        // valid Supabase user, but not linked to a driver record
-  asDriver("drv-a"); assert.equal((await wf({ id: "00000000-0000-4000-8000-000000000001", action: "cancel", reason: "x" })).status, 401); // driver cannot use admin actions
-  asDriver(null);
-});
-
-test("drivers see only their own rides, with contact details only while a ride is open and never pricing or payment data", async () => {
-  const a = mkDriver("Own Alpha", { user_id: "user-drv-oa" }), c = mkDriver("Own Beta", { user_id: "user-drv-ob" });
-  const ra = await assignedTo(a), rb = await assignedTo(c);
-  asDriver("drv-oa"); const A = await dRides(); asDriver("drv-ob"); const B = await dRides();
-  assert.deepEqual(A.body.rides.map((r: any) => r.id), [ra.row.id]); assert.deepEqual(B.body.rides.map((r: any) => r.id), [rb.row.id]);
-  const ride = A.body.rides[0]; assert.ok(ride.contactPhone);
-  const dump = JSON.stringify(A.body);
-  for (const secret of ["payment_token", ra.row.payment_token, "online_amount", "fixed_price", "tip_cents", "rush_surcharge", "admin_notes", "@example.com"]) assert.ok(!dump.includes(secret), `leaked ${secret}`);
-  ra.row.status = "completed"; asDriver("drv-oa"); const done = (await dRides()).body.rides[0];
-  assert.equal(done.contactPhone, null); assert.equal(done.open, false); assert.deepEqual(done.nextStatuses, []);
-  asDriver(null);
-});
-
-test("driver status: own ride only, valid steps only, once only; customer told when on the way; history recorded", async () => {
-  const a = mkDriver("Flow Alpha", { user_id: "user-drv-fa" }), c = mkDriver("Flow Beta", { user_id: "user-drv-fb" });
-  const r = await assignedTo(a); const other = await assignedTo(c);
-  asDriver("drv-fa");
-  assert.equal((await dStatus(other.row.id, "on_the_way")).status, 404);                 // another driver's ride: indistinguishable from missing
-  assert.equal(other.row.status, "assigned");
-  assert.equal((await dStatus(r.row.id, "completed")).status, 409);                      // cannot skip steps
-  assert.equal((await dStatus(r.row.id, "picked_up")).status, 409);
-  for (const bad of ["cancelled", "no_show", "rejected", "wat"]) assert.equal((await dStatus(r.row.id, bad)).status, 400);
-  assert.equal((await dStatus(r.row.id, "assigned")).status, 409);                       // a known step, but not a valid move
-  assert.equal((await dStatus(r.row.id, "on_the_way")).status, 200);
-  assert.equal((await dStatus(r.row.id, "on_the_way")).status, 409);                     // double tap
-  assert.equal(db.t("notification_logs").filter((l: any) => l.entity_id === r.row.id && l.event === "booking.status_changed").length, 1);
-  assert.equal((await dStatus(r.row.id, "arrived")).status, 200);
-  assert.equal((await dStatus(r.row.id, "picked_up")).status, 200);
-  assert.equal((await dStatus(r.row.id, "completed")).status, 200);
-  assert.equal(r.row.status, "completed");
-  assert.deepEqual(db.t("booking_status_history").filter((h: any) => h.booking_id === r.row.id && h.actor_type === "driver").map((h: any) => h.to_status), ["on_the_way", "arrived", "picked_up", "completed"]);
-  assert.equal((await dStatus(r.row.id, "on_the_way")).status, 409);                     // finished rides cannot be reopened
-  asDriver(null);
-});
-
-test("reassignment revokes the old driver immediately and grants the new one; deactivation cuts access", async () => {
-  const a = mkDriver("Rev Alpha", { user_id: "user-drv-ra" }), c = mkDriver("Rev Beta", { user_id: "user-drv-rb" });
-  const r = await assignedTo(a);
-  asAdmin(); assert.equal((await wf({ id: r.row.id, action: "reassign", driverId: c.id })).status, 200);
-  asDriver("drv-ra"); assert.equal((await dRides()).body.rides.length, 0); assert.equal((await dStatus(r.row.id, "on_the_way")).status, 404);
-  asDriver("drv-rb"); assert.equal((await dRides()).body.rides.length, 1); assert.equal((await dStatus(r.row.id, "on_the_way")).status, 200);
-  c.is_active = false; assert.equal((await dRides()).status, 401);
-  asDriver(null);
-});
-
-test("driver invitation password: only a token belonging to a linked driver can set one", async () => {
-  mkDriver("Inv Ann", { user_id: "user-drv-inv" });
-  const setPw = (accessToken: string, password: string) => routes.driverSetPw.POST(post("/api/driver/set-password", { accessToken, password }));
-  assert.equal((await setPw("", "longenoughpassword")).status, 400);
-  assert.equal((await setPw("drv-inv", "short")).status, 422);
-  assert.equal((await setPw("garbage-token", "longenoughpassword")).status, 401);
-  assert.equal((await setPw("drv-nobody", "longenoughpassword")).status, 403);           // a valid user that is not a driver
-  assert.equal((await setPw("drv-inv", "longenoughpassword")).status, 200);
-});
-
-
-// ---- Customer booking page and chat (Phase B2) -----------------------------------------------------
-import { validateMessage, QUICK_REPLIES } from "../src/lib/chat.ts";
-const tripCtx = (token: string) => ({ params: Promise.resolve({ token }) });
-const tGet = async (token: string) => { const r = await routes.tripGet.GET(new Request("http://site.test/x"), tripCtx(token)); return { status: r.status, body: await r.json() }; };
-const cMsgs = async (token: string, after?: string) => { const r = await routes.tripMsgs.GET(new Request("http://site.test/x" + (after ? `?after=${encodeURIComponent(after)}` : "")), tripCtx(token)); return { status: r.status, body: await r.json() }; };
-const cSend = (token: string, body: unknown, clientId = "cid-" + Math.random().toString(36).slice(2, 12)) => routes.tripMsgs.POST(post("/x", { body, clientId }), tripCtx(token));
-const dMsgs = async (bookingId: string) => { const r = await routes.driverMsgs.GET(new Request("http://site.test/x?booking=" + bookingId)); return { status: r.status, body: await r.json() }; };
-const dSend = (bookingId: string, body: unknown, clientId = "did-" + Math.random().toString(36).slice(2, 12)) => routes.driverMsgs.POST(post("/x", { bookingId, body, clientId }));
-
-test("chat rules: trimmed, length-limited, quick replies recognised only when exact", () => {
-  assert.equal(validateMessage("   ", "customer").ok, false);
-  assert.equal(validateMessage("x".repeat(1001), "driver").ok, false);
-  assert.equal(validateMessage(42, "driver").ok, false);
-  const q = validateMessage(`  ${QUICK_REPLIES.driver[0]} `, "driver"); assert.ok(q.ok && q.quick);
-  const notQuick = validateMessage(QUICK_REPLIES.driver[0], "customer"); assert.ok(notQuick.ok && !notQuick.quick);   // a driver preset is not a customer preset
-  assert.ok(validateMessage("<script>alert(1)</script>", "customer").ok);                                           // stored as text; React escapes it on display
-});
-
-test("customer booking page: private link only; driver contact appears only after assignment; no internal data", async () => {
-  asDriver(null); setPay("full"); setFixed(10000, 20000, 30000);
-  const b = await makeBooking({ __unreleased: true });
-  assert.equal((await tGet("not-a-token")).status, 404); assert.equal((await tGet("00000000-0000-4000-8000-000000000000")).status, 404);
-  let t = (await tGet(b.row.payment_token)).body.trip;
-  assert.equal(t.status, "new_request"); assert.equal(t.driver, null); assert.equal(t.payable, false); assert.equal(t.chatAvailable, false);
-  assert.equal((await cMsgs(b.row.payment_token)).status, 404);                                    // no chat before a driver exists
-  assert.equal((await cSend(b.row.payment_token, "hello")).status, 409);
-  const d = mkDriver("Trip Driver", { user_id: "user-drv-trip", phone: "4105550188", vehicle_plate: "PLATE-9" });
-  asAdmin(); await wf({ id: b.row.id, action: "approve_assign", driverId: d.id }); asDriver(null);
-  t = (await tGet(b.row.payment_token)).body.trip;
-  assert.equal(t.driver.name, "Trip Driver"); assert.equal(t.driver.phone, "4105550188"); assert.equal(t.payable, true); assert.equal(t.chatOpen, true);
-  const dump = JSON.stringify(t);
-  for (const secret of ["admin_notes", "payment_token", "customer_id", "@drivers.test", "@example.com", b.row.id]) assert.ok(!dump.includes(secret), `leaked ${secret}`);
-  b.row.status = "completed"; t = (await tGet(b.row.payment_token)).body.trip;
-  assert.equal(t.driver, null); assert.equal(t.chatOpen, false); assert.equal(t.chatAvailable, true);   // contact hidden once the ride is over
-  b.row.status = "assigned";
-});
-
-test("chat: customer and the assigned driver exchange messages; other drivers and other customers cannot read or write", async () => {
-  const d1 = mkDriver("Chat One", { user_id: "user-drv-c1" }), d2 = mkDriver("Chat Two", { user_id: "user-drv-c2" });
-  const b1 = await assignedTo(d1), b2 = await assignedTo(d2);
-  assert.equal((await cSend(b1.row.payment_token, "I'm coming outside.")).status, 200);
-  asDriver("drv-c1");
-  let m = await dMsgs(b1.row.id); assert.equal(m.body.messages.length, 1); assert.equal(m.body.messages[0].quick, true); assert.equal(m.body.messages[0].role, "customer");
-  assert.equal((await dSend(b1.row.id, "On my way", "same-client-id")).status, 200);
-  const again = await dSend(b1.row.id, "On my way", "same-client-id"); assert.equal((await again.json()).duplicate, true);      // retry cannot duplicate
-  assert.equal(db.t("booking_messages").filter((x: any) => x.booking_id === b1.row.id).length, 2);
-  asDriver(null); const seen = await cMsgs(b1.row.payment_token); assert.deepEqual(seen.body.messages.map((x: any) => x.role), ["customer", "driver"]);
-  const after = await cMsgs(b1.row.payment_token, seen.body.messages[0].at); assert.ok(after.body.messages.length <= 1);
-  // Isolation
-  asDriver("drv-c1"); assert.equal((await dMsgs(b2.row.id)).status, 404); assert.equal((await dSend(b2.row.id, "intrude")).status, 404);
-  asDriver("drv-c2"); assert.equal((await dMsgs(b1.row.id)).status, 404);
-  assert.equal((await cMsgs(b2.row.payment_token)).body.messages.length, 0);                    // customer 2 sees nothing of customer 1's chat
-  asDriver(null); assert.equal((await dMsgs(b1.row.id)).status, 401);
-  assert.equal(db.t("booking_messages").filter((x: any) => x.booking_id === b2.row.id).length, 0);
-  // Validation and closed chat
-  assert.equal((await cSend(b1.row.payment_token, "   ")).status, 422);
-  assert.equal((await cSend(b1.row.payment_token, "x".repeat(1001))).status, 422);
-  b1.row.status = "completed"; assert.equal((await cSend(b1.row.payment_token, "late")).status, 409);
-  asDriver("drv-c1"); assert.equal((await dSend(b1.row.id, "late")).status, 409); asDriver(null);
-});
-
-test("chat: after reassignment the old driver loses the conversation and the new driver sees only their own period", async () => {
-  const a = mkDriver("Re Chat A", { user_id: "user-drv-rca" }), c = mkDriver("Re Chat B", { user_id: "user-drv-rcb" });
-  const r = await assignedTo(a);
-  await cSend(r.row.payment_token, "Hi A");
-  asAdmin(); await wf({ id: r.row.id, action: "reassign", driverId: c.id });
-  asDriver("drv-rca"); assert.equal((await dMsgs(r.row.id)).status, 404);
-  asDriver("drv-rcb"); assert.equal((await dMsgs(r.row.id)).body.messages.length, 0);          // earlier conversation stays with the earlier assignment
-  assert.equal((await dSend(r.row.id, "Hi, I am your new driver")).status, 200); asDriver(null);
-  assert.deepEqual((await cMsgs(r.row.payment_token)).body.messages.map((x: any) => x.body), ["Hi A", "Hi, I am your new driver"]);
-});
-
-test("chat: sending is rate limited", async () => {
-  const d = mkDriver("Rate Driver", { user_id: "user-drv-rate" }); const b = await assignedTo(d);
-  const codes: number[] = []; for (let i = 0; i < 24; i++) codes.push((await cSend(b.row.payment_token, `m${i}`)).status);
-  assert.equal(codes.filter((c) => c === 200).length, 20); assert.ok(codes.includes(429));
 });

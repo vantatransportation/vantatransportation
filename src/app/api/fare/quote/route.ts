@@ -1,4 +1,3 @@
-import { rushSurcharge } from "@/lib/pricing/surcharge";
 import { json, clientIp, readJson, sameOrigin } from "@/lib/http";
 import { rateLimit } from "@/lib/rate-limit";
 import { getAdminClient } from "@/lib/supabase/admin";
@@ -78,14 +77,6 @@ export async function POST(request: Request) {
       pricingAvailable: vehicles.some((v) => v.quotable),
       seatFeeCents: seat.line?.cents ?? 0,
       meetGreetEnabled: settings.meetGreetEnabled,
-      // Rush-hour rule for DISPLAY. Whether it applies depends on the pickup time and each route's duration; the server recalculates when booking.
-      rush: {
-        enabled: settings.rush.enabled, percent: settings.rush.percent,
-        applies: Object.fromEntries((Object.keys(routes) as RouteKey[]).map((k) => [k, rushSurcharge(1, [
-          { startIso: trip.pickupAtIso, durationMinutes: routes[k]!.durationMinutes },
-          ...(trip.returnLeg ? [{ startIso: trip.returnLeg.pickupAtIso, durationMinutes: returnRoutes[k]?.durationMinutes ?? null }] : []),
-        ], { ...settings.rush, percent: Math.max(settings.rush.percent, 1) }).applies])),
-      },
       tiers: (tierRows.data ?? []).map((t: Record<string, any>) => ({ name: t.name, fixedPriceCents: t.fixed_price_cents ?? null, meetGreetFeeCents: t.meet_greet_fee_cents ?? null })), // eslint-disable-line @typescript-eslint/no-explicit-any
       seatInfo: { oneWayCents: settings.seats.oneWayCents, roundTripCents: settings.seats.roundTripCents, max: settings.seats.max },
       region: { key: regionKey, label: REGION_LABEL[regionKey], manualReview: fulfilmentFor(regionKey).requiresManualReview },

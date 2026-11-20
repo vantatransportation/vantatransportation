@@ -12,7 +12,6 @@ import { paymentPlan } from "@/lib/payments";
 import { availableProviders } from "@/lib/payment-providers";
 import { onlineCharge, CHARGE_REASON_TEXT, type OnlineCharge } from "@/lib/tier-pricing";
 import type { BookingDetails } from "@/lib/booking-details";
-import { computeTip, rushSurcharge, type TipSelection } from "@/lib/pricing/surcharge";
 import { loadFleet, lookupPromo, routeToInput, type RouteKey } from "./service";
 import type { Trip } from "./trip";
 
@@ -30,8 +29,6 @@ export interface CreateBookingInput {
   /** Admin-agreed final price in cents (revised quote). Recorded in the snapshot. */
   priceOverrideCents?: number;
   quoteRequestId?: string;
-  /** Customer tip choice (untrusted input already parsed; the amount is calculated here). Defaults to no tip. */
-  tip?: TipSelection;
 }
 
 export type CreateBookingResult =
@@ -44,7 +41,7 @@ export type CreateBookingResult =
     }
   | { ok: false; status: number; error: string };
 
-const NO_DETAILS: BookingDetails = { bookingFor: "self", passenger: null, luggageCount: null, checkedBags: null, carryOnBags: null, assistanceNotes: null, pickupInstructions: null, contacts: [], airport: null, policiesAcknowledged: false };
+const NO_DETAILS: BookingDetails = { bookingFor: "self", passenger: null, luggageCount: null, assistanceNotes: null, pickupInstructions: null, contacts: [], airport: null, policiesAcknowledged: false };
 
 export async function createBooking(db: SupabaseClient, input: CreateBookingInput): Promise<CreateBookingResult> {
   const { trip } = input;
@@ -94,20 +91,7 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
   const seatCents = seatRes.line?.cents ?? 0;
   // The online charge is calculated here, from the database, whatever the browser displayed. Quote conversions at an
   // agreed price carry no online charge.
-  // Rush-hour surcharge and tip: both on the fixed tier price only, calculated here from admin settings. Round trips
-  // are charged the surcharge once if any leg overlaps a window.
-  let rushCents = 0, rushPercent: number | null = null, tipCents = 0, tipKind: "none" | "percent" | "custom" = "none", tipPercent: number | null = null;
-  if (input.priceOverrideCents == null && vehicle.tierPricing?.fixedPriceCents != null) {
-    const base = vehicle.tierPricing.fixedPriceCents;
-    const journeys = [{ startIso: trip.pickupAtIso, durationMinutes: route?.durationMinutes ?? (trip.tripType === "hourly" && trip.hours ? trip.hours * 60 : null) }];
-    if (rt) journeys.push({ startIso: rt.pickupAtIso, durationMinutes: returnRoute?.durationMinutes ?? null });
-    const rush = rushSurcharge(base, journeys, settings.rush);
-    if (rush.applies) { rushCents = rush.cents; rushPercent = rush.percent; }
-    const tip = computeTip(base, input.tip ?? { kind: "none" });
-    if (!tip.ok) return { ok: false, status: 422, error: tip.error };
-    tipCents = tip.cents; tipKind = tip.kind; tipPercent = tip.percent;
-  }
-  const chargeRes = input.priceOverrideCents != null ? null : onlineCharge(vehicle.tierPricing, { meetGreet: wantsMG, addonsCents: seatCents, rushCents, tipCents });
+  const chargeRes = input.priceOverrideCents != null ? null : onlineCharge(vehicle.tierPricing, { meetGreet: wantsMG, addonsCents: seatCents });
   if (chargeRes && !chargeRes.ok && wantsMG && (chargeRes.reason === "meet_greet_unavailable" || chargeRes.reason === "tier_missing")) {
     return { ok: false, status: 422, error: `${CHARGE_REASON_TEXT[chargeRes.reason]} Please untick Meet & Greet or contact us.` };
   }
@@ -154,7 +138,6 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
   const policies = await loadPublicPolicies(db);
   const now = new Date().toISOString();
 
-  // Payment is NOT started at submission: a pay link is created only after an admin approves the request and assigns a driver.
   // Online payment applies only when an admin enabled it, Stripe is configured and the price is known.
   const plan = availableProviders(settings).length > 0 ? paymentPlan(settings.payment, online?.totalCents ?? null, 0) : null;
   snapshot = { ...(snapshot ?? {}), online };
@@ -167,9 +150,8 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
     hours: trip.hours, distance_miles: route?.distanceMiles ?? null, duration_minutes: route?.durationMinutes ?? null, avoid_tolls: avoid,
     estimated_fare_cents: totalCents, currency, notes: input.notes, submission_key: input.submissionKey, source_quote_request_id: input.quoteRequestId ?? null,
     child_seats: SEAT_TYPES.filter((t) => (trip.childSeats ?? NO_SEATS)[t] > 0).map((t) => ({ type: t, quantity: (trip.childSeats ?? NO_SEATS)[t] })),
-    child_seat_fee_cents: seatCents, rush_surcharge_cents: rushCents, rush_surcharge_percent: rushPercent, tip_kind: tipKind, tip_percent: tipPercent, tip_cents: tipCents,
-    checked_bags: details.checkedBags, carry_on_bags: details.carryOnBags, tier_name: vehicle.tier || null, fixed_price_cents: online?.fixedPriceCents ?? null,
-    meet_greet_selected: wantsMG, meet_greet_fee_cents: online && wantsMG ? online.meetGreetCents : null, online_amount_cents: online?.totalCents ?? null, payment_status: plan ? "unpaid" : "not_required", approved_at: null, payment_released_at: null,
+    child_seat_fee_cents: seatCents, tier_name: vehicle.tier || null, fixed_price_cents: online?.fixedPriceCents ?? null,
+    meet_greet_selected: wantsMG, meet_greet_fee_cents: online && wantsMG ? online.meetGreetCents : null, online_amount_cents: online?.totalCents ?? null, payment_status: plan ? "unpaid" : "not_required",
     trip_direction: rt ? "round_trip" : "one_way", booking_for: details.bookingFor, luggage_count: details.luggageCount,
     assistance_notes: details.assistanceNotes, pickup_instructions: details.pickupInstructions,
     service_region: region, fulfilment_mode: ful.mode, requires_manual_review: ful.requiresManualReview, review_reason: ful.reason,
@@ -215,5 +197,5 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
   await db.from("activity_logs").insert({ action: "booking.created", entity_type: "booking", entity_id: bookingId, meta: { reference: ins.data.reference, source: input.quoteRequestId ? "quote_conversion" : "website", region, roundTrip: Boolean(rt) } });
 
   return { ok: true, id: bookingId, reference: ins.data.reference, totalCents, currency, vehicleName: vehicle.name, duplicate: false, customerId, region, requiresReview: ful.requiresManualReview, roundTrip: Boolean(rt), discountCents, meetGreetRequested: wantsMG, meetGreetPending: false,
-    paymentToken: ins.data.payment_token ?? null, payment: null, childSeatFeeCents: seatCents, online };
+    paymentToken: ins.data.payment_token ?? null, payment: plan, childSeatFeeCents: seatCents, online };
 }

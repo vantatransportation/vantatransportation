@@ -48,7 +48,7 @@ export const defaultSiteData: SiteData = {
       { title: "Airport transfers", description: "Pickups and drop-offs for airport travel." },
       { title: "Group travel", description: "Vans and large SUVs for bigger parties." },
     ],
-    "contact.email": "vantatransportation.1@gmail.com",
+    "contact.email": "vantaholdings.1@gmail.com",
     "contact.phone": "+1 443-910-1794",
     "contact.address": "",
     "contact.hours": "24/7 for requests. Transportation availability and final confirmation depend on location and availability.",

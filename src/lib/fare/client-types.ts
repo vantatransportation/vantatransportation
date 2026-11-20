@@ -42,8 +42,6 @@ export interface FareResponse {
   tiers?: { name: string; fixedPriceCents: number | null; meetGreetFeeCents: number | null }[];
   /** Whether airport Meet & Greet can be requested at all. */
   meetGreetEnabled?: boolean;
-  /** Rush-hour surcharge rule and whether it applies to each route option for the requested pickup time (display only). */
-  rush?: { enabled: boolean; percent: number; applies: Partial<Record<RouteKey, boolean>> };
   seatInfo?: { oneWayCents: number; roundTripCents: number; max: number };
   /** Set when the trip may need staff review (outside the DMV or unverified region). Never blocks a request. */
   region?: { key: "dmv" | "east_coast" | "other" | "unknown"; label: string; manualReview: boolean };
@@ -59,7 +57,7 @@ export interface StoredTrip {
   display: {
     quote: QuoteDto | null; distanceMiles: number; durationMinutes: number; routeLabel: string;
     /** What is charged online (display copy; recalculated on the server): fixed tier price + Meet & Greet + child seats. */
-    online?: { tierName: string; fixedPriceCents: number | null; meetGreetCents: number; seatFeeCents: number; rushCents?: number; rushPercent?: number } | null;
+    online?: { tierName: string; fixedPriceCents: number | null; meetGreetCents: number; seatFeeCents: number } | null;
   };
 }
 export const TRIP_STORAGE_KEY = "vanta:trip";

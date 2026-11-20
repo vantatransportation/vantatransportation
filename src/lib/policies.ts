@@ -2,8 +2,6 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ExtraLine, RoundTripRule } from "@/lib/pricing/roundtrip";
 import { DEFAULT_PAYMENT, type PaymentMode, type PaymentSettings } from "@/lib/payments";
-import { DEFAULT_RUSH, validateRush, type RushSettings, type RushWindow } from "@/lib/pricing/surcharge";
-import { BUSINESS_TZ } from "@/lib/config";
 import { childSeatFee, childSeatSummary, DEFAULT_SEAT_SETTINGS, seatCount, type ChildSeats, type SeatSettings } from "@/lib/child-seats";
 
 export interface BookingSettings {
@@ -18,13 +16,11 @@ export interface BookingSettings {
   waitingRateCents: number | null;
   seats: SeatSettings;
   payment: PaymentSettings;
-  /** Rush-hour surcharge (admin-editable). Calculated on the fixed tier price, once per booking. */
-  rush: RushSettings;
 }
 
 export type { PaymentMode, PaymentSettings } from "@/lib/payments";
 
-export const DEFAULT_SETTINGS: BookingSettings = { meetGreetEnabled: true, stripeEnabled: true, paypalEnabled: true, waitingIncludedMinutes: 15, waitingIncrementMinutes: 15, waitingRateCents: null, seats: DEFAULT_SEAT_SETTINGS, payment: DEFAULT_PAYMENT, rush: { ...DEFAULT_RUSH, timeZone: BUSINESS_TZ } };
+export const DEFAULT_SETTINGS: BookingSettings = { meetGreetEnabled: true, stripeEnabled: true, paypalEnabled: true, waitingIncludedMinutes: 15, waitingIncrementMinutes: 15, waitingRateCents: null, seats: DEFAULT_SEAT_SETTINGS, payment: DEFAULT_PAYMENT };
 
 export async function loadBookingSettings(db: SupabaseClient): Promise<BookingSettings> {
   try {
@@ -48,24 +44,10 @@ export async function loadBookingSettings(db: SupabaseClient): Promise<BookingSe
         depositPercent: data.deposit_percent != null ? Number(data.deposit_percent) : null,
         terms: typeof data.payment_terms === "string" && data.payment_terms.trim() ? data.payment_terms.trim() : null,
       },
-      rush: parseRush(data),
     };
   } catch {
     return DEFAULT_SETTINGS;
   }
-}
-
-/** Reads the rush-hour columns. Missing or invalid values fall back to the documented default rule (never silently to "off"). */
-export function parseRush(data: Record<string, unknown>): RushSettings {
-  const def = { ...DEFAULT_RUSH, timeZone: BUSINESS_TZ };
-  if (data.rush_enabled === undefined && data.rush_percent === undefined) return def; // migration 0007 not applied yet
-  const windows = Array.isArray(data.rush_windows) ? (data.rush_windows as RushWindow[]).filter((w) => w && typeof w.start === "string" && typeof w.end === "string") : def.windows;
-  const cand: RushSettings = {
-    enabled: data.rush_enabled !== false, percent: Number(data.rush_percent ?? def.percent),
-    windows, timeZone: typeof data.rush_timezone === "string" && data.rush_timezone ? data.rush_timezone : def.timeZone,
-  };
-  if (validateRush(cand)) { console.error("[settings] invalid rush-hour settings; using defaults", validateRush(cand)); return def; }
-  return cand;
 }
 
 export const waitingPolicyText = (included: number, step: number) =>

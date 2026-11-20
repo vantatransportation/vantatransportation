@@ -85,10 +85,7 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
   const seatFee = result?.seatFeeCents ?? 0;
   const mgOffered = !meetGreet || (tp?.meetGreetFeeCents != null);
   const mgFee = meetGreet && tp?.meetGreetFeeCents != null ? tp.meetGreetFeeCents : 0;
-  const rushApplies = Boolean(result?.rush?.enabled && result.rush.applies[route?.key ?? "fastest"]);
-  const rushPercent = rushApplies ? result?.rush?.percent ?? 0 : 0;
-  const rushFee = tp?.fixedPriceCents != null && rushApplies ? Math.round((tp.fixedPriceCents * rushPercent) / 100) : 0; // display only: recalculated on the server
-  const onlineTotal = tp?.fixedPriceCents != null && mgOffered ? tp.fixedPriceCents + rushFee + mgFee + seatFee : null;
+  const onlineTotal = tp?.fixedPriceCents != null && mgOffered ? tp.fixedPriceCents + mgFee + seatFee : null;
 
   async function getFares(e: React.FormEvent) {
     e.preventDefault();
@@ -122,7 +119,7 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
       submissionKey: newKey(),
       display: {
         quote, distanceMiles: route.distanceMiles, durationMinutes: route.durationMinutes, routeLabel: route.label,
-        online: tp ? { tierName: tp.name, fixedPriceCents: tp.fixedPriceCents, meetGreetCents: mgFee, seatFeeCents: seatFee, rushCents: rushFee, rushPercent } : null,
+        online: tp ? { tierName: tp.name, fixedPriceCents: tp.fixedPriceCents, meetGreetCents: mgFee, seatFeeCents: seatFee } : null,
       },
     };
     try { sessionStorage.setItem(TRIP_STORAGE_KEY, JSON.stringify(stored)); } catch { /* ignore */ }
@@ -324,7 +321,6 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
                 {tp?.fixedPriceCents != null ? (
                   <table className="lines" aria-label="Amount charged online"><tbody>
                     <tr><td>Fixed {tp.name} price</td><td>{formatMoney(tp.fixedPriceCents)}</td></tr>
-                    {rushFee > 0 && <tr><td>Rush-hour surcharge ({rushPercent}%)<span className="tag">peak pickup time</span></td><td>{formatMoney(rushFee)}</td></tr>}
                     {meetGreet && tp.meetGreetFeeCents != null && <tr><td>Airport Meet &amp; Greet<span className="tag">requested</span></td><td>{formatMoney(tp.meetGreetFeeCents)}</td></tr>}
                     {seatFee > 0 && <tr><td>Child car seats</td><td>{formatMoney(seatFee)}</td></tr>}
                     {onlineTotal != null && <tr className="total"><td>Total due online</td><td>{formatMoney(onlineTotal)}</td></tr>}

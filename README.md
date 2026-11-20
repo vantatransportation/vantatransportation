@@ -72,7 +72,7 @@ Google bills per request (route calculation with toll data is a higher-priced ti
 Emails are sent server-side through `https://api.brevo.com/v3/smtp/email` (`src/lib/notify/brevo.ts`).
 1. Create a Brevo account and an API key (SMTP & API, API keys).
 2. In Brevo, **verify a sender** (a single email address, or better, authenticate your sending domain with the DKIM/DMARC records Brevo shows). Brevo rejects mail from unverified senders. Do not assume the business Gmail address is verified.
-3. Set `BREVO_API_KEY`, `BREVO_SENDER_EMAIL` (the verified sender), `BREVO_SENDER_NAME`, and `BUSINESS_NOTIFICATION_EMAIL` (defaults to vantatransportation.1@gmail.com).
+3. Set `BREVO_API_KEY`, `BREVO_SENDER_EMAIL` (the verified sender), `BREVO_SENDER_NAME`, and `BUSINESS_NOTIFICATION_EMAIL` (defaults to vantaholdings.1@gmail.com).
 4. Submit a test booking and check **Admin, Notifications**: rows show `sent`, `failed` (with Brevo's reason, retryable) or `skipped` (not configured). Until you have seen `sent` rows and received the mail, do not assume delivery works.
 Duplicate protection: every email has a unique dedupe key stored before sending, so a repeated event cannot send twice (Brevo's API has no idempotency header, so this is done in the database). Bookings and inquiries are saved first; an email failure never removes them.
 
