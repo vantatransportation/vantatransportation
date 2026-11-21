@@ -3,14 +3,14 @@ import Link from "next/link";
 import OpenCalculator from "./OpenCalculator";
 import type { Category, Faq, Standard, Vehicle } from "@/lib/types";
 import VehiclePhoto from "./VehiclePhoto";
-import { hasRealPhoto } from "@/lib/vehicle-photo";
+import { pickCategoryVehicle } from "@/lib/fleet-data";
 
 /** Category tiles: a real photo of a vehicle in the category when one exists, otherwise the neutral category icon. */
 export function CategoryGrid({ categories, vehicles = [] }: { categories: Category[]; vehicles?: Vehicle[] }) {
   return (
     <div className="cats">
       {categories.map((c) => {
-        const photo = vehicles.find((v) => v.categorySlug === c.slug && hasRealPhoto(v.image));
+        const photo = pickCategoryVehicle(vehicles, c.slug);
         return (
           <Link key={c.id} href={`/rides#${c.slug}`} className="cat">
             {photo ? <VehiclePhoto src={photo.image} name={photo.name} width={640} height={400} /> : <Image src={c.image} alt="" width={400} height={160} loading="lazy" className="cat__icon" />}

@@ -28,9 +28,15 @@ export default function VehiclePhoto({ src, name, width = 800, height = 500, siz
     setState({ src: resolved, stage: (stage + 1) as 1 | 2 });
   };
   const url = photoUrl(resolved, width, height);
+  // The home page and /rides are server-rendered, so their <img> can finish (or fail) BEFORE React hydrates and attaches
+  // onError, and that error event is then never delivered: the card would stay broken instead of trying the next stage.
+  // The calculator mounts in the browser, so it never had this gap. On mount, treat an already-failed image as a failure.
+  const check = (img: HTMLImageElement | null) => {
+    if (img && img.complete && img.naturalWidth === 0 && img.getAttribute("src")) fail();
+  };
   return (
     <div className={`vphoto ${className}`} style={{ aspectRatio: `${width} / ${height}` }}>
-      <Image key={`${url}:${stage}`} src={url} alt={name} width={width} height={height} sizes={sizes ?? "(max-width: 700px) 100vw, 400px"} priority={priority} loading={priority ? undefined : "lazy"} unoptimized={stage === 1} onError={fail} />
+      <Image key={`${url}:${stage}`} src={url} alt={name} width={width} height={height} sizes={sizes ?? "(max-width: 700px) 100vw, 400px"} priority={priority} loading={priority ? undefined : "lazy"} unoptimized={stage === 1} onError={fail} ref={check} />
     </div>
   );
 }
