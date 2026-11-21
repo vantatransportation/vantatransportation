@@ -26,7 +26,7 @@ export default async function PayPage({ params, searchParams }: { params: Promis
   const sp = await searchParams;
   const back = Array.isArray(sp.checkout) ? sp.checkout[0] : sp.checkout;
   const db = validToken(token) ? getAdminClient() : null;
-  const { data: b } = db ? await db.from("bookings").select("id,reference,status,pickup_at,estimated_fare_cents,currency,amount_paid_cents,payment_status,child_seat_fee_cents,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,online_amount_cents").eq("payment_token", token).maybeSingle() : { data: null };
+  const { data: b } = db ? await db.from("bookings").select("id,reference,status,driver_id,payment_released_at,confirmed_at,pickup_at,estimated_fare_cents,currency,amount_paid_cents,payment_status,child_seat_fee_cents,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,online_amount_cents").eq("payment_token", token).maybeSingle() : { data: null };
 
   if (!db || !b) {
     return (
@@ -37,8 +37,9 @@ export default async function PayPage({ params, searchParams }: { params: Promis
   const providers = availableProviders(settings);
   const c = await chargeForBooking(db, b); // the same server calculation the payment endpoints use
   const charge = c.ok ? c.charge : null;
-  const plan = charge && providers.length ? paymentPlan(settings.payment, charge.totalCents, b.amount_paid_cents ?? 0) : null;
-  const closed = b.status === "cancelled" || b.status === "no_show";
+  const closed = ["cancelled", "no_show", "rejected", "completed"].includes(b.status);
+  const released = Boolean(b.payment_released_at && b.driver_id) && !closed;
+  const plan = released && charge && providers.length ? paymentPlan(settings.payment, charge.totalCents, b.amount_paid_cents ?? 0) : null;
   const status = String(b.payment_status);
   const retry = status === "failed" || status === "unpaid" || status === "pending";
 
@@ -72,11 +73,12 @@ export default async function PayPage({ params, searchParams }: { params: Promis
           </dl>
           {settings.payment.terms && <p className="muted" style={{ marginTop: "1rem" }}>{settings.payment.terms}</p>}
           {closed ? <div className="notice">This booking can no longer be paid online. Please contact us.</div>
+            : !released ? <div className="notice" role="status">Your booking request is still being reviewed. Payment opens only after we approve it, and we will email you when it does. You have not been charged.</div>
             : plan && retry ? (
               <div style={{ marginTop: "1.5rem" }}>
                 <p style={{ marginBottom: "1rem" }}>{plan.kind === "deposit" ? "Deposit due now: " : "Amount due now: "}<strong>{formatMoney(plan.amountCents, b.currency)}</strong></p>
                 <PaymentChoice token={token} available={providers} paypalClientId={paypalClientId()} amountLabel={formatMoney(plan.amountCents, b.currency)} retry={status === "failed" || back === "cancelled"} />
-                <p className="muted" style={{ marginTop: "1rem" }}>Paying does not confirm your booking by itself: we confirm it with you directly.</p>
+                <p className="muted" style={{ marginTop: "1rem" }}>Your booking is confirmed when your payment is received and verified by our payment provider, not when you return to this page. We then email you a confirmation with your tracking ID.</p>
               </div>
             ) : !plan && status !== "paid" && status !== "deposit_paid" ? <div className="notice">Online payment is not available for this booking right now. We will arrange payment with you directly.</div> : null}
           <p style={{ marginTop: "2rem" }}><Link href="/" className="btn btn--ghost">Back to home</Link></p>

@@ -5,7 +5,7 @@ import { calculateRoundTrip, withExtras, type ExtraLine } from "@/lib/pricing/ro
 import { pickRule, type RuleRow } from "@/lib/policies";
 import type { ParsedRoute } from "@/lib/geo/parse";
 import type { Trip } from "./trip";
-import { hasRealPhoto } from "@/lib/vehicle-photo";
+import { resolvePhotoSrc } from "@/lib/vehicle-photo";
 import type { TierPricing } from "@/lib/tier-pricing";
 
 export type RouteKey = "fastest" | "no_tolls";
@@ -58,7 +58,7 @@ export async function loadFleet(db: SupabaseClient): Promise<FleetVehicle[]> {
     return {
       id: v.id, name: v.name, category: v.vehicle_categories?.name ?? "", categoryId: v.vehicle_categories?.id ?? null, tier: v.vehicle_tiers?.name ?? "", tierId: v.tier_id ?? null,
       tierPricing: v.vehicle_tiers ? { id: v.vehicle_tiers.id ?? v.tier_id ?? null, name: v.vehicle_tiers.name, fixedPriceCents: v.vehicle_tiers.fixed_price_cents ?? null, meetGreetFeeCents: v.vehicle_tiers.meet_greet_fee_cents ?? null } : null,
-      passengers: v.passenger_capacity, image: hasRealPhoto(v.image_url) ? v.image_url : null, imagePublicId: v.image_public_id ?? null,
+      passengers: v.passenger_capacity, image: resolvePhotoSrc(v.image_url), imagePublicId: v.image_public_id ?? null,
       description: v.description ?? "", capacityLabel: v.vehicle_categories?.capacity_label ?? "", similarModels: v.similar_models ?? "", config,
     };
   });

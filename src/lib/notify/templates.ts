@@ -4,7 +4,7 @@
  */
 export type NotifyEvent =
   | "booking.created" | "lead.created" | "quote.created" | "quote.responded" | "quote.revised_sent" | "booking.status_changed" | "payment.paid"
-  | "booking.approved" | "booking.reassigned" | "booking.rejected" | "driver.assigned" | "driver.unassigned";
+  | "booking.approved" | "booking.confirmed" | "booking.reassigned" | "booking.rejected" | "driver.assigned" | "driver.unassigned";
 
 export interface EmailMessage {
   audience: "business" | "customer";
@@ -25,6 +25,7 @@ type Data = Record<string, string | undefined>;
 export const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 const v = (d: Data, k: string) => d[k] ?? "";
 const pick = (d: Data, keys: string[]) => Object.fromEntries(keys.filter((k) => d[k]).map((k) => [k, d[k]!]));
+const withTracking = (d: Data): Data => (d._trackingId ? { ...d, "Tracking ID": d._trackingId } : d);
 const customerTo = (d: Data) => (d._customerEmail ? { email: d._customerEmail, name: d._customerName } : undefined);
 const driverTo = (d: Data) => (d._driverEmail ? { email: d._driverEmail, name: d._driverName } : undefined);
 const STATUS_COPY: Record<string, { subject: string; intro: string }> = {
@@ -42,10 +43,10 @@ export function buildNotification(event: NotifyEvent, d: Data): BuiltNotificatio
       const cust: EmailMessage[] = d._customerEmail ? [{
         audience: "customer", to: customerTo(d), subject: `We received your booking request ${v(d, "Reference")}`,
         heading: "Booking request received",
-        intro: "Thank you. This is a request, not a confirmed booking. We will review availability and confirm with you directly. No payment has been taken yet.",
-        fields: pick(d, ["Reference", "When", "Pickup", "Stops", "Destination", "Vehicle", "Passengers", "Estimated trip fare (information only)", "Tier", "Fixed tier price", "Meet & Greet", "Child car seats", "Online amount due"]),
-        footnote: "Requested services (such as airport Meet & Greet or child car seats) are not confirmed until we confirm them with you.",
-        ...(d._payUrl ? { ctaLabel: "Pay online", ctaUrl: d._payUrl } : {}),
+        intro: "Thank you. This is a request, not a confirmed booking. We will review it first. No payment has been taken. If we approve it, we will email you a secure payment link, and your booking is confirmed once that payment is received.",
+        fields: pick(withTracking(d), ["Reference", "Tracking ID", "When", "Pickup", "Stops", "Destination", "Vehicle", "Passengers", "Estimated trip fare (information only)", "Tier", "Fixed tier price", "Meet & Greet", "Child car seats", "Online amount due"]),
+        footnote: "Keep your tracking ID private: anyone who has it can see this booking's progress. Requested services (such as airport Meet & Greet or child car seats) are not confirmed until we confirm them with you.",
+        ...(d._trackUrl ? { ctaLabel: "Track your ride", ctaUrl: d._trackUrl } : {}),
       }] : [];
       return {
         admin: { title: "New booking request", body: `${v(d, "Reference")} was received. Open the dashboard to review.`, link: `/admin/bookings/${id}` },
@@ -85,11 +86,21 @@ export function buildNotification(event: NotifyEvent, d: Data): BuiltNotificatio
       };
     case "payment.paid":
       return {
-        admin: { title: "Payment received", body: `${v(d, "Reference")}: a payment was received through Stripe. Open the dashboard to review.`, link: `/admin/bookings/${id}` },
+        admin: { title: d.Confirmed === "No" ? "Payment received: needs review" : "Payment received, booking confirmed", body: d.Confirmed === "No" ? `${v(d, "Reference")}: a verified payment arrived but the booking could not be confirmed automatically. Open the dashboard.` : `${v(d, "Reference")}: payment was verified by ${v(d, "Payment provider") || "the payment provider"} and the booking is confirmed.`, link: `/admin/bookings/${id}` },
         emails: [
-          { audience: "business", subject: `Payment received ${v(d, "Reference")}`, heading: "Payment received", intro: "Stripe confirmed a payment. The booking is NOT confirmed automatically: review and confirm it as usual.", fields: pick(d, ["Reference", "Payment provider", "Amount paid", "Payment type", "Tier", "Fixed tier price", "Meet & Greet", "Child car seats", "Payment status"]), ctaLabel: "Open booking", ctaUrl: d._adminUrl },
-          ...(d._customerEmail ? [{ audience: "customer" as const, to: customerTo(d), subject: `Payment received for ${v(d, "Reference")}`, heading: "We received your payment", intro: "Thank you. Your payment was received. Your booking is confirmed only when we confirm it with you directly.", fields: pick(d, ["Reference", "Amount paid", "Payment type", "Tier", "Fixed tier price", "Meet & Greet", "Child car seats"]) }] : []),
+          { audience: "business", subject: `Payment received ${v(d, "Reference")}`, heading: "Payment received", intro: d.Confirmed === "No" ? "The payment provider verified a payment, but this booking was not confirmed automatically (for example it was cancelled or declined in the meantime). Review it now. Nothing was refunded automatically." : "The payment provider verified this payment, so the booking is now confirmed and the customer has been sent a confirmation email.", fields: pick(d, ["Reference", "Payment provider", "Amount paid", "Payment type", "Tier", "Fixed tier price", "Meet & Greet", "Child car seats", "Payment status"]), ctaLabel: "Open booking", ctaUrl: d._adminUrl },
         ],
+      };
+    case "booking.confirmed":
+      return {
+        admin: null,
+        emails: d._customerEmail ? [{
+          audience: "customer", to: customerTo(d), subject: `Your Vanta booking is confirmed (${v(d, "Reference")})`, heading: "Your booking is confirmed",
+          intro: "Thank you. Your payment was received and verified, and your booking is confirmed. You can follow your ride with the tracking ID below.",
+          fields: pick(withTracking(d), ["Reference", "Tracking ID", "Pickup", "Stops", "Destination", "When", "Vehicle", "Tier", "Amount paid", "Payment status", "Remaining online balance", "Vanta support phone"]),
+          footnote: "Keep your tracking ID private: anyone who has it can see this booking's progress. For help with your ride, call Vanta support. We do not share driver or customer phone numbers; you can message your driver from the tracking page.",
+          ...(d._trackUrl ? { ctaLabel: "Track your ride", ctaUrl: d._trackUrl } : {}),
+        }] : [],
       };
     case "booking.approved": {
       const ctaUrl = d._payUrl ?? d["Booking page"];
@@ -97,8 +108,8 @@ export function buildNotification(event: NotifyEvent, d: Data): BuiltNotificatio
         admin: null,
         emails: d._customerEmail ? [{
           audience: "customer", to: customerTo(d), subject: `Your Vanta booking is approved (${v(d, "Reference")})`, heading: "Your booking is approved",
-          intro: d._payUrl ? "Good news: your booking has been approved and a driver has been assigned. You can now complete payment online using the secure link below." : "Good news: your booking has been approved and a driver has been assigned.",
-          fields: pick(d, ["Reference", "When", "Pickup", "Destination", "Driver", "Driver phone", "Vehicle plate", "Amount due online"]),
+          intro: d._payUrl ? "Good news: your booking has been approved and a driver has been assigned. To confirm it, complete payment online using the secure link below. Your booking is confirmed only after your payment is received and verified." : "Good news: your booking has been approved and a driver has been assigned. We will arrange payment with you directly; your booking is confirmed once payment is received.",
+          fields: pick(withTracking(d), ["Reference", "Tracking ID", "When", "Pickup", "Destination", "Driver", "Amount due online"]),
           ...(ctaUrl ? { ctaLabel: d._payUrl ? "Pay online" : "View your booking", ctaUrl } : {}),
         }] : [],
       };
@@ -109,7 +120,7 @@ export function buildNotification(event: NotifyEvent, d: Data): BuiltNotificatio
         emails: d._customerEmail ? [{
           audience: "customer", to: customerTo(d), subject: `Your driver has changed (${v(d, "Reference")})`, heading: "Your driver has changed",
           intro: "A different driver has been assigned to your booking. Your pickup details have not changed.",
-          fields: pick(d, ["Reference", "When", "Pickup", "Destination", "Driver", "Driver phone", "Vehicle plate"]),
+          fields: pick(d, ["Reference", "When", "Pickup", "Destination", "Driver"]),
         }] : [],
       };
     case "booking.rejected":

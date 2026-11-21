@@ -63,6 +63,7 @@ export function coerceValues(
 ): { ok: true; data: Record<string, unknown> } | { ok: false; error: string } {
   const data: Record<string, unknown> = {};
   for (const f of resource.fields) {
+    if (f.workflow) continue; // workflow-controlled fields are never writable here
     if (partial && !(f.name in values)) continue;
     const r = coerceField(f, values[f.name]);
     if (!r.ok) return r;

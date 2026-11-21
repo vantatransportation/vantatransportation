@@ -2,6 +2,7 @@ import Link from "next/link";
 import { adminPage } from "@/lib/admin/data";
 import { configWarnings } from "@/lib/notify";
 import { BUSINESS_TZ } from "@/lib/config";
+import { getHelpline } from "@/lib/helpline";
 import { fmtDate, fmtMoney } from "@/components/admin/util";
 
 export const metadata = { title: "Overview" };
@@ -30,6 +31,7 @@ export default async function Overview() {
   ]);
   const totalValue = ((value.data ?? []) as { estimated_fare_cents: number }[]).reduce((s, r) => s + r.estimated_fare_cents, 0);
   const warnings = configWarnings();
+  if (!(await getHelpline(db))) warnings.push({ channel: "email", message: "The Vanta support (helpline) phone number is not set. Customers and drivers see no Call Vanta Support button until you add it under Website content (contact.phone)." });
 
   const stats: [string, string | number, boolean?][] = [
     ["Total customers", customers], ["New leads", newLeads], ["Pending inquiries", pendingLeads], ["New booking requests", newBookings],

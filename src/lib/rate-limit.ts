@@ -19,3 +19,16 @@ export function rateLimit(key: string, limit: number, windowMs: number): boolean
   }
   return true;
 }
+
+/** True while `key` is still under `limit` hits in the window. Does NOT count a hit (pair with rateLimitRecord for "count only failures"). */
+export function rateLimitPeek(key: string, limit: number, windowMs: number): boolean {
+  const now = Date.now();
+  return (hits.get(key) ?? []).filter((t) => now - t < windowMs).length < limit;
+}
+/** Counts one hit against `key` without checking the limit. */
+export function rateLimitRecord(key: string, windowMs: number): void {
+  const now = Date.now();
+  const recent = (hits.get(key) ?? []).filter((t) => now - t < windowMs);
+  recent.push(now);
+  hits.set(key, recent);
+}

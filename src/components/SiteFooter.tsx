@@ -19,6 +19,7 @@ export default function SiteFooter({ content }: { content: Record<string, unknow
             <ul>
               <li><Link href="/about">About us</Link></li>
               <li><Link href="/rides">Rides we offer</Link></li>
+              <li><Link href="/track">Track your ride</Link></li>
               <li><Link href="/contact">Contact</Link></li>
             </ul>
           </div>

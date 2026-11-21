@@ -1,7 +1,7 @@
 import { json, readJson, sameOrigin } from "@/lib/http";
 import { getDriverForApi } from "@/lib/driver/auth";
 import { getAdminClient } from "@/lib/supabase/admin";
-import { canTransition, DRIVER_FLOW, type BookingStatus } from "@/lib/booking-status";
+import { AWAITING_PAYMENT_MESSAGE, canTransition, DRIVER_FLOW, rideMayProgress, type BookingStatus } from "@/lib/booking-status";
 import { notify } from "@/lib/notify";
 import { BUSINESS_TZ } from "@/lib/config";
 
@@ -24,12 +24,16 @@ export async function POST(request: Request) {
   const to = typeof body?.status === "string" && (DRIVER_FLOW as string[]).includes(body.status) ? (body.status as BookingStatus) : null;
   if (!id || !to) return json({ error: "Invalid request." }, 400);
 
-  const { data: b } = await db.from("bookings").select("id,reference,status,customer_id,pickup_at,pickup_address,dropoff_address").eq("id", id).eq("driver_id", driver.id).maybeSingle();
+  const { data: b } = await db.from("bookings").select("id,reference,status,confirmed_at,payment_status,customer_id,pickup_at,pickup_address,dropoff_address").eq("id", id).eq("driver_id", driver.id).maybeSingle();
   if (!b) return json({ error: "Ride not found." }, 404);
   const from = b.status as BookingStatus;
   if (!canTransition("driver", from, to)) return json({ error: "That step is not available for this ride right now." }, 409);
 
-  const upd = await db.from("bookings").update({ status: to }).eq("id", id).eq("driver_id", driver.id).eq("status", from).select("id");
+  // Server-side payment gate: an assigned driver cannot start or progress a ride until a verified payment confirmed the booking.
+  if (!rideMayProgress(b)) return json({ error: AWAITING_PAYMENT_MESSAGE, code: "awaiting_payment" }, 409);
+
+  // The update repeats the conditions, so a refund, cancellation or reassignment that lands between the read and the write wins.
+  const upd = await db.from("bookings").update({ status: to }).eq("id", id).eq("driver_id", driver.id).eq("status", from).not("confirmed_at", "is", null).in("payment_status", ["paid", "deposit_paid", "partially_refunded"]).select("id");
   if (upd.error || !upd.data?.length) return json({ error: "This ride was just updated. Reload to see its current status." }, 409);
   await db.from("booking_status_history").insert({ booking_id: id, from_status: from, to_status: to, actor_type: "driver", actor_id: driver.id, note: null });
 

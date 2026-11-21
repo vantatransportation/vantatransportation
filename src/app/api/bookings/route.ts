@@ -54,7 +54,8 @@ export async function POST(request: Request) {
       const t = parsed.trip;
       const seatText = childSeatSummary(t.childSeats ?? NO_SEATS);
       const site = (process.env.NEXT_PUBLIC_SITE_URL || "").replace(/\/$/, "");
-      const payUrl = result.payment && result.paymentToken && site ? `${site}/pay/${result.paymentToken}` : undefined;
+      // No payment link is created or sent at submission: payment is released only after an admin approves the booking.
+      const trackUrl = result.trackingCode && site ? `${site}/track#id=${result.trackingCode}` : undefined;
       const extrasText = [t.returnLeg ? "Round trip" : "", seatText ? `Child seats: ${seatText} (requested)` : "", result.meetGreetRequested ? "Meet & Greet requested" : ""].filter(Boolean).join(", ");
       // Alerts intentionally omit phone numbers, notes, passenger instructions and emergency contacts.
       await notify(db, "booking.created", { type: "booking", id: result.id }, {
@@ -69,10 +70,10 @@ export async function POST(request: Request) {
         "Online amount due": result.online ? formatMoney(result.online.totalCents, result.currency) : "Not set up yet",
         "Service region": REGION_LABEL[result.region], "Needs staff review": result.requiresReview ? "Yes" : undefined,
         "Requested extras": extrasText || undefined, "Booking for": det.details.bookingFor === "other" ? "Someone else" : undefined,
-        _customerEmail: email, _customerName: name, _payUrl: payUrl,
+        _customerEmail: email, _customerName: name, _trackingId: result.trackingCode ?? undefined, _trackUrl: trackUrl,
       });
     }
-    return json({ ok: true, reference: result.reference, totalCents: result.totalCents, onlineAmountCents: result.online?.totalCents ?? null, currency: result.currency, payUrl: result.payment && result.paymentToken ? `/pay/${result.paymentToken}` : null });
+    return json({ ok: true, reference: result.reference, totalCents: result.totalCents, onlineAmountCents: result.online?.totalCents ?? null, currency: result.currency, trackingId: result.trackingCode, payUrl: null });
   } catch (e) {
     console.error("[bookings] unexpected error", e);
     return json({ error: "We could not save your booking. Please try again." }, 500);

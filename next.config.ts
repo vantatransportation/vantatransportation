@@ -9,6 +9,8 @@ const supabaseHost = (() => {
   }
 })();
 
+const cloudName = (process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME ?? "").trim();
+
 const nextConfig: NextConfig = {
   turbopack: {
     rules: {
@@ -22,7 +24,8 @@ const nextConfig: NextConfig = {
     remotePatterns: [
       ...(supabaseHost ? [{ protocol: "https" as const, hostname: supabaseHost, pathname: "/storage/v1/object/public/**" }] : []),
       // Vehicle photos (Cloudinary). Limited to this project's own cloud when its name is configured.
-      { protocol: "https" as const, hostname: "res.cloudinary.com", pathname: process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME ? `/${process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME}/**` : "/**" },
+      // The cloud name is trimmed (a trailing space pasted into the host's env settings would otherwise block every photo).
+      { protocol: "https" as const, hostname: "res.cloudinary.com", pathname: cloudName ? `/${cloudName}/**` : "/**" },
     ],
   },
   async headers() {

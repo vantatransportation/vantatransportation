@@ -12,7 +12,7 @@ export type Actor = "admin" | "driver" | "customer";
 export const DRIVER_FLOW: BookingStatus[] = ["assigned", "getting_ready", "on_the_way", "arrived", "picked_up", "completed"];
 
 export const STATUS_LABEL: Record<BookingStatus, string> = {
-  new_request: "Awaiting review", pending_confirmation: "Awaiting review", confirmed: "Approved", assigned: "Driver assigned", getting_ready: "Driver getting ready",
+  new_request: "Awaiting review", pending_confirmation: "Awaiting review", confirmed: "Confirmed", assigned: "Driver assigned", getting_ready: "Driver getting ready",
   on_the_way: "Driver on the way", arrived: "Driver arrived", picked_up: "Passenger picked up", in_progress: "In progress", completed: "Completed",
   cancelled: "Cancelled", rejected: "Declined", no_show: "No show",
 };
@@ -49,3 +49,18 @@ export const canApprove = (s: BookingStatus) => AWAITING_REVIEW.includes(s);
 export const canAssign = (s: BookingStatus) => [...AWAITING_REVIEW, "confirmed", "assigned", "getting_ready"].includes(s);
 export const isOpenForDriver = (s: BookingStatus) => [...LEGACY_ACTIVE, "getting_ready", "on_the_way", "arrived", "picked_up"].includes(s);
 export const isTerminal = (s: BookingStatus) => ["completed", "cancelled", "rejected", "no_show"].includes(s);
+
+/** Payment states that prove money was verifiably received (set only by the provider-verified payment path). */
+export const PAID_STATES = ["paid", "deposit_paid", "partially_refunded"];
+
+/**
+ * The ONE rule for moving a ride forward (getting ready, on the way, arrived, picked up, completed).
+ * A ride may progress only after a provider-verified payment confirmed the booking (confirmed_at) and the payment still stands.
+ * Approval and driver assignment alone are not enough. Cancelled/declined/unpaid/failed/refunded bookings never pass, and
+ * admin cancellation, reassignment and no-show are separate operations that this rule does not touch.
+ */
+export function rideMayProgress(b: { confirmed_at?: string | null; payment_status?: string | null; status: string }): boolean {
+  if (b.status === "cancelled" || b.status === "rejected" || b.status === "no_show" || b.status === "completed") return false;
+  return Boolean(b.confirmed_at) && PAID_STATES.includes(String(b.payment_status));
+}
+export const AWAITING_PAYMENT_MESSAGE = "This ride cannot start yet: the customer's payment has not been confirmed. You will be able to continue as soon as it is.";

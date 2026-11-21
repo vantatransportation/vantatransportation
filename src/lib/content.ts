@@ -2,7 +2,7 @@ import { cache } from "react";
 import { getPublicClient } from "@/lib/supabase/public";
 import { defaultSiteData } from "@/data/defaults";
 import type { SiteData, Service } from "@/lib/types";
-import { hasRealPhoto } from "@/lib/vehicle-photo";
+import { resolvePhotoSrc, describePhotoProblem } from "@/lib/vehicle-photo";
 
 /**
  * Loads public site content from Supabase. Falls back to built-in defaults when
@@ -27,6 +27,12 @@ export const getSiteData = cache(async (): Promise<SiteData> => {
       return defaultSiteData;
     }
 
+    // Diagnostics (no secrets): which active vehicles have no usable photo and why. Visible in the host's server logs.
+    const rows = vehs.data ?? [];
+    const problems = rows.map((v) => ({ name: v.name as string, why: describePhotoProblem(v.image_url) })).filter((x) => x.why);
+    if (problems.length) console.warn("[site] vehicles with an unusable photo value", problems);
+    if (rows.length && rows.every((v) => !resolvePhotoSrc(v.image_url))) console.warn("[site] no active vehicle has a photo. If photos were uploaded, check that the vehicle is saved and 'Shown on website' is ticked.");
+
     const contentMap: Record<string, unknown> = { ...defaultSiteData.content };
     for (const row of content.data ?? []) contentMap[row.key as string] = row.value;
 
@@ -46,7 +52,7 @@ export const getSiteData = cache(async (): Promise<SiteData> => {
         categoryName: v.vehicle_categories?.name ?? "", categorySlug: v.vehicle_categories?.slug ?? "",
         tierName: v.vehicle_tiers?.name ?? "", similarModels: v.similar_models ?? "",
         description: v.description ?? "", passengers: v.passenger_capacity, luggage: v.luggage_capacity,
-        image: hasRealPhoto(v.image_url) ? v.image_url : null, capacityLabel: v.vehicle_categories?.capacity_label ?? "", isAvailable: v.is_available,
+        image: resolvePhotoSrc(v.image_url), capacityLabel: v.vehicle_categories?.capacity_label ?? "", isAvailable: v.is_available,
       })),
       standards: (stds.data ?? []).map((s) => ({ id: s.id, title: s.title, description: s.description ?? "" })),
       faqs: (faqs.data ?? []).map((f) => ({ id: f.id, question: f.question, answer: f.answer })),

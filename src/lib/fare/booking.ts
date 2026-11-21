@@ -1,3 +1,4 @@
+import { generateTrackingCode } from "@/lib/tracking";
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { calculateQuote, type LineItem, type QuoteInput } from "@/lib/pricing/engine";
@@ -35,7 +36,7 @@ export type CreateBookingResult =
   | {
       ok: true; id: string; reference: string; totalCents: number | null; currency: string; vehicleName: string; duplicate: boolean; customerId: string;
       region: Region; requiresReview: boolean; roundTrip: boolean; discountCents: number; meetGreetRequested: boolean; meetGreetPending: boolean;
-      paymentToken: string | null; payment: { kind: "full" | "deposit"; amountCents: number } | null; childSeatFeeCents: number;
+      trackingCode: string | null; paymentToken: string | null; payment: { kind: "full" | "deposit"; amountCents: number } | null; childSeatFeeCents: number;
       /** What is charged online: fixed tier price + Meet & Greet + child seats. null when the tier price is not configured. */
       online: OnlineCharge | null;
     }
@@ -49,12 +50,12 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
   const rt = trip.returnLeg ?? null;
 
   if (input.submissionKey) {
-    const dup = await db.from("bookings").select("id,reference,estimated_fare_cents,currency,customer_id,service_region,requires_manual_review,trip_direction,payment_token,payment_status,child_seat_fee_cents,vehicles(name)").eq("submission_key", input.submissionKey).maybeSingle();
+    const dup = await db.from("bookings").select("id,reference,tracking_code,estimated_fare_cents,currency,customer_id,service_region,requires_manual_review,trip_direction,payment_token,payment_status,child_seat_fee_cents,vehicles(name)").eq("submission_key", input.submissionKey).maybeSingle();
     if (dup.data) {
       const v = dup.data.vehicles as unknown as { name?: string } | null;
       return { ok: true, id: dup.data.id, reference: dup.data.reference, totalCents: dup.data.estimated_fare_cents, currency: dup.data.currency, vehicleName: v?.name ?? "", duplicate: true, customerId: dup.data.customer_id,
         region: (dup.data.service_region ?? "unknown") as Region, requiresReview: Boolean(dup.data.requires_manual_review), roundTrip: dup.data.trip_direction === "round_trip", discountCents: 0, meetGreetRequested: false, meetGreetPending: false,
-        paymentToken: dup.data.payment_token ?? null, payment: null, childSeatFeeCents: dup.data.child_seat_fee_cents ?? 0, online: null };
+        trackingCode: dup.data.tracking_code ?? null, paymentToken: dup.data.payment_token ?? null, payment: null, childSeatFeeCents: dup.data.child_seat_fee_cents ?? 0, online: null };
     }
   }
 
@@ -145,6 +146,7 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
   const currency = vehicle.config?.currency ?? "USD";
 
   const ins = await db.from("bookings").insert({
+    tracking_code: generateTrackingCode(), // unguessable credential for the public Track page; the sequential reference is NOT one
     customer_id: customerId, vehicle_id: vehicle.id, tier_id: vehicle.tierId, status: "new_request", trip_type: trip.tripType,
     pickup_address: trip.pickup.text, dropoff_address: trip.dropoff.text, pickup_at: trip.pickupAtIso, passengers: trip.passengers,
     hours: trip.hours, distance_miles: route?.distanceMiles ?? null, duration_minutes: route?.durationMinutes ?? null, avoid_tolls: avoid,
@@ -157,12 +159,12 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
     service_region: region, fulfilment_mode: ful.mode, requires_manual_review: ful.requiresManualReview, review_reason: ful.reason,
     policies_acknowledged_at: details.policiesAcknowledged ? now : null,
     policy_snapshot: { waitingIncludedMinutes: settings.waitingIncludedMinutes, waitingIncrementMinutes: settings.waitingIncrementMinutes, waitingRateApproved: settings.waitingRateCents != null, waitingText: policies.waitingText, noShowText: policies.noShowText, assistanceText: policies.assistanceText },
-  }).select("id,reference,payment_token").single();
+  }).select("id,reference,payment_token,tracking_code").single();
 
   if (ins.error) {
     if (ins.error.code === "23505" && input.submissionKey) {
-      const again = await db.from("bookings").select("id,reference,estimated_fare_cents,currency,customer_id").eq("submission_key", input.submissionKey).maybeSingle();
-      if (again.data) return { ok: true, id: again.data.id, reference: again.data.reference, totalCents: again.data.estimated_fare_cents, currency: again.data.currency, vehicleName: vehicle.name, duplicate: true, customerId: again.data.customer_id, region, requiresReview: ful.requiresManualReview, roundTrip: Boolean(rt), discountCents: 0, meetGreetRequested: wantsMG, meetGreetPending: false, paymentToken: null, payment: null, childSeatFeeCents: 0, online: null };
+      const again = await db.from("bookings").select("id,reference,tracking_code,estimated_fare_cents,currency,customer_id").eq("submission_key", input.submissionKey).maybeSingle();
+      if (again.data) return { ok: true, id: again.data.id, reference: again.data.reference, totalCents: again.data.estimated_fare_cents, currency: again.data.currency, vehicleName: vehicle.name, duplicate: true, customerId: again.data.customer_id, region, requiresReview: ful.requiresManualReview, roundTrip: Boolean(rt), discountCents: 0, meetGreetRequested: wantsMG, meetGreetPending: false, trackingCode: again.data.tracking_code ?? null, paymentToken: null, payment: null, childSeatFeeCents: 0, online: null };
     }
     console.error("[booking] insert failed", ins.error.message);
     return { ok: false, status: 500, error: "We could not save your booking. Please try again." };
@@ -197,5 +199,5 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
   await db.from("activity_logs").insert({ action: "booking.created", entity_type: "booking", entity_id: bookingId, meta: { reference: ins.data.reference, source: input.quoteRequestId ? "quote_conversion" : "website", region, roundTrip: Boolean(rt) } });
 
   return { ok: true, id: bookingId, reference: ins.data.reference, totalCents, currency, vehicleName: vehicle.name, duplicate: false, customerId, region, requiresReview: ful.requiresManualReview, roundTrip: Boolean(rt), discountCents, meetGreetRequested: wantsMG, meetGreetPending: false,
-    paymentToken: ins.data.payment_token ?? null, payment: plan, childSeatFeeCents: seatCents, online };
+    trackingCode: ins.data.tracking_code ?? null, paymentToken: ins.data.payment_token ?? null, payment: plan, childSeatFeeCents: seatCents, online };
 }

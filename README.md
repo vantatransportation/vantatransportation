@@ -155,3 +155,7 @@ A best-effort `tsc` run without the project's type packages reports only the sam
 - The "Driver Trip Process" PDF was not provided to the build and is not used on the public site. No driver portal was built; bookings have an `assigned` status and the schema leaves room to add drivers later.
 - The in-memory rate limiter is per server instance; add a WAF/edge rule or a shared store for production-grade limits.
 - SIXT was a layout/experience reference only; no SIXT assets or code are used.
+
+
+## Booking lifecycle (see UPGRADE_NOTES_4.md)
+Request -> admin notified -> admin approves and assigns a driver (payment released) -> customer pays (Stripe or PayPal) -> provider-verified webhook/capture -> booking **Confirmed** and confirmation email with tracking ID -> customer follows the ride at `/track` and can message the driver. Apply `supabase/migrations/0009_tracking_confirmation.sql` once after 0001-0008.

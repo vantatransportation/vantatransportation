@@ -6,10 +6,9 @@ import type { DriverRide } from "@/lib/driver/rides";
 import ChatPanel from "@/components/chat/ChatPanel";
 
 const ACTION_LABEL: Record<string, string> = { getting_ready: "Getting ready", on_the_way: "On the way", arrived: "Arrived at pickup", picked_up: "Passenger picked up", completed: "Complete ride" };
-const telHref = (p: string) => `tel:${p.replace(/[^\d+]/g, "")}`;
 const fmt = (iso: string, tz: string) => new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(iso));
 
-export default function DriverDashboard({ name, plate, initial, tz }: { name: string; plate: string | null; initial: DriverRide[]; tz: string }) {
+export default function DriverDashboard({ name, plate, initial, tz, helpline }: { name: string; plate: string | null; initial: DriverRide[]; tz: string; helpline: { display: string; tel: string } | null }) {
   const [rides, setRides] = useState(initial);
   const [busy, setBusy] = useState(""); const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
 
@@ -53,7 +52,11 @@ export default function DriverDashboard({ name, plate, initial, tz }: { name: st
       {section("In progress", active, "No ride in progress.")}
       {section("Upcoming", upcoming, "No upcoming rides assigned to you.")}
       {section("Recent", past, "Nothing yet.")}
-      <p className="muted" style={{ marginTop: "2rem" }}>Standard telephone charges from your carrier may apply when you call a customer.</p>
+      <section className="panel" style={{ marginTop: "2rem" }} aria-label="Support">
+        <h2 style={{ fontSize: "1.1rem" }}>Need help with a ride?</h2>
+        <p className="muted">Customer phone numbers are not shared. Message the customer from the ride, or call Vanta support and we will help.</p>
+        {helpline ? <p><a className="btn btn--ghost" style={{ minHeight: 48 }} href={`tel:${helpline.tel}`}>Call Vanta Support</a><span className="muted" style={{ display: "block", marginTop: ".4rem" }}>{helpline.display}</span></p> : <p className="muted">The Vanta support number is not configured yet. Ask an administrator.</p>}
+      </section>
     </>
   );
 }
@@ -77,14 +80,9 @@ function RideCard({ r, tz, busy, onAdvance }: { r: DriverRide; tz: string; busy:
         {r.assistanceNotes && <><dt>Assistance</dt><dd>{r.assistanceNotes}</dd></>}
         {r.notes && <><dt>Customer notes</dt><dd>{r.notes}</dd></>}
       </dl>
-      {r.open && (r.passengerPhone || r.contactPhone) && (
-        <p style={{ display: "flex", gap: ".5rem", flexWrap: "wrap" }}>
-          {r.contactPhone && <a className="btn btn--ghost" style={{ minHeight: 48 }} href={telHref(r.contactPhone)}>Call customer</a>}
-          {r.passengerPhone && <a className="btn btn--ghost" style={{ minHeight: 48 }} href={telHref(r.passengerPhone)}>Call passenger</a>}
-        </p>
-      )}
       {r.open && <p><button type="button" className="btn btn--ghost" style={{ minHeight: 48, width: "100%" }} aria-expanded={chat} onClick={() => setChat((v) => !v)}>{chat ? "Hide chat" : "Chat with customer"}</button></p>}
       {chat && r.open && <ChatPanel role="driver" endpoint="/api/driver/messages" bookingId={r.id} title="Chat with customer" />}
+      {r.awaitingPayment && <p className="notice" role="status">Waiting for the customer's payment to be confirmed. You can message the customer, but the ride cannot start until payment is confirmed.</p>}
       {r.nextStatuses.length > 0 && (
         <div style={{ display: "grid", gap: ".5rem", marginTop: ".75rem" }}>
           {r.nextStatuses.map((s, i) => <button key={s} type="button" className={`btn ${i === r.nextStatuses.length - 1 ? "btn--primary" : "btn--ghost"}`} style={{ minHeight: 52, width: "100%" }} disabled={!!busy} onClick={() => onAdvance(r, s)}>{busy === r.id + s ? "Updating…" : ACTION_LABEL[s]}</button>)}

@@ -12,11 +12,14 @@ interface Props {
   /** Poll interval in ms while the tab is visible. Chat uses polling because customers have no Supabase session for Realtime. */
   intervalMs?: number;
   title?: string;
+  /** Extra request headers (the customer chat sends the tracking ID this way so it never appears in a URL). */
+  headers?: Record<string, string>;
 }
 const fmt = (iso: string) => new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit", month: "short", day: "numeric" }).format(new Date(iso));
 const newId = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2, 12)}`);
 
-export default function ChatPanel({ role, endpoint, bookingId, intervalMs = 4000, title = "Messages" }: Props) {
+export default function ChatPanel({ role, endpoint, bookingId, intervalMs = 4000, title = "Messages", headers }: Props) {
+  const headersKey = JSON.stringify(headers ?? {});
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [open, setOpen] = useState(true);
@@ -42,8 +45,9 @@ export default function ChatPanel({ role, endpoint, bookingId, intervalMs = 4000
     async function poll() {
       if (document.hidden) return;
       try {
-        const res = await fetch(url(lastAt.current), { cache: "no-store" });
+        const res = await fetch(url(lastAt.current), { cache: "no-store", headers: JSON.parse(headersKey) });
         if (res.status === 401) return window.location.reload();
+        if (res.status === 404 && lastAt.current !== null) return; // access ended (for example the ride was reassigned): keep what is shown, send nothing
         if (!res.ok) { if (!stop && lastAt.current === null) setState("error"); return; }
         const data = (await res.json()) as { messages: ChatMessage[]; open: boolean };
         if (stop) return;
@@ -55,7 +59,7 @@ export default function ChatPanel({ role, endpoint, bookingId, intervalMs = 4000
     const onVis = () => { if (!document.hidden) poll(); };
     document.addEventListener("visibilitychange", onVis);
     return () => { stop = true; clearInterval(t); document.removeEventListener("visibilitychange", onVis); }; // no leaked timers or listeners
-  }, [url, intervalMs, merge]);
+  }, [url, intervalMs, merge, headersKey]);
 
   useEffect(() => { endRef.current?.scrollIntoView({ block: "end" }); }, [messages.length]);
 
@@ -64,7 +68,7 @@ export default function ChatPanel({ role, endpoint, bookingId, intervalMs = 4000
     setSending(true); setError("");
     const clientId = pendingId.current ?? (pendingId.current = newId());
     try {
-      const res = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ body, clientId, ...(bookingId ? { bookingId } : {}) }) });
+      const res = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json", ...JSON.parse(headersKey) }, body: JSON.stringify({ body, clientId, ...(bookingId ? { bookingId } : {}) }) });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) { setError(data.error ?? "Could not send. Try again."); if (res.status !== 429 && res.status !== 500) pendingId.current = null; }
       else { pendingId.current = null; setText(""); merge([data.message]); }

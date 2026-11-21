@@ -34,7 +34,7 @@ function initialValue(f: Field, row: Row | undefined, tz: string): string | bool
 
 export default function FieldsForm({ resource, id, initial, refOptions = {}, tz, only, extra, submitLabel, onDone, onCancel }: Props) {
   const router = useRouter();
-  const fields = resource.fields.filter((f) => !only || only.includes(f.name));
+  const fields = resource.fields.filter((f) => !f.workflow && (!only || only.includes(f.name)));
   const [vals, setVals] = useState<Record<string, string | boolean>>(() => Object.fromEntries(fields.map((f) => [f.name, initialValue(f, initial, tz)])));
   const [state, setState] = useState<{ kind: "idle" | "saving" | "ok" | "error"; message?: string }>({ kind: "idle" });
   const [uploading, setUploading] = useState<string | null>(null);

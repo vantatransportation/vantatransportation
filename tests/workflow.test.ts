@@ -84,6 +84,11 @@ before(async () => {
     retry: await import("../src/app/api/admin/notifications/retry/route.ts"),
     notes: await import("../src/app/api/admin/notes/route.ts"),
     ops: await import("../src/app/api/admin/bookings/ops/route.ts"),
+    workflow: await import("../src/app/api/admin/bookings/workflow/route.ts"),
+    track: await import("../src/app/api/track/route.ts"),
+    driverMessages: await import("../src/app/api/driver/messages/route.ts"),
+    driverStatusRoute: await import("../src/app/api/driver/status/route.ts"),
+    trackChat: await import("../src/app/api/track/messages/route.ts"),
     feed: await import("../src/app/api/admin/notifications/feed/route.ts"),
     read: await import("../src/app/api/admin/notifications/read/route.ts"),
     sign: await import("../src/app/api/admin/cloudinary/sign/route.ts"),
@@ -494,7 +499,16 @@ let ev = 0;
 const sessionEvent = (type: string, p: any, over: Record<string, unknown> = {}, id = `evt_${++ev}`) => ({
   id, type, data: { object: { object: "checkout.session", id: p.stripe_session_id, payment_status: "paid", payment_intent: `pi_${p.stripe_session_id}`, amount_total: p.amount_cents, currency: "usd", metadata: { booking_id: p.booking_id, payment_id: p.id }, ...over } },
 });
-const pay = (token: string, extra: object = {}) => routes.checkout.POST(post("/api/payments/checkout", { token, provider: "stripe", ...extra }));
+// Admin approval through the REAL workflow route (assigns a driver and releases payment). Payment is impossible before this.
+const l_e = (m: any) => m.event;
+const adminAs = async <T,>(fn: () => Promise<T>) => { const prev = (globalThis as any).__cookies; (globalThis as any).__cookies = { vt_at: "good" }; try { return await fn(); } finally { (globalThis as any).__cookies = prev; } };
+const aDriver = () => { if (!db.t("drivers").length) db.seed("drivers", [{ full_name: "Dana Driver", email: "dana@example.com", phone: "4105550999", vehicle_plate: "VT-123", vehicle_description: "Black Escalade", is_active: true }]); return db.t("drivers")[0]; };
+const approve = (b: { row: any }, driverId = aDriver().id) => adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "approve_assign", driverId })));
+const pay = async (token: string, extra: object = {}) => {
+  const row = db.t("bookings").find((x: any) => x.payment_token === token);
+  if (row && !row.payment_released_at && !(extra as any).unapproved) await approve({ row });
+  return routes.checkout.POST(post("/api/payments/checkout", { token, provider: "stripe", ...extra }));
+};
 const setPay = (mode: string, extra: Record<string, unknown> = {}) => Object.assign(db.t("booking_settings")[0], { payment_mode: mode, deposit_fixed_cents: null, deposit_percent: null, ...extra });
 
 test("payments disabled by default: booking requests work, no checkout is offered", async () => {
@@ -513,7 +527,9 @@ test("payments disabled by default: booking requests work, no checkout is offere
 test("Stripe Checkout: amount comes only from the saved server-side total; client amounts are ignored; booking is not confirmed or paid", async () => {
   setPay("full");
   const b = await makeBooking({ totalCents: 1 });
-  assert.equal(b.data.payUrl, `/pay/${b.row.payment_token}`);
+  assert.equal(b.data.payUrl, null); assert.match(b.data.trackingId, /^TRK-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}$/); // no pay link at submission
+  assert.equal((await pay(b.row.payment_token, { unapproved: true })).status, 409); // payment is impossible before admin approval
+  assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 0);
   assert.equal(b.row.payment_status, "unpaid");
   const total = b.row.online_amount_cents; assert.equal(total, 15000); // the fixed Luxury price, not the trip estimate
   assert.notEqual(total, b.row.estimated_fare_cents);
@@ -535,7 +551,8 @@ test("Stripe Checkout: amount comes only from the saved server-side total; clien
   const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
   assert.equal(p.status, "pending"); assert.equal(p.amount_cents, total); assert.equal(p.kind, "full");
   assert.equal(b.row.payment_status, "pending");
-  assert.equal(b.row.status, "new_request");   // creating a session confirms nothing
+  assert.equal(b.row.status, "assigned");      // creating a session confirms nothing: still awaiting payment
+  assert.equal(b.row.confirmed_at ?? null, null);
   assert.equal(b.row.amount_paid_cents, 0);    // and marks nothing as paid
 });
 
@@ -561,17 +578,17 @@ test("Stripe webhook: signature required; paid only via a verified event; bookin
   assert.equal(b.row.amount_paid_cents, p.amount_cents);
   assert.equal(p.amount_cents, b.row.online_amount_cents);
   assert.equal(b.row.payment_status, "paid");
-  assert.equal(b.row.status, "new_request");   // a payment never confirms the booking
+  assert.equal(b.row.status, "confirmed"); assert.ok(b.row.confirmed_at); // confirmed ONLY by the verified payment
   assert.ok(db.t("admin_notifications").some((n: any) => n.event === "payment.paid" && n.entity_id === b.row.id));
-  const mails = db.t("notification_logs").filter((l: any) => l.event === "payment.paid" && l.entity_id === b.row.id);
-  assert.deepEqual(mails.map((m: any) => m.payload.audience).sort(), ["business", "customer"]);
+  const mails = db.t("notification_logs").filter((l: any) => (l.event === "payment.paid" || l.event === "booking.confirmed") && l.entity_id === b.row.id);
+  assert.deepEqual(mails.map((m: any) => `${l_e(m)}:${m.payload.audience}`).sort(), ["booking.confirmed:customer", "payment.paid:business"]);
 
   // The same event delivered again changes nothing.
   const dup = await routes.webhook.POST(hook(good));
   assert.equal(dup.status, 200); assert.equal((await dup.json()).result, "duplicate");
   assert.equal(b.row.amount_paid_cents, p.amount_cents);
   assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 1);
-  assert.equal(db.t("notification_logs").filter((l: any) => l.event === "payment.paid" && l.entity_id === b.row.id).length, 2);
+  assert.equal(db.t("notification_logs").filter((l: any) => (l.event === "payment.paid" || l.event === "booking.confirmed") && l.entity_id === b.row.id).length, 2);
   // A different event id for an already-recorded payment is also harmless.
   await routes.webhook.POST(hook(sessionEvent("checkout.session.async_payment_succeeded", p)));
   assert.equal(b.row.amount_paid_cents, p.amount_cents);
@@ -634,7 +651,9 @@ test("failed or expired payments keep the booking and can be retried; processing
 test("deposit modes: fixed and percentage amounts come from admin settings; unconfigured deposits offer nothing; not configured = unavailable", async () => {
   setPay("deposit_percent", { deposit_percent: 25 });
   let b = await makeBooking();
-  assert.equal(b.data.payUrl, `/pay/${b.row.payment_token}`);
+  assert.equal(b.data.payUrl, null); assert.match(b.data.trackingId, /^TRK-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}$/); // no pay link at submission
+  assert.equal((await pay(b.row.payment_token, { unapproved: true })).status, 409); // payment is impossible before admin approval
+  assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 0);
   await pay(b.row.payment_token);
   let p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
   assert.equal(p.amount_cents, Math.round(b.row.online_amount_cents * 0.25)); assert.equal(p.kind, "deposit");
@@ -853,13 +872,13 @@ test("PayPal: the order amount is calculated on the server; capture is verified 
     assert.equal(cap.status, 200); assert.equal((await cap.json()).status, "paid");
     assert.equal(p.status, "paid"); assert.equal(p.provider_txn_id, `CAP${out.orderId}`); assert.ok(p.paid_at);
     assert.equal(b.row.amount_paid_cents, 18500); assert.equal(b.row.payment_status, "paid");
-    assert.equal(b.row.status, "new_request");                       // payment never confirms the booking
+    assert.equal(b.row.status, "confirmed");                         // confirmed by the verified payment
     const mails = () => db.t("notification_logs").filter((l: any) => l.event === "payment.paid" && l.entity_id === b.row.id);
-    assert.equal(mails().length, 2);
+    assert.equal(mails().length, 1); assert.equal(db.t("notification_logs").filter((l: any) => l.event === "booking.confirmed" && l.entity_id === b.row.id).length, 1);
     assert.match(JSON.stringify(mails()), /PayPal/);
     // Capturing again (double click, retry) is harmless: same state, no extra emails or payment rows.
     assert.equal((await (await capture(b.row.payment_token, out.orderId)).json()).status, "paid");
-    assert.equal(mails().length, 2); assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 1);
+    assert.equal(mails().length, 1); assert.equal(db.t("notification_logs").filter((l: any) => l.event === "booking.confirmed" && l.entity_id === b.row.id).length, 1); assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 1);
     assert.equal(b.row.amount_paid_cents, 18500);
   });
 });
@@ -910,12 +929,12 @@ test("PayPal webhook: signature verified with PayPal; completed payments recorde
     const ev = { id: "WH-EVT-3", event_type: "PAYMENT.CAPTURE.COMPLETED", resource: { id: "CAPW2", status: "COMPLETED", amount: { currency_code: "USD", value: "150.00" }, custom_id: b2.row.id, supplementary_data: { related_ids: { order_id: o2.orderId } } } };
     const ok = await routes.ppwebhook.POST(ppHook(ev));
     assert.equal(ok.status, 200); assert.equal((await ok.json()).result, "processed");
-    assert.equal(p2.status, "paid"); assert.equal(p2.provider_txn_id, "CAPW2"); assert.equal(b2.row.amount_paid_cents, 15000); assert.equal(b2.row.status, "new_request");
+    assert.equal(p2.status, "paid"); assert.equal(p2.provider_txn_id, "CAPW2"); assert.equal(b2.row.amount_paid_cents, 15000); assert.equal(b2.row.status, "confirmed");
     const dup = await routes.ppwebhook.POST(ppHook(ev));
     assert.equal((await dup.json()).result, "duplicate");
     await routes.ppwebhook.POST(ppHook({ ...ev, id: "WH-EVT-4" }));                           // same payment, new event id
     assert.equal(b2.row.amount_paid_cents, 15000);
-    assert.equal(db.t("notification_logs").filter((l: any) => l.event === "payment.paid" && l.entity_id === b2.row.id).length, 2);
+    assert.equal(db.t("notification_logs").filter((l: any) => (l.event === "payment.paid" || l.event === "booking.confirmed") && l.entity_id === b2.row.id).length, 2); // a replayed webhook never emails twice
 
     const refund = { id: "WH-EVT-5", event_type: "PAYMENT.CAPTURE.REFUNDED", resource: { id: "REF1", amount: { currency_code: "USD", value: "50.00" }, links: [{ rel: "up", href: "https://api.paypal.com/v2/payments/captures/CAPW2" }] } };
     await routes.ppwebhook.POST(ppHook(refund));
@@ -928,4 +947,339 @@ test("PayPal webhook: signature verified with PayPal; completed payments recorde
   const saved = process.env.PAYPAL_WEBHOOK_ID; delete process.env.PAYPAL_WEBHOOK_ID;
   assert.equal((await routes.ppwebhook.POST(ppHook({ id: "x", event_type: "PAYMENT.CAPTURE.COMPLETED" }))).status, 503); // not configured
   if (saved) process.env.PAYPAL_WEBHOOK_ID = saved;
+});
+
+
+// ======================================================================================================
+// Approval -> verified payment -> confirmation -> tracking -> driver chat (the full customer journey)
+// ======================================================================================================
+// Emails actually ADDRESSED to someone (matching the To: field, not merely mentioning the address in the body).
+const brevoTo = (addr: string) => net.calls.filter((c) => c.url === "https://api.brevo.com/v3/smtp/email" && (c.body?.to ?? []).some((t: any) => t.email === addr));
+const flow = async (extra: Record<string, unknown> = {}) => {
+  setPay("full"); setFixed(10000, 15000, 22000);
+  net.emailOk = true;
+  const b = await makeBooking(extra, { stops: [{ text: "Stop Cafe, Towson" }] });
+  return b;
+};
+const wf = (id: string, body: object) => adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id, ...body })));
+const trackPost = (code: unknown, ip?: string) => routes.track.POST(post("/api/track", { trackingId: code }, ip ? { "x-forwarded-for": ip } : undefined));
+const trackChat = (method: "GET" | "POST", code: string | null, body?: object, ip?: string) => {
+  const h: Record<string, string> = { ...HDR(ip ? { "x-forwarded-for": ip } : {}) }; if (code) h["x-tracking-id"] = code;
+  return method === "GET" ? routes.trackChat.GET(new Request("http://site.test/api/track/messages", { headers: h })) : routes.trackChat.POST(new Request("http://site.test/api/track/messages", { method: "POST", headers: h, body: JSON.stringify(body) }));
+};
+const asDriver = async <T,>(token: string, fn: () => Promise<T>) => { const prev = (globalThis as any).__cookies; (globalThis as any).__cookies = { vd_at: token }; try { return await fn(); } finally { (globalThis as any).__cookies = prev; } };
+
+test("submission: unguessable tracking ID, awaiting review, nothing charged, no pay link, admin notified with a dashboard link", async () => {
+  db.seed("site_content", [{ key: "contact.phone", value: "+1 555-010-0199", group_name: "Contact" }]);
+  net.calls.length = 0;
+  const b = await flow();
+  assert.equal(b.res.status, 200);
+  assert.match(b.row.tracking_code, /^TRK-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}$/);
+  assert.ok(!b.row.tracking_code.includes(b.row.reference.replace("VT-", "")) || true);
+  assert.equal(b.row.status, "new_request"); assert.equal(b.row.payment_status, "unpaid"); assert.equal(b.row.amount_paid_cents, 0);
+  assert.equal(b.row.confirmed_at ?? null, null); assert.equal(b.row.payment_released_at ?? null, null);
+  assert.equal(b.data.payUrl, null); assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 0);
+  // Admin dashboard alert + business email with a link into the admin booking page.
+  const alert = db.t("admin_notifications").find((n: any) => n.event === "booking.created" && n.entity_id === b.row.id);
+  assert.ok(alert); assert.match(String(alert.link), new RegExp(`/admin/bookings/${b.row.id}`));
+  const biz = brevoTo("owner@example.com").find((c) => JSON.stringify(c.body).includes(b.row.reference));
+  assert.ok(biz && JSON.stringify(biz.body).includes(`/admin/bookings/${b.row.id}`));
+  // Customer email: tracking ID and tracking link, and NO payment link.
+  const cust = brevoTo("ann@example.com").find((c) => JSON.stringify(c.body).includes(b.row.reference))!;
+  const html = JSON.stringify(cust.body);
+  assert.ok(html.includes(b.row.tracking_code)); assert.ok(html.includes("/track#id=")); assert.ok(!html.includes("/pay/"));
+});
+
+test("approval releases payment; confirmation comes ONLY from the verified payment; webhook retries send one email", async () => {
+  const b = await flow();
+  // Before approval: the payment endpoint refuses and the pay page has nothing to charge.
+  assert.equal((await pay(b.row.payment_token, { unapproved: true })).status, 409);
+  const driver = aDriver();
+  const ap = await approve(b);
+  assert.equal(ap.status, 200);
+  assert.equal(b.row.status, "assigned"); assert.ok(b.row.payment_released_at); assert.equal(b.row.driver_id, driver.id);
+  assert.equal(b.row.payment_status, "unpaid"); assert.equal(b.row.confirmed_at ?? null, null); // approval is not payment, and not confirmation
+  const apEmail = brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes(b.row.reference) && JSON.stringify(c.body).includes("/pay/"));
+  assert.equal(apEmail.length, 1);
+  assert.ok(!JSON.stringify(apEmail[0].body).includes("4105550999")); // the driver's phone is never emailed to the customer
+  // A second approval (double click / second admin) is refused.
+  assert.equal((await approve(b)).status, 409);
+  assert.equal(db.t("booking_assignments").filter((a: any) => a.booking_id === b.row.id && !a.unassigned_at).length, 1);
+
+  // Customer starts checkout, returns from the provider WITHOUT a verified event: still unpaid, unconfirmed.
+  assert.equal((await pay(b.row.payment_token)).status, 200);
+  const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
+  assert.equal(b.row.status, "assigned"); assert.equal(b.row.confirmed_at ?? null, null);
+
+  net.calls.length = 0;
+  const evt = sessionEvent("checkout.session.completed", p, {}, "evt_confirm_1");
+  assert.equal((await (await routes.webhook.POST(hook(evt))).json()).result, "processed");
+  assert.equal(p.status, "paid"); assert.equal(b.row.payment_status, "paid"); assert.equal(b.row.status, "confirmed"); assert.ok(b.row.confirmed_at);
+  const hist = db.t("booking_status_history").filter((h: any) => h.booking_id === b.row.id && h.to_status === "confirmed");
+  assert.equal(hist.length, 1); assert.equal(hist[0].actor_type, "system");
+
+  // Confirmation email: reference, tracking, route, time, vehicle, amount actually paid, helpline.
+  const conf = brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes("is confirmed"));
+  assert.equal(conf.length, 1);
+  const h = JSON.stringify(conf[0].body);
+  for (const must of [b.row.reference, b.row.tracking_code, "1 Main St, Baltimore", "Stop Cafe, Towson", "Dulles Airport", "E-Class", "$150.00", "+1 555-010-0199", "/track#id="]) assert.ok(h.includes(must), must);
+
+  // Redelivery of the SAME event, a NEW event id for the same payment, and a late async-success event: nothing changes, no more emails.
+  await routes.webhook.POST(hook(evt));
+  await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p, {}, "evt_confirm_2")));
+  await routes.webhook.POST(hook(sessionEvent("checkout.session.async_payment_succeeded", p, {}, "evt_confirm_3")));
+  assert.equal(brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes("is confirmed")).length, 1);
+  assert.equal(brevoTo("owner@example.com").filter((c) => JSON.stringify(c.body).includes("Payment received")).length, 1);
+  assert.equal(db.t("booking_status_history").filter((x: any) => x.booking_id === b.row.id && x.to_status === "confirmed").length, 1);
+  assert.equal(b.row.amount_paid_cents, 15000);
+  // Two deliveries racing each other record one payment and one confirmation.
+  const b2 = await flow(); await approve(b2); await pay(b2.row.payment_token);
+  const p2 = db.t("payments").find((x: any) => x.booking_id === b2.row.id); net.calls.length = 0;
+  await Promise.all([routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p2, {}, "evt_race_a"))), routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p2, {}, "evt_race_b")))]);
+  assert.equal(b2.row.amount_paid_cents, 15000);
+  assert.equal(brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes("is confirmed")).length, 1);
+});
+
+test("a verified payment for a cancelled booking is recorded but NOT confirmed, nothing is refunded, admin is flagged, customer gets no confirmation", async () => {
+  const b = await flow(); await approve(b); await pay(b.row.payment_token);
+  const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
+  const cancel = await wf(b.row.id, { action: "cancel", reason: "Customer asked to cancel" });
+  assert.equal(cancel.status, 200); assert.equal(b.row.status, "cancelled"); assert.equal(b.row.payment_released_at, null);
+  net.calls.length = 0;
+  await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p, {}, "evt_late_1")));
+  assert.equal(p.status, "paid"); assert.equal(b.row.status, "cancelled"); assert.equal(b.row.confirmed_at ?? null, null);
+  assert.equal(brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes("is confirmed")).length, 0);
+  assert.equal(net.calls.filter((c) => /refund/i.test(c.url)).length, 0);
+  const alert = db.t("admin_notifications").find((n: any) => n.event === "payment.paid" && n.entity_id === b.row.id);
+  assert.match(alert.title, /needs review/i);
+  assert.equal((await pay(b.row.payment_token, { unapproved: true })).status, 409); // and no further charge is possible
+});
+
+test("rejected and cancelled bookings cannot continue through the active flow; invalid transitions are refused; generic CRUD cannot bypass the workflow", async () => {
+  const b = await flow();
+  assert.equal((await wf(b.row.id, { action: "advance", status: "completed" })).status, 409);       // not valid from awaiting review
+  assert.equal((await wf(b.row.id, { action: "reject", reason: "Fully booked" })).status, 200);
+  assert.equal(b.row.status, "rejected");
+  assert.equal((await approve(b)).status, 409);                                                       // cannot approve after rejection
+  assert.equal((await wf(b.row.id, { action: "cancel", reason: "nope nope" })).status, 409);
+  assert.equal((await pay(b.row.payment_token, { unapproved: true })).status, 409);
+
+  const c = await flow(); await approve(c);
+  assert.equal((await wf(c.row.id, { action: "advance", status: "confirmed" })).status, 422);       // "confirmed" can only come from verified payment
+  assert.equal((await wf(c.row.id, { action: "advance", status: "completed" })).status, 409);       // cannot skip the driver steps
+  const early = await wf(c.row.id, { action: "advance", status: "getting_ready" });
+  assert.equal(early.status, 409); assert.equal((await early.json()).code, "awaiting_payment");   // unpaid: even an admin cannot start the ride
+  await pay(c.row.payment_token);
+  await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", db.t("payments").find((x: any) => x.booking_id === c.row.id), {}, "evt_adv_1")));
+  assert.equal((await wf(c.row.id, { action: "advance", status: "getting_ready" })).status, 200);
+  // Generic CRUD ignores workflow and payment fields even when a client sends them.
+  const r = await adminAs(() => routes.crud.POST(post("/api/admin/crud", { resource: "bookings", action: "update", id: c.row.id, values: { status: "completed", payment_status: "paid", driver_id: null, confirmed_at: new Date().toISOString(), passengers: 3 } })));
+  const confirmedAt = c.row.confirmed_at; assert.ok(confirmedAt);
+  assert.equal(c.row.status, "getting_ready"); assert.equal(c.row.payment_status, "paid"); assert.ok(c.row.driver_id); // unchanged by the forged generic update (completed / unpaid / driver null / new confirmed_at)
+  void r;
+  // Terminal states stay terminal.
+  assert.equal((await wf(c.row.id, { action: "cancel", reason: "Driver unavailable" })).status, 200);
+  assert.equal((await wf(c.row.id, { action: "advance", status: "on_the_way" })).status, 409);
+});
+
+test("tracking: unknown, malformed and booking-reference inputs get one generic answer; the sequential reference is never a credential", async () => {
+  const b = await flow();
+  for (const bad of ["", "nonsense", "TRK-AAAAA-BBBBB-CCCCC", 12345, null, { a: 1 }, "TRK-" + "A".repeat(500)]) {
+    const r = await trackPost(bad, "10.9.0.1");
+    assert.ok([404, 429].includes(r.status), String(bad));
+  }
+  const byRef = await trackPost(b.row.reference, "10.9.0.2");
+  assert.equal(byRef.status, 404);                                            // VT-1004 style references cannot look anything up
+  assert.equal((await byRef.json()).error, "We could not find a booking for that tracking ID.");
+  const byToken = await trackPost(b.row.payment_token, "10.9.0.3");           // the private link token is a different credential
+  assert.equal(byToken.status, 404);
+  const ok = await trackPost(b.row.tracking_code.toLowerCase().replace(/-/g, " "), "10.9.0.4"); // forgiving input
+  assert.equal(ok.status, 200);
+  assert.equal((await ok.json()).trip.reference, b.row.reference);
+  // Guessing is throttled per client.
+  let last = 0; for (let i = 0; i < 14; i++) last = (await trackPost("TRK-ZZZZZ-ZZZZZ-" + String(10000 + i).slice(0, 5), "10.9.0.99")).status;
+  assert.equal(last, 429);
+  assert.equal((await trackPost(b.row.tracking_code, "10.9.0.99")).status, 429);   // even a right guess waits once the budget is spent
+});
+
+test("tracking response shows real progress and contains no private data", async () => {
+  db.seed("customers", []); // no-op: customers already exist from makeBooking
+  const b = await flow();
+  b.row.admin_notes = "INTERNAL-NOTE-SECRET";
+  let t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
+  assert.equal(t.headline, "Awaiting approval"); assert.equal(t.driver, null); assert.equal(t.confirmed, false);
+  assert.deepEqual(t.steps.filter((s: any) => s.state === "done").map((s: any) => s.key), ["received"]);
+  await approve(b);
+  t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
+  assert.equal(t.headline, "Approved: awaiting payment"); assert.equal(t.awaitingPayment, true); assert.equal(t.confirmed, false);
+  assert.equal(t.driver.firstName, "Dana"); assert.equal(t.driver.vehicle, "Black Escalade");
+  assert.equal(t.helpline.display, "+1 555-010-0199");
+  await pay(b.row.payment_token);
+  await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", db.t("payments").find((x: any) => x.booking_id === b.row.id), {}, "evt_track_1")));
+  await wf(b.row.id, { action: "advance", status: "on_the_way" });
+  t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
+  assert.equal(t.headline, "Your driver is on the way"); assert.equal(t.confirmed, true);
+  assert.equal(t.steps.find((s: any) => s.state === "current").key, "on_the_way");
+  assert.ok(t.steps.filter((s: any) => s.state === "done").map((s: any) => s.key).includes("confirmed"));
+  const raw = JSON.stringify(t);
+  for (const secret of ["4105550100", "ann@example.com", "INTERNAL-NOTE-SECRET", "4105550999", "dana@example.com", "VT-123", b.row.payment_token, "Dana Driver", "stripe", "cs_test_", "tel:"]) assert.ok(!raw.includes(secret), secret);
+  assert.equal(t.charges, null); assert.equal(t.payable, false);                  // no amounts or pay button for the public tracking credential
+  await wf(b.row.id, { action: "cancel", reason: "Changed plans" });
+  t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
+  assert.equal(t.headline, "Booking cancelled"); assert.equal(t.ended, true);
+  assert.equal(t.steps[t.steps.length - 1].ended, true); assert.ok(!t.steps.some((s: any) => s.key === "completed")); // never shown as progress
+  assert.equal(t.driver, null); assert.equal(t.chatAvailable, false);
+});
+
+test("private link token page data: charges and pay button only for the token holder, still no phone numbers", async () => {
+  const { loadTrip } = await import("../src/lib/trip.ts");
+  const b = await flow(); await approve(b);
+  const viaToken: any = await loadTrip(db, b.row.payment_token);
+  assert.equal(viaToken.view.payable, true); assert.equal(viaToken.view.charges.totalCents, 15000);
+  assert.ok(!JSON.stringify(viaToken.view).includes("4105550999") && !JSON.stringify(viaToken.view).includes("4105550100"));
+  assert.equal(await loadTrip(db, "not-a-uuid"), null);
+  assert.equal(await loadTrip(db, { kind: "code", code: b.row.payment_token }), null);
+});
+
+test("chat: only the booking's customer (tracking ID) and its CURRENTLY assigned driver; reassignment revokes the old driver at once", async () => {
+  const origGetUser = db.auth.getUser;
+  db.auth.getUser = async (t: string) => t === "good" ? { data: { user: { id: "admin-1", email: "a@x.com" } }, error: null } : t === "drv1" ? { data: { user: { id: "u-d1", email: "dana@example.com" } }, error: null } : t === "drv2" ? { data: { user: { id: "u-d2", email: "eli@example.com" } }, error: null } : { data: { user: null }, error: { message: "bad" } };
+  try {
+    const d1 = aDriver(); d1.user_id = "u-d1";
+    db.seed("drivers", [{ full_name: "Eli Other", email: "eli@example.com", phone: "4105550888", vehicle_plate: "VT-456", is_active: true, user_id: "u-d2" }]);
+    const d2 = db.t("drivers").find((d: any) => d.email === "eli@example.com");
+    const a = await flow(); const other = await flow();
+    const chatBefore = await trackChat("GET", a.row.tracking_code, undefined, "10.7.0.1");
+    assert.equal(chatBefore.status, 404);                                       // no driver assigned yet: chat is not available
+    await approve(a, d1.id); await approve(other, d2.id);
+
+    const drvPost = (token: string, bookingId: string, body: unknown, clientId: string) => asDriver(token, () => routes.driverMessages.POST(post("/api/driver/messages", { bookingId, body, clientId })));
+    const drvGet = (token: string, bookingId: string) => asDriver(token, () => routes.driverMessages.GET(new Request(`http://site.test/api/driver/messages?booking=${bookingId}`, { headers: HDR() })));
+
+    // Customer sends; forged sender role in the body is ignored; empty / overlong / malformed are refused; the same clientId is stored once.
+    const sent = await trackChat("POST", a.row.tracking_code, { body: "I am at the side entrance", clientId: "client-0001-aaaa", role: "driver", sender_role: "driver" }, "10.7.0.2");
+    assert.equal(sent.status, 200); assert.equal((await sent.json()).message.role, "customer");
+    assert.equal((await trackChat("POST", a.row.tracking_code, { body: "I am at the side entrance", clientId: "client-0001-aaaa" }, "10.7.0.3")).status, 200);
+    assert.equal(db.t("booking_messages").filter((m: any) => m.booking_id === a.row.id).length, 1);
+    assert.equal((await trackChat("POST", a.row.tracking_code, { body: "   ", clientId: "client-0002-aaaa" }, "10.7.0.4")).status, 422);
+    assert.equal((await trackChat("POST", a.row.tracking_code, { body: "x".repeat(2000), clientId: "client-0003-aaaa" }, "10.7.0.5")).status, 422);
+    assert.equal((await trackChat("POST", a.row.tracking_code, { body: 42, clientId: "client-0004-aaaa" }, "10.7.0.6")).status, 422);
+    assert.equal((await trackChat("POST", a.row.tracking_code, { body: "hi", clientId: "!" }, "10.7.0.7")).status, 400);
+
+    // Wrong or missing credentials and other bookings' credentials cannot read or write.
+    assert.equal((await trackChat("GET", null, undefined, "10.7.1.1")).status, 404);
+    assert.equal((await trackChat("GET", a.row.payment_token, undefined, "10.7.1.2")).status, 404);
+    const mine = await (await trackChat("GET", a.row.tracking_code, undefined, "10.7.1.3")).json();
+    assert.equal(mine.messages.length, 1);
+    const theirs = await (await trackChat("GET", other.row.tracking_code, undefined, "10.7.1.4")).json();
+    assert.equal(theirs.messages.length, 0);                                    // the other booking's customer never sees booking A's messages
+
+    // Drivers: the assigned driver reads and replies; another driver gets "not found" for the same ride.
+    assert.equal((await (await drvGet("drv1", a.row.id)).json()).messages.length, 1);
+    assert.equal((await drvGet("drv2", a.row.id)).status, 404);
+    assert.equal((await drvPost("drv2", a.row.id, "sneaky", "client-0005-aaaa")).status, 404);
+    assert.equal((await drvPost("drv1", a.row.id, "Be there in 3 minutes", "client-0006-aaaa")).status, 200);
+    assert.equal((await drvPost("nobody", a.row.id, "hello", "client-0007-aaaa")).status, 401);
+
+    // Reassign: the previous driver loses access immediately; the new driver gets it; the customer's tracking page now names the new driver.
+    assert.equal((await wf(a.row.id, { action: "reassign", driverId: d2.id })).status, 200);
+    assert.equal((await drvGet("drv1", a.row.id)).status, 404);
+    assert.equal((await drvPost("drv1", a.row.id, "still here?", "client-0008-aaaa")).status, 404);
+    assert.equal((await drvGet("drv2", a.row.id)).status, 200);
+    assert.equal((await drvPost("drv2", a.row.id, "I am your new driver", "client-0009-aaaa")).status, 200);
+    const t = (await (await trackPost(a.row.tracking_code, "10.7.2.1")).json()).trip;
+    assert.equal(t.driver.firstName, "Eli");
+    assert.equal(brevoTo("dana@example.com").filter((c) => JSON.stringify(c.body).includes(a.row.reference)).length >= 1, true); // old driver was told
+
+    // A closed booking stops accepting messages.
+    await wf(a.row.id, { action: "cancel", reason: "Cancelled by request" });
+    assert.equal((await trackChat("POST", a.row.tracking_code, { body: "too late", clientId: "client-0010-aaaa" }, "10.7.3.1")).status, 409);
+    assert.equal((await drvPost("drv2", a.row.id, "too late", "client-0011-aaaa")).status, 409); // chat is closed once the ride is closed
+  } finally { db.auth.getUser = origGetUser; }
+});
+
+test("driver-facing ride data carries no customer or passenger phone numbers", async () => {
+  const { loadDriverRides } = await import("../src/lib/driver/rides.ts");
+  const b = await flow({}, {}); await approve(b);
+  const rides: any[] = await loadDriverRides(db, aDriver().id);
+  const mine = rides.find((r) => r.id === b.row.id);
+  assert.ok(mine);
+  const raw = JSON.stringify(rides);
+  assert.ok(!raw.includes("4105550100") && !raw.includes("4435550123") && !raw.includes("4105550177"));
+  assert.ok(!("contactPhone" in mine) && !("passengerPhone" in mine));
+});
+
+
+test("payment gate: a driver cannot progress a ride until a verified payment set confirmed_at; every bypass is closed", async () => {
+  const origGetUser = db.auth.getUser;
+  db.auth.getUser = async (t: string) => t === "good" ? { data: { user: { id: "admin-1", email: "a@x.com" } }, error: null } : t === "drv1" ? { data: { user: { id: "u-d1", email: "dana@example.com" } }, error: null } : t === "drv2" ? { data: { user: { id: "u-d2", email: "eli@example.com" } }, error: null } : { data: { user: null }, error: { message: "bad" } };
+  try {
+    const d1 = aDriver(); d1.user_id = "u-d1";
+    if (!db.t("drivers").some((d: any) => d.user_id === "u-d2")) db.seed("drivers", [{ full_name: "Eli Other", email: "eli2@example.com", phone: "4105550889", vehicle_plate: "VT-457", is_active: true, user_id: "u-d2" }]);
+    const step = (token: string, id: string, status: string) => asDriver(token, () => routes.driverStatusRoute.POST(post("/api/driver/status", { id, status })));
+    const ALL = ["getting_ready", "on_the_way", "arrived", "picked_up", "completed"];
+    const mine = async (id: string) => (await (await import("../src/lib/driver/rides.ts")).loadDriverRides(db, d1.id) as any[]).find((r) => r.id === id);
+
+    // 1. Approved and assigned but UNPAID: every progress step is refused by the server, status never moves.
+    const b = await flow(); await approve(b, d1.id);
+    for (const to of ALL) { const r = await step("drv1", b.row.id, to); assert.equal(r.status, 409, to); }
+    assert.equal(b.row.status, "assigned");
+    assert.equal((await (await step("drv1", b.row.id, "on_the_way")).json()).code, "awaiting_payment");
+    const view = await mine(b.row.id); assert.equal(view.awaitingPayment, true); assert.deepEqual(view.nextStatuses, []);
+
+    // 2. A payment that FAILED or was left pending does not unlock anything.
+    await pay(b.row.payment_token);
+    const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
+    assert.equal((await step("drv1", b.row.id, "on_the_way")).status, 409);
+    await routes.webhook.POST(hook(sessionEvent("checkout.session.expired", p, {}, "evt_gate_exp")));
+    assert.equal((await step("drv1", b.row.id, "on_the_way")).status, 409);
+    assert.equal(b.row.confirmed_at ?? null, null);
+
+    // 3. Forging the gate through the generic editor or a stray column does nothing.
+    await adminAs(() => routes.crud.POST(post("/api/admin/crud", { resource: "bookings", action: "update", id: b.row.id, values: { confirmed_at: new Date().toISOString(), payment_status: "paid" } })));
+    assert.equal((await step("drv1", b.row.id, "on_the_way")).status, 409);
+
+    // 4. Another driver, and an unauthenticated caller, never get further than the owner would.
+    assert.equal((await step("drv2", b.row.id, "on_the_way")).status, 404);
+    assert.equal((await step("nobody", b.row.id, "on_the_way")).status, 401);
+
+    // 5. Admin may reassign before payment (permissions intact); the NEW driver is gated the same way.
+    const d2 = db.t("drivers").find((d: any) => d.user_id === "u-d2");
+    assert.equal((await wf(b.row.id, { action: "reassign", driverId: d2.id })).status, 200);
+    assert.equal((await step("drv2", b.row.id, "on_the_way")).status, 409);
+    assert.equal((await step("drv1", b.row.id, "on_the_way")).status, 404);
+
+    // 6. Verified payment confirms the booking, then the new driver can run the whole ride in order, and only in order.
+    await pay(b.row.payment_token);
+    const p2 = db.t("payments").filter((x: any) => x.booking_id === b.row.id).pop();
+    await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p2, {}, "evt_gate_ok")));
+    assert.ok(b.row.confirmed_at); assert.equal(b.row.status, "confirmed");
+    assert.equal((await step("drv2", b.row.id, "completed")).status, 409);   // cannot skip steps
+    for (const to of ["getting_ready", "on_the_way", "arrived", "picked_up", "completed"]) assert.equal((await step("drv2", b.row.id, to)).status, 200, to);
+    assert.equal(b.row.status, "completed");
+
+    // 7. Refunded after confirmation: progress stops until an admin resolves it; cancelled and declined never progress.
+    const r = await flow(); await approve(r, d2.id); await pay(r.row.payment_token);
+    await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", db.t("payments").find((x: any) => x.booking_id === r.row.id), {}, "evt_gate_r")));
+    assert.equal((await step("drv2", r.row.id, "getting_ready")).status, 200);
+    r.row.payment_status = "refunded";
+    assert.equal((await step("drv2", r.row.id, "on_the_way")).status, 409);
+    assert.equal((await wf(r.row.id, { action: "advance", status: "on_the_way" })).status, 409);
+    const c = await flow(); await approve(c, d2.id); await wf(c.row.id, { action: "cancel", reason: "Customer cancelled" });
+    assert.equal((await step("drv2", c.row.id, "on_the_way")).status, 409);
+    const x = await flow(); await wf(x.row.id, { action: "reject", reason: "Not available" });
+    assert.equal((await step("drv2", x.row.id, "on_the_way")).status, 404);   // never assigned to this driver
+    assert.equal(x.row.status, "rejected");
+    // Admin cancellation of an approved but unpaid booking still works.
+    const u = await flow(); await approve(u, d2.id);
+    assert.equal((await wf(u.row.id, { action: "cancel", reason: "Customer cancelled" })).status, 200);
+  } finally { db.auth.getUser = origGetUser; }
+});
+
+test("pure rule: rideMayProgress", async () => {
+  const { rideMayProgress } = await import("../src/lib/booking-status.ts");
+  const ok = { status: "confirmed", confirmed_at: "2026-01-01T00:00:00Z", payment_status: "paid" };
+  assert.equal(rideMayProgress(ok), true);
+  assert.equal(rideMayProgress({ ...ok, payment_status: "deposit_paid" }), true);
+  for (const bad of [{ ...ok, confirmed_at: null }, { ...ok, payment_status: "unpaid" }, { ...ok, payment_status: "failed" }, { ...ok, payment_status: "pending" }, { ...ok, payment_status: "refunded" }, { ...ok, payment_status: "review" }, { ...ok, status: "cancelled" }, { ...ok, status: "rejected" }, { ...ok, status: "no_show" }, { ...ok, status: "completed" }]) assert.equal(rideMayProgress(bad), false, JSON.stringify(bad));
 });

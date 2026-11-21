@@ -10,6 +10,7 @@ import { openCalculator } from "@/lib/calculator-events";
 // Every destination from the original navigation is kept: Home stays reachable from the logo (and the mobile menu).
 const links = [
   { href: "/rides", label: "Rides we offer" },
+  { href: "/track", label: "Track Your Ride" },
   { href: "/about", label: "About us" },
   { href: "/quote", label: "Get a quote" },
   { href: "/contact", label: "Contact" },

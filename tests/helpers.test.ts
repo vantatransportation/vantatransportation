@@ -130,7 +130,7 @@ test("coerceValues enforces the field whitelist, types and required fields", () 
 
   assert.equal(coerceValues(vehicles, { name: "X", category_id: "nope", passenger_capacity: 4 }, false).ok, false);
   assert.equal(coerceValues(vehicles, { name: "X", category_id: "11111111-1111-4111-8111-111111111111", passenger_capacity: -2 }, false).ok, false);
-  assert.equal(coerceValues(resources.bookings, { status: "hacked" }, true).ok, false);
+  { const r = coerceValues(resources.bookings, { status: "confirmed", driver_id: "x", payment_status: "paid" }, true); assert.ok(!r.ok || !("status" in r.data) && !("driver_id" in r.data) && !("payment_status" in r.data)); } // workflow fields are never writable through the generic editor
   const money = coerceValues(resources.bookings, { estimated_fare_cents: "123.45" }, true);
   assert.ok(money.ok);
   assert.equal(money.data.estimated_fare_cents, 12345);

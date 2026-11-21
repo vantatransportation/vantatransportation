@@ -1,10 +1,11 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo } from "react";
 import { formatMoney } from "@/lib/pricing/engine";
 import { useSessionString } from "@/lib/use-session";
 
-interface Saved { reference: string; totalCents: number | null; onlineAmountCents?: number | null; currency: string; shownTotalCents: number | null; payUrl?: string | null }
+interface Saved { reference: string; totalCents: number | null; onlineAmountCents?: number | null; currency: string; shownTotalCents: number | null; trackingId?: string | null }
 
 export default function ConfirmationDetails({ reference }: { reference: string }) {
   const raw = useSessionString("vanta:confirmation");
@@ -25,11 +26,11 @@ export default function ConfirmationDetails({ reference }: { reference: string }
       {online != null ? <p>Amount due online: <strong>{formatMoney(online, saved.currency)}</strong> <span className="muted">(fixed tier price plus any add-ons)</span></p> : <p>We will confirm your price with you.</p>}
       {saved.totalCents != null && <p className="muted" style={{ marginTop: ".5rem" }}>Estimated trip fare: {formatMoney(saved.totalCents, saved.currency)}. For information only: it is not part of the online amount.</p>}
       {changed && <p className="muted" style={{ marginTop: ".5rem" }}>The online amount differs from the one you saw ({formatMoney(saved.shownTotalCents!, saved.currency)}) because the tier prices were updated. The amount shown here is the one we recorded.</p>}
-      {saved.payUrl && (
-        <p style={{ marginTop: "1rem" }}>
-          <a className="btn btn--primary" href={saved.payUrl}>Pay online</a>
-          <span className="muted" style={{ display: "block", marginTop: ".5rem" }}>Paying does not confirm your booking by itself. We confirm it with you directly. You can also pay later using the link in your email.</span>
-        </p>
+      {saved.trackingId && (
+        <div style={{ marginTop: "1rem" }}>
+          <p>Your tracking ID: <strong style={{ letterSpacing: ".05em" }}>{saved.trackingId}</strong></p>
+          <p className="muted" style={{ marginTop: ".4rem" }}>Keep it private. It is also in your email. Use it on <Link href="/track" style={{ textDecoration: "underline" }}>Track Your Ride</Link> to follow your request. No payment is taken now: if we approve your booking we email you a secure payment link, and it is confirmed once that payment is verified.</p>
+        </div>
       )}
     </div>
   );

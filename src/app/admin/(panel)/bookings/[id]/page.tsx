@@ -7,6 +7,9 @@ import { adminPage, loadRefOptions } from "@/lib/admin/data";
 import { resources, toClient } from "@/lib/admin/resources";
 import { BUSINESS_TZ } from "@/lib/config";
 import BookingOps from "@/components/admin/BookingOps";
+import BookingWorkflow from "@/components/admin/BookingWorkflow";
+import { DRIVER_FLOW, canTransition, type BookingStatus } from "@/lib/booking-status";
+import { getHelpline } from "@/lib/helpline";
 import { loadBookingSettings } from "@/lib/policies";
 import { REGION_LABEL, type Region } from "@/lib/coverage";
 
@@ -33,6 +36,12 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
   const airports = (airportQ.data ?? []) as Record<string, string | number | boolean | null>[];
   const passenger = people.find((x) => x.role === "passenger");
   const contacts = people.filter((x) => x.role === "emergency_contact" || x.role === "secondary_contact");
+  const [driversQ, histQ, helpline] = await Promise.all([
+    db.from("drivers").select("id,full_name,vehicle_plate,is_active").order("full_name"),
+    db.from("booking_status_history").select("to_status,note,created_at,actor_type").eq("booking_id", id).order("created_at", { ascending: false }).limit(50),
+    getHelpline(db),
+  ]);
+  const driverRows = (driversQ.data ?? []) as { id: string; full_name: string; vehicle_plate: string | null; is_active: boolean }[];
   const [stops, snaps, notes, refs] = await Promise.all([
     db.from("booking_stops").select("position,address").eq("booking_id", id).order("position"),
     db.from("pricing_snapshots").select("line_items,total_cents,snapshot,created_at").eq("booking_id", id).order("created_at"),
@@ -55,13 +64,20 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
           <dt>Charged online</dt><dd>{b.online_amount_cents != null ? `${fmtMoney(b.online_amount_cents)} = fixed tier price ${fmtMoney(b.fixed_price_cents ?? 0)}${b.meet_greet_selected ? ` + Meet & Greet ${fmtMoney(b.meet_greet_fee_cents ?? 0)}` : ""}${(b.child_seat_fee_cents ?? 0) > 0 ? ` + child seats ${fmtMoney(b.child_seat_fee_cents)}` : ""}` : "Not set up (tier fixed price was not configured when this was requested)"}</dd>
           <dt>Meet &amp; Greet</dt><dd>{b.meet_greet_selected ? "Selected (fee frozen at request time)" : "Not selected"}</dd>
           <dt>Payment status</dt><dd>{String(b.payment_status).replace(/_/g, " ")} · collected {fmtMoney(b.amount_paid_cents ?? 0)}</dd>
+          <dt>Confirmed</dt><dd>{b.confirmed_at ? `Yes, ${fmtDate(b.confirmed_at, BUSINESS_TZ)} (after verified payment)` : "Not yet"}</dd>
+          <dt>Tracking ID</dt><dd>{b.tracking_code ?? "Not generated (apply migration 0009)"} <span className="muted">(customer credential; share it only with the customer)</span></dd>
           <dt>Child seats</dt><dd>{seats.length ? `${seats.map((x) => `${x.quantity} × ${x.type.replace(/_/g, "-")}`).join(", ")} (requested, subject to confirmation)` : "None requested"}</dd>
         </dl>
         {payments.length > 0 && <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Date</th><th>Provider</th><th>Type</th><th>Amount</th><th>Status</th><th>Reference</th></tr></thead><tbody>
           {payments.map((p) => <tr key={p.id}><td>{fmtDate(p.paid_at ?? p.created_at, BUSINESS_TZ)}</td><td>{p.provider === "paypal" ? "PayPal" : "Stripe"}</td><td>{p.kind}</td><td>{fmtMoney(p.amount_cents)}{p.refunded_cents > 0 ? ` (refunded ${fmtMoney(p.refunded_cents)})` : ""}</td><td>{p.status}{p.failure_reason ? ` · ${p.failure_reason}` : ""}</td><td><code>{p.provider_txn_id ?? p.provider_ref ?? ""}</code></td></tr>)}
         </tbody></table></div>}
-        <p className="muted">A payment never confirms a booking: confirm it as usual. Refunds are issued in the Stripe or PayPal dashboard and appear here automatically.</p>
+        <p className="muted">A booking is confirmed only by a payment the provider has verified (Stripe webhook signature, or PayPal verification): never by an admin click or a customer returning to a page. Refunds are never automatic; issue them in the Stripe or PayPal dashboard and they appear here.</p>
       </div>
+      {!helpline && <div className="banner">The Vanta support phone number is not set. Customers and drivers cannot see a Call Vanta Support button until you add it in Website content (contact.phone). <Link href="/admin/content" style={{ textDecoration: "underline" }}>Website content</Link></div>}
+      <BookingWorkflow id={id} status={b.status} driverId={b.driver_id ?? null} driverName={driverRows.find((d) => d.id === b.driver_id)?.full_name ?? null} paymentReleased={Boolean(b.payment_released_at && b.driver_id)}
+        nextSteps={DRIVER_FLOW.filter((to) => to !== "assigned" && canTransition("admin", b.status as BookingStatus, to))} confirmedAt={b.confirmed_at ?? null}
+        drivers={driverRows.map((d) => ({ id: d.id, name: d.full_name, plate: d.vehicle_plate, active: d.is_active }))}
+        history={((histQ.data ?? []) as { to_status: string; note: string | null; created_at: string; actor_type: string }[]).map((h) => ({ to: h.to_status, at: h.created_at, note: h.note, actor: h.actor_type }))} />
       <div className="twocol">
         <div className="panel">
           <h3>Trip</h3>
@@ -149,7 +165,7 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
       <BookingOps id={id} status={b.status} fulfilmentMode={b.fulfilment_mode ?? "review"} partnerName={b.partner_name ?? null} hasMeetGreet={airports.some((a) => a.meet_greet_requested)} meetGreetStatus={(airports.find((a) => a.meet_greet_requested)?.meet_greet_status as string | undefined) ?? null} waitingIncluded={settings.waitingIncludedMinutes} waitingRateApproved={settings.waitingRateCents != null} />
       {b.notes && <div className="panel"><h3>Customer notes</h3><p>{b.notes}</p></div>}
       <h2>Manage</h2>
-      <FieldsForm resource={toClient(resources.bookings)} id={id} initial={b} refOptions={refs} tz={BUSINESS_TZ} only={["status", "vehicle_id", "pickup_address", "dropoff_address", "pickup_at", "passengers", "estimated_fare_cents", "admin_notes"]} />
+      <FieldsForm resource={toClient(resources.bookings)} id={id} initial={b} refOptions={refs} tz={BUSINESS_TZ} only={["vehicle_id", "pickup_address", "dropoff_address", "pickup_at", "passengers", "estimated_fare_cents", "admin_notes"]} />
       <NotesPanel entityType="booking" entityId={id} notes={(notes.data ?? []) as NoteRow[]} tz={BUSINESS_TZ} />
     </>
   );

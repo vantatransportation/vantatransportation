@@ -3,17 +3,18 @@ import { guard } from "@/lib/admin/guard";
 import { notify } from "@/lib/notify";
 import { clean } from "@/lib/validation";
 import { BUSINESS_TZ } from "@/lib/config";
-import { AWAITING_REVIEW, canApprove, canAssign, canTransition, type BookingStatus } from "@/lib/booking-status";
+import { AWAITING_PAYMENT_MESSAGE, AWAITING_REVIEW, DRIVER_FLOW, canApprove, canAssign, canTransition, rideMayProgress, type BookingStatus } from "@/lib/booking-status";
 import { formatMoney } from "@/lib/pricing/engine";
 import { availableProviders } from "@/lib/payment-providers";
 import { loadBookingSettings } from "@/lib/policies";
+import { firstName } from "@/lib/tracking";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type Row = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-const BOOKING_COLS = "id,reference,status,customer_id,driver_id,pickup_at,pickup_address,dropoff_address,passengers,checked_bags,carry_on_bags,payment_status,payment_token,online_amount_cents,currency,payment_released_at";
+const BOOKING_COLS = "id,reference,status,customer_id,driver_id,pickup_at,pickup_address,dropoff_address,passengers,checked_bags,carry_on_bags,payment_status,payment_token,tracking_code,confirmed_at,online_amount_cents,currency,payment_released_at";
 
 /**
  * Admin-only booking workflow: approve + assign a driver (releases payment), reassign, reject, cancel.
@@ -87,13 +88,13 @@ export async function POST(request: Request) {
         const settings = await loadBookingSettings(g.db);
         const payable = availableProviders(settings).length > 0 && b.online_amount_cents != null && b.payment_token && site;
         await notify(g.db, "booking.approved", { type: "booking", id }, {
-          ...common, Driver: driver.full_name, "Driver phone": driver.phone ?? undefined, "Vehicle plate": driver.vehicle_plate ?? undefined,
-          "Booking page": site ? `${site}/trip/${b.payment_token}` : undefined, "Amount due online": b.online_amount_cents != null ? formatMoney(b.online_amount_cents, b.currency ?? "USD") : undefined,
+          ...common, Driver: firstName(driver.full_name) ?? undefined, // first name only; no driver phone or plate is ever emailed to customers
+          "Booking page": site && b.tracking_code ? `${site}/track#id=${b.tracking_code}` : undefined, _trackingId: b.tracking_code ?? undefined, "Amount due online": b.online_amount_cents != null ? formatMoney(b.online_amount_cents, b.currency ?? "USD") : undefined,
           _customerEmail: cust.email, _customerName: cust.name, _payUrl: payable ? `${site}/pay/${b.payment_token}` : undefined,
         }, { dedupeSuffix: assignment.data.id });
       }
       if (!isApprove && cust?.email) {
-        await notify(g.db, "booking.reassigned", { type: "booking", id }, { ...common, Driver: driver.full_name, "Driver phone": driver.phone ?? undefined, "Vehicle plate": driver.vehicle_plate ?? undefined, _customerEmail: cust.email, _customerName: cust.name }, { dedupeSuffix: assignment.data.id });
+        await notify(g.db, "booking.reassigned", { type: "booking", id }, { ...common, Driver: firstName(driver.full_name) ?? undefined, _customerEmail: cust.email, _customerName: cust.name }, { dedupeSuffix: assignment.data.id });
       }
       if (!isApprove && previous) {
         const old = await driverOf(previous);
@@ -132,6 +133,18 @@ export async function POST(request: Request) {
       // No refund is issued or promised automatically: a refund needs a defined policy and a deliberate admin action in Stripe/PayPal.
       const paid = ["paid", "deposit_paid", "partially_refunded"].includes(String(b.payment_status));
       return json({ ok: true, status: "cancelled", refundReviewNeeded: paid });
+    }
+    case "advance": {
+      // Admin may move a ride through the same driver steps (for example to complete a ride a driver could not). Never to
+      // assigned / confirmed (those come from approval and verified payment), and never out of a terminal state.
+      const to = typeof body.status === "string" && (DRIVER_FLOW as string[]).includes(body.status) && body.status !== "assigned" ? (body.status as BookingStatus) : null;
+      if (!to) return json({ error: "Choose a valid next step." }, 422);
+      if (!canTransition("admin", status, to)) return json({ error: "That step is not valid from the current status." }, 409);
+      if (!rideMayProgress(b)) return json({ error: AWAITING_PAYMENT_MESSAGE.replace("You will be able to continue", "The ride can continue"), code: "awaiting_payment" }, 409);
+      const upd = await g.db.from("bookings").update({ status: to }).eq("id", id).eq("status", status).not("confirmed_at", "is", null).in("payment_status", ["paid", "deposit_paid", "partially_refunded"]).select("id");
+      if (upd.error || !upd.data?.length) return json({ error: "This booking was just changed by someone else. Reload and try again." }, 409);
+      await history(status, to, "Updated by admin"); await log("booking.advanced", { from: status, to });
+      return json({ ok: true, status: to });
     }
     default:
       return json({ error: "Unknown action." }, 400);

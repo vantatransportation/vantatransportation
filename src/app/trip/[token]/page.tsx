@@ -15,7 +15,7 @@ export default async function TripPage({ params }: { params: Promise<{ token: st
   return (
     <div style={{ maxWidth: 720, margin: "0 auto", padding: "1.5rem 1rem 4rem" }}>
       <h1>Your booking</h1>
-      {t ? <TripStatus token={token} initial={t.view} tz={BUSINESS_TZ} /> : (
+      {t ? <TripStatus credential={{ kind: "token", token }} initial={t.view} tz={BUSINESS_TZ} /> : (
         <div className="notice notice--error">This link is not valid. Please use the link in your booking email, or <Link href="/contact" style={{ textDecoration: "underline" }}>contact us</Link>.</div>
       )}
     </div>

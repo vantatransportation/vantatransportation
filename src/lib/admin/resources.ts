@@ -19,6 +19,8 @@ export interface Field {
   hidden?: boolean;
   /** For type "photo": the field that stores the Cloudinary public id. */
   companion?: string;
+  /** Shown for filtering and display only. NEVER writable through the generic editor: it changes only through checked workflow actions. */
+  workflow?: boolean;
 }
 
 export interface Column {
@@ -51,7 +53,7 @@ export interface Resource {
 
 export type ClientResource = Omit<Resource, "refLabel" | "select" | "orderBy" | "table">;
 
-export const BOOKING_STATUSES = ["new_request", "pending_confirmation", "confirmed", "assigned", "in_progress", "completed", "cancelled", "no_show"];
+export const BOOKING_STATUSES = ["new_request", "pending_confirmation", "confirmed", "assigned", "getting_ready", "on_the_way", "arrived", "picked_up", "in_progress", "completed", "cancelled", "rejected", "no_show"];
 export const LEAD_STATUSES = ["new", "contacted", "follow_up", "converted", "not_interested", "closed"];
 export const QUOTE_STATUSES = ["new", "reviewing", "revised_sent", "accepted", "rejected", "closed"];
 
@@ -110,6 +112,22 @@ export const resources: Record<string, Resource> = {
       { label: "Capacity range", path: "vehicle_categories.capacity_label" }, { label: "Max seats", path: "passenger_capacity" }, { label: "Shown", path: "is_active", kind: "bool" }, { label: "Available", path: "is_available", kind: "bool" },
     ],
     refLabel: (r) => String(r.name ?? ""),
+  },
+  drivers: {
+    slug: "drivers", table: "drivers", title: "Drivers", singular: "driver",
+    select: "id,full_name,email,phone,vehicle_plate,vehicle_description,is_active,user_id,notes,created_at", orderBy: "full_name", canCreate: true, canDelete: false,
+    searchPaths: ["full_name", "email", "vehicle_plate"],
+    fields: [
+      { name: "full_name", label: "Full name", type: "text", required: true },
+      { name: "email", label: "Email (used for sign-in and assignment emails)", type: "text", required: true },
+      { name: "phone", label: "Phone (staff only, never shown to customers)", type: "text" },
+      { name: "vehicle_plate", label: "Vehicle plate", type: "text" },
+      { name: "vehicle_description", label: "Vehicle (shown to the customer once assigned)", type: "text" },
+      { name: "notes", label: "Internal notes", type: "textarea" },
+      { name: "is_active", label: "Active (can be assigned and can sign in)", type: "bool" },
+    ],
+    columns: [{ label: "Driver", path: "full_name" }, { label: "Email", path: "email" }, { label: "Vehicle", path: "vehicle_description" }, { label: "Plate", path: "vehicle_plate" }, { label: "Active", path: "is_active", kind: "bool" }],
+    refLabel: (r) => String(r.full_name ?? ""),
   },
   standards: {
     slug: "standards", table: "vehicle_standards", title: "Vehicle standards", singular: "standard",
@@ -240,7 +258,7 @@ export const resources: Record<string, Resource> = {
     select: "*, customers(name,email,phone), vehicles(name)", orderBy: "pickup_at", ascending: false, canCreate: false, canDelete: false,
     filterField: "status", searchPaths: ["reference", "pickup_address", "dropoff_address", "customers.name", "customers.email", "customers.phone"], detailHref: "/admin/bookings/",
     fields: [
-      { name: "status", label: "Status", type: "select", options: BOOKING_STATUSES, required: true },
+      { name: "status", label: "Status", type: "select", options: BOOKING_STATUSES, workflow: true, help: "Changes only through Approve / Decline / Cancel / driver updates, so statuses cannot conflict." },
       { name: "vehicle_id", label: "Vehicle", type: "ref", ref: "vehicles" },
       { name: "pickup_address", label: "Pickup", type: "text", required: true },
       { name: "dropoff_address", label: "Destination", type: "text" },

@@ -479,3 +479,55 @@ table { max-width: 100%; }
 .theme-toggle--stack { display: flex; flex-direction: column; border-radius: 6px; width: 100%; }
 .theme-toggle--stack button { text-align: left; border-left: 0 !important; }
 .theme-toggle--stack button + button { border-top: 1px solid var(--line); }
+
+/* ===== Calculate Your Fare modal: responsive layout (appended last so it wins over earlier .calc__body rules) =====
+   Root cause of the cramped mobile modal: a later rule re-applied a two-column grid to .calc__body after the
+   max-width:860px rule had set one column, so phones kept two squeezed columns. These rules restore a single scrolling column. */
+.calc__section { font-family: var(--font-display); font-size: 1.2rem; color: var(--white); margin: 1.25rem 0 .6rem; padding-top: 1rem; border-top: 1px solid var(--line); }
+.calc__section:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
+.calc__head { position: sticky; top: 0; z-index: 3; background: var(--charcoal); }
+.calc__head h2 { font-size: clamp(1.25rem, 4.5vw, 1.7rem); }
+.calc input, .calc select, .calc textarea { font-size: 16px; } /* 16px stops iOS zooming into focused fields */
+.calc .btn { min-height: 48px; }
+@media (min-width: 861px) {
+  .calc { height: min(860px, calc(100dvh - 2rem)); }
+  .calc__body { grid-template-columns: minmax(0, .85fr) minmax(0, 1.15fr); }
+}
+@media (max-width: 860px) {
+  .modal-scrim { padding: 0; place-items: stretch; overflow: hidden; }
+  .calc { width: 100%; height: 100dvh; max-height: 100dvh; min-height: 0; border-width: 0; box-shadow: none; }
+  .calc__head { padding: .35rem .5rem .35rem 1rem; }
+  .calc__body { display: block; flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding-bottom: env(safe-area-inset-bottom); }
+  .calc__main, .calc__side { display: block; padding: 1rem 1rem 1.25rem; overflow: visible; border-right: 0; }
+  .calc__side { border-top: 1px solid var(--line); }
+  .calc .seg button { min-height: 48px; }
+  .calc .vgrid ul { grid-template-columns: 1fr; }
+  .calc .opt { grid-template-columns: auto 1fr; }
+  .calc .opt .opt__price { grid-column: 2; }
+  .calc .vcard__foot { flex-wrap: wrap; }
+  .calc .summary .btn { width: 100%; }
+}
+@media (max-width: 560px) {
+  .calc__row { grid-template-columns: 1fr; gap: 0; }
+  .calc .stop { grid-template-columns: 1fr; gap: 0; }
+  .calc .stop .btn { margin-bottom: .85rem; justify-self: start; }
+  .calc .lines td:last-child { white-space: nowrap; padding-left: .75rem; }
+  .calc .field input[type="date"], .calc .field input[type="time"] { min-width: 0; max-width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) { .calc, .modal-scrim { animation: none; } }
+
+/* ===== Ride progress timeline (Track page and private booking page) ===== */
+.tl { list-style: none; margin: 1.25rem 0; padding: 0; display: grid; gap: 0; }
+.tl__step { position: relative; display: grid; grid-template-columns: 28px 1fr; gap: .75rem; align-items: start; padding-bottom: 1.1rem; color: var(--muted); }
+.tl__step:last-child { padding-bottom: 0; }
+.tl__step::before { content: ""; position: absolute; left: 13px; top: 28px; bottom: 0; width: 2px; background: var(--line); }
+.tl__step:last-child::before { display: none; }
+.tl__dot { width: 28px; height: 28px; border-radius: 50%; border: 2px solid var(--dark-grey); display: grid; place-items: center; font-size: .85rem; line-height: 1; background: var(--charcoal); }
+.tl__label { padding-top: .2rem; }
+.tl__step--done { color: var(--light); }
+.tl__step--done .tl__dot { background: var(--silver); border-color: var(--silver); color: var(--on-silver); }
+.tl__step--done::before { background: var(--silver); }
+.tl__step--current { color: var(--white); font-weight: 600; }
+.tl__step--current .tl__dot { border-color: var(--silver); box-shadow: 0 0 0 4px rgba(192, 197, 206, .25); }
+.tl__step--ended .tl__dot { border-color: var(--danger); color: var(--danger); background: transparent; box-shadow: none; }
+@media (max-width: 520px) { .tl__step { grid-template-columns: 24px 1fr; gap: .6rem; } .tl__dot { width: 24px; height: 24px; } .tl__step::before { left: 11px; top: 24px; } }

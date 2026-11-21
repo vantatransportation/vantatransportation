@@ -7,6 +7,7 @@ import { normalizePhotoFields, releaseAsset } from "@/lib/cloudinary";
 import { PUBLIC_TABLES, revalidateSite } from "@/lib/admin/revalidate";
 import { validateTierPricing } from "@/lib/tier-pricing";
 import { BUSINESS_TZ } from "@/lib/config";
+import { EMAIL_RE } from "@/lib/validation";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
@@ -39,6 +40,8 @@ export async function POST(request: Request) {
   const action = body.action;
   const id = typeof body.id === "string" && UUID_RE.test(body.id) ? body.id : null;
   const values = (body.values && typeof body.values === "object" ? body.values : {}) as Record<string, unknown>;
+  // Belt and braces: even if a client sends them, booking workflow and payment fields are never written through this generic endpoint.
+  if (resource.table === "bookings") for (const k of ["status", "driver_id", "payment_status", "payment_released_at", "confirmed_at", "approved_at", "amount_paid_cents", "tracking_code", "payment_token"]) delete values[k];
 
   const log = async (act: string, entityId: string | null) => {
     const r = await db.from("activity_logs").insert({ actor_id: admin.id, action: `${resource.slug}.${act}`, entity_type: resource.table, entity_id: entityId, meta: {} });
@@ -56,6 +59,7 @@ export async function POST(request: Request) {
       c.data.sort_order = ((last.data?.sort_order as number | undefined) ?? 0) + 1;
     }
     if (resource.table === "vehicles") { const bad = normalizePhotoFields(c.data); if (bad) return json({ error: bad }, 422); }
+    if (resource.table === "drivers" && !EMAIL_RE.test(String(c.data.email ?? ""))) return json({ error: "Enter a valid driver email address." }, 422);
     if (resource.table === "pricing_configs" && c.data.status === "active") await archiveOtherActive(db, String(c.data.vehicle_id));
     const ins = await db.from(resource.table).insert(c.data).select("id").single();
     if (ins.error) return dbError(ins.error);
@@ -70,10 +74,11 @@ export async function POST(request: Request) {
     if (!c.ok) return json({ error: c.error }, 422);
     if (!Object.keys(c.data).length) return json({ ok: true });
 
-    if (resource.table === "bookings" && c.data.status === "no_show") return json({ error: "Use the Mark as no-show action on the booking page. It records the reason and charges." }, 422);
     const before = await db.from(resource.table).select("*").eq("id", id).maybeSingle();
     if (!before.data) return json({ error: "Not found." }, 404);
     if (resource.table === "vehicles") { const bad = normalizePhotoFields(c.data, before.data); if (bad) return json({ error: bad }, 422); }
+    if (resource.table === "drivers" && "email" in c.data && !EMAIL_RE.test(String(c.data.email ?? ""))) return json({ error: "Enter a valid driver email address." }, 422);
+    // Deactivating a driver who still has open rides is allowed (they lose access at once); admins reassign those rides from the booking page.
     if (resource.table === "vehicle_tiers") { const bad = validateTierPricing(c.data); if (bad) return json({ error: bad }, 422); }
 
     if (resource.table === "pricing_configs" && c.data.status === "active") {

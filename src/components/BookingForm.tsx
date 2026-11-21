@@ -77,7 +77,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
       if (!res.ok) return setStatus({ kind: "error", message: data.error ?? "Something went wrong. Please try again.", fields: data.fields });
       try {
         sessionStorage.removeItem(TRIP_STORAGE_KEY);
-        sessionStorage.setItem("vanta:confirmation", JSON.stringify({ reference: data.reference, totalCents: data.totalCents, currency: data.currency, shownTotalCents: onlineTotal, payUrl: data.payUrl ?? null }));
+        sessionStorage.setItem("vanta:confirmation", JSON.stringify({ reference: data.reference, totalCents: data.totalCents, currency: data.currency, shownTotalCents: onlineTotal, trackingId: data.trackingId ?? null }));
       } catch { /* ignore */ }
       router.push(`/book/confirmation?ref=${encodeURIComponent(data.reference)}`);
     } catch {
@@ -124,7 +124,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
         ) : <p className="muted">An estimate is not available. We will confirm the price with you.</p>}
         {meetGreet && <p className="muted">Meet &amp; Greet is requested here and is not confirmed until Vanta confirms it.</p>}
         {trip.childSeats && seatCount(trip.childSeats) > 0 && <p className="muted">{SEAT_CONFIRMATION_NOTE}</p>}
-        <p className="muted">We verify the amounts again when you submit. This is a booking request, not a confirmed booking. If online payment is available you can pay after you submit.</p>
+        <p className="muted">We verify the amounts again when you submit. This is a booking request, not a confirmed booking. Nothing is charged when you submit. If we approve your request we email you a secure payment link, and your booking is confirmed once the payment is received.</p>
         <p><button type="button" className="linkbtn" onClick={() => openCalculator({ pickup: trip.pickup.text, dropoff: trip.dropoff.text, date: trip.date, time: trip.time })}>Change trip details</button></p>
       </section>
 

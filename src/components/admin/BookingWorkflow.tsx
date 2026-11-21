@@ -7,7 +7,7 @@ import { postJson } from "./util";
 export interface DriverOption { id: string; name: string; plate: string | null; active: boolean }
 interface Props {
   id: string; status: string; driverId: string | null; driverName: string | null; paymentReleased: boolean;
-  drivers: DriverOption[]; history: { to: string; at: string; note: string | null; actor: string }[];
+  nextSteps: string[]; confirmedAt: string | null; drivers: DriverOption[]; history: { to: string; at: string; note: string | null; actor: string }[];
 }
 const AWAITING = ["new_request", "pending_confirmation"];
 const REASSIGNABLE = ["confirmed", "assigned", "getting_ready"];
@@ -39,8 +39,8 @@ export default function BookingWorkflow(p: Props) {
     <div className="panel">
       <h3>Review and driver</h3>
       <p className="muted">
-        {awaiting ? "This request is awaiting review. The customer has not been charged and has no payment link. Approving assigns a driver and releases the payment link to the customer."
-          : p.driverName ? `Assigned driver: ${p.driverName}. Payment link ${p.paymentReleased ? "released to the customer" : "not released"}.` : "No driver assigned."}
+        {awaiting ? "This request is awaiting review. The customer has not been charged and has no payment link. Approving assigns a driver and releases the payment link to the customer. The booking becomes Confirmed only after the payment provider verifies the payment."
+          : p.driverName ? `Assigned driver: ${p.driverName}. Payment ${p.paymentReleased ? "released to the customer" : "not released"}. ${p.confirmedAt ? `Confirmed after verified payment on ${new Date(p.confirmedAt).toLocaleString()}.` : "Not confirmed yet: waiting for a verified payment."}` : "No driver assigned."}
       </p>
       {(awaiting || canReassign) && (
         <div className="form-grid" style={{ marginTop: ".75rem" }}>
@@ -58,6 +58,12 @@ export default function BookingWorkflow(p: Props) {
             {awaiting && <button type="button" className="btn btn--ghost" disabled={!!busy} onClick={() => { const r = reason("Reason for declining (sent to the customer):"); if (r) run("reject", { reason: r }, "Decline this request and email the customer?"); }}>Decline request</button>}
           </div>
         </div>
+      )}
+      {p.nextSteps.length > 0 && (
+        <p style={{ marginTop: ".75rem", display: "flex", gap: ".5rem", flexWrap: "wrap", alignItems: "center" }}>
+          <span className="muted">Move ride to:</span>
+          {p.nextSteps.map((s) => <button key={s} type="button" className="btn btn--ghost btn-sm" disabled={!!busy} onClick={() => run("advance", { status: s }, `Set this ride to "${s.replace(/_/g, " ")}"? The customer's tracking page updates.`)}>{s.replace(/_/g, " ")}</button>)}
+        </p>
       )}
       {canCancel && !awaiting && <p style={{ marginTop: ".75rem" }}><button type="button" className="btn btn--ghost" disabled={!!busy} onClick={() => { const r = reason("Reason for cancelling:"); if (r) run("cancel", { reason: r }, "Cancel this booking? The customer and driver are notified. Refunds are never issued automatically."); }}>Cancel booking</button></p>}
       {awaiting && <p style={{ marginTop: ".5rem" }}><button type="button" className="linkbtn" disabled={!!busy} onClick={() => { const r = reason("Reason for cancelling:"); if (r) run("cancel", { reason: r }, "Cancel this booking?"); }}>Cancel instead</button></p>}

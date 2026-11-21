@@ -9,6 +9,10 @@ import { availableProviders, type Provider } from "@/lib/payment-providers";
 import { CHARGE_REASON_TEXT, onlineCharge, type OnlineCharge } from "@/lib/tier-pricing";
 import { notify } from "@/lib/notify";
 import { formatMoney } from "@/lib/pricing/engine";
+import { isOpenForDriver, type BookingStatus } from "@/lib/booking-status";
+import { getHelpline } from "@/lib/helpline";
+import { BUSINESS_TZ } from "@/lib/config";
+import { formatPickup } from "@/lib/geo/time";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export const validToken = (t: unknown): t is string => typeof t === "string" && UUID_RE.test(t);
@@ -45,7 +49,7 @@ export async function chargeForBooking(db: SupabaseClient, b: Row): Promise<{ ok
   return r;
 }
 
-const BOOKING_COLUMNS = "id,reference,status,currency,estimated_fare_cents,amount_paid_cents,customer_id,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,child_seat_fee_cents,online_amount_cents";
+const BOOKING_COLUMNS = "id,reference,status,driver_id,payment_released_at,currency,estimated_fare_cents,amount_paid_cents,customer_id,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,child_seat_fee_cents,online_amount_cents";
 
 /**
  * Starts a payment with the chosen provider. The amount is recalculated here from the database; the only things the
@@ -54,7 +58,9 @@ const BOOKING_COLUMNS = "id,reference,status,currency,estimated_fare_cents,amoun
 export async function startCheckout(db: SupabaseClient, token: string, provider: Provider, siteUrl: string): Promise<CheckoutOutcome> {
   const { data: b } = await db.from("bookings").select(BOOKING_COLUMNS).eq("payment_token", token).maybeSingle();
   if (!b) return { ok: false, status: 404, error: "We could not find that booking." };
-  if (b.status === "cancelled" || b.status === "no_show") return { ok: false, status: 409, error: "This booking can no longer be paid online. Please contact us." };
+  if (b.status === "cancelled" || b.status === "no_show" || b.status === "rejected" || b.status === "completed") return { ok: false, status: 409, error: "This booking can no longer be paid online. Please contact us." };
+  // Payment is released only AFTER an admin approves the booking and assigns a driver. A payment link or token alone is not enough.
+  if (!b.payment_released_at || !b.driver_id || !isOpenForDriver(b.status as BookingStatus)) return { ok: false, status: 409, error: "This booking has not been approved yet. We will email you a secure payment link as soon as it is approved. You have not been charged." };
   const settings = await loadBookingSettings(db);
   if (!availableProviders(settings).includes(provider)) {
     return { ok: false, status: 503, error: `${provider === "stripe" ? "Card payment" : "PayPal"} is not available right now. Please choose another way to pay, or contact us.` };
@@ -132,23 +138,67 @@ async function flagForReview(db: SupabaseClient, p: Row, reason: string, txnId: 
   await db.from("admin_notifications").insert({ event: "payment.review", entity_type: "booking", entity_id: p.booking_id, title: "Payment needs review", body: "A payment did not match the expected amount. Open the booking.", link: `/admin/bookings/${p.booking_id}`, dedupe_key: `payment.review:${p.id}` });
 }
 
-/** Records a provider-CONFIRMED payment exactly once, then emails. Never confirms the booking itself. */
+/**
+ * Records a provider-VERIFIED payment exactly once, then confirms the booking and emails.
+ *
+ * Callers reach this only after a webhook signature (Stripe), PayPal's verification API, or a server-side PayPal capture check has
+ * proven the payment. An admin click, a success page or a browser callback never gets here.
+ *  - The payment row is claimed with a conditional update (paid_at IS NULL), so two deliveries racing each other cannot both record it.
+ *  - The booking is confirmed with its own conditional update (confirmed_at IS NULL), so only one delivery sends the confirmation email,
+ *    and the notification dedupe keys stop a retried webhook from emailing again.
+ *  - A payment that arrives for a booking that is no longer open (cancelled, declined, ...) is recorded, NOT confirmed, and flagged to admin.
+ *    Nothing is refunded automatically.
+ */
 async function recordPaid(db: SupabaseClient, p: Row, txnId: string | null) {
   if (p.paid_at) return; // already recorded: retries and duplicate notifications change nothing
-  await db.from("payments").update({
+  const claim = await db.from("payments").update({
     status: "paid", paid_at: new Date().toISOString(), failure_reason: null,
     ...(txnId ? { provider_txn_id: txnId } : {}), ...(p.provider === "stripe" && txnId ? { stripe_payment_intent_id: txnId } : {}),
-  }).eq("id", p.id);
+  }).eq("id", p.id).is("paid_at", null).select("id");
+  if (claim.error) throw new Error("could not record payment"); // the provider retries the event
+  if (!claim.data?.length) return; // another delivery recorded it first
   const { status } = await syncBooking(db, p.booking_id);
-  const { data: b } = await db.from("bookings").select("reference,customer_id").eq("id", p.booking_id).maybeSingle();
+
+  const { data: b } = await db.from("bookings").select("id,reference,status,customer_id,driver_id,payment_released_at,confirmed_at,tracking_code,pickup_at,pickup_address,dropoff_address,online_amount_cents,amount_paid_cents,currency,tier_name,vehicles(name)").eq("id", p.booking_id).maybeSingle();
   const { data: c } = b ? await db.from("customers").select("name,email").eq("id", b.customer_id).maybeSingle() : { data: null };
+  const covered = status === "paid" || status === "deposit_paid"; // the verified amount satisfies what the booking asked for online
+  const confirmable = Boolean(b && covered && b.driver_id && b.payment_released_at && isOpenForDriver(b.status as BookingStatus));
+  let confirmedNow = false;
+  if (b && confirmable && !b.confirmed_at) {
+    const now = new Date().toISOString();
+    const won = await db.from("bookings").update({ confirmed_at: now }).eq("id", b.id).is("confirmed_at", null).select("id");
+    if (won.error) throw new Error("could not confirm booking");
+    if (won.data?.length) {
+      confirmedNow = true;
+      // 'assigned' becomes 'confirmed'; a ride the driver has already started keeps its (later) status.
+      const moved = await db.from("bookings").update({ status: "confirmed" }).eq("id", b.id).eq("status", "assigned").select("id");
+      await db.from("booking_status_history").insert({ booking_id: b.id, from_status: moved.data?.length ? "assigned" : b.status, to_status: moved.data?.length ? "confirmed" : b.status, actor_type: "system", actor_id: null, note: `Confirmed after verified ${p.provider === "paypal" ? "PayPal" : "card"} payment` });
+    }
+  }
+
+  const site = (process.env.NEXT_PUBLIC_SITE_URL || "").replace(/\/$/, "");
+  if (b && confirmedNow && c?.email) {
+    const [stops, helpline] = await Promise.all([db.from("booking_stops").select("position,address").eq("booking_id", b.id).order("position"), getHelpline(db)]);
+    const veh = b.vehicles as { name?: string } | null;
+    const remaining = b.online_amount_cents != null ? Math.max(0, b.online_amount_cents - (b.amount_paid_cents ?? 0)) : 0; // amount_paid_cents was just re-derived from the verified payments
+    await notify(db, "booking.confirmed", { type: "booking", id: b.id }, {
+      Reference: b.reference, Pickup: String(b.pickup_address ?? ""), Stops: (stops.data ?? []).map((s: Row) => String(s.address)).join(" | ") || undefined, Destination: b.dropoff_address ?? undefined,
+      When: b.pickup_at ? formatPickup(b.pickup_at, BUSINESS_TZ) : undefined, Vehicle: [veh?.name, b.tier_name].filter(Boolean).join(" · ") || undefined,
+      "Amount paid": formatMoney(p.amount_cents, p.currency), "Payment status": status === "paid" ? "Paid in full" : "Deposit received",
+      "Remaining online balance": status === "deposit_paid" && remaining > 0 ? formatMoney(remaining, p.currency) : undefined,
+      "Vanta support phone": helpline?.display,
+      _trackingId: b.tracking_code ?? undefined, _trackUrl: site && b.tracking_code ? `${site}/track#id=${b.tracking_code}` : undefined,
+      _customerEmail: c.email, _customerName: c.name ?? undefined,
+    }, { dedupeSuffix: "confirmed" });
+  }
+  // Business alert + email: once per payment row (the key includes the payment id).
   await notify(db, "payment.paid", { type: "booking", id: p.booking_id }, {
     Reference: b?.reference ?? "", "Amount paid": formatMoney(p.amount_cents, p.currency), "Payment type": p.kind === "deposit" ? "Deposit" : "Online payment",
     "Payment status": status, "Payment provider": p.provider === "paypal" ? "PayPal" : "Card (Stripe)", Tier: p.tier_name ?? undefined,
     "Fixed tier price": p.fixed_price_cents != null ? formatMoney(p.fixed_price_cents, p.currency) : undefined,
     "Meet & Greet": p.meet_greet_cents > 0 ? formatMoney(p.meet_greet_cents, p.currency) : undefined,
     "Child car seats": p.other_addons_cents > 0 ? formatMoney(p.other_addons_cents, p.currency) : undefined,
-    _customerEmail: c?.email ?? undefined, _customerName: c?.name ?? undefined,
+    Confirmed: confirmable || b?.confirmed_at ? "Yes" : "No",
   }, { dedupeSuffix: p.id });
 }
 

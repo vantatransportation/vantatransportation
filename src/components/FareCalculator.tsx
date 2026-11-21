@@ -22,6 +22,8 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
   const router = useRouter();
   const dialog = useRef<HTMLDivElement>(null);
   const [token] = useState(newKey);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
 
   const [tripType, setTripType] = useState<"distance" | "hourly">("distance");
   const [hours, setHours] = useState("3");
@@ -63,10 +65,12 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
     const prev = document.activeElement as HTMLElement | null;
     document.body.style.overflow = "hidden";
     dialog.current?.querySelector<HTMLElement>("input")?.focus();
-    return () => { document.body.style.overflow = ""; prev?.focus?.(); };
+    // Escape closes even when focus has moved outside the dialog (for example onto the page behind a scrim tap).
+    const onDocKey = (e: KeyboardEvent) => { if (e.key === "Escape") onCloseRef.current(); };
+    document.addEventListener("keydown", onDocKey);
+    return () => { document.body.style.overflow = ""; document.removeEventListener("keydown", onDocKey); prev?.focus?.(); };
   }, []);
   function onKeyDown(e: React.KeyboardEvent) {
-    if (e.key === "Escape") { onClose(); return; }
     if (e.key !== "Tab" || !dialog.current) return;
     const els = [...dialog.current.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.offsetParent !== null);
     if (!els.length) return;
@@ -155,7 +159,7 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
       <div className="calc" role="dialog" aria-modal="true" aria-labelledby="calc-title" ref={dialog} onKeyDown={onKeyDown}>
         <header className="calc__head">
           <h2 id="calc-title">Calculate your fare</h2>
-          <button className="modal-close" aria-label="Close fare calculator" onClick={onClose}>×</button>
+          <button type="button" className="modal-close" aria-label="Close fare calculator" onClick={onClose}>×</button>
         </header>
 
         <div className="calc__body">
@@ -166,6 +170,7 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
                 <button type="button" aria-pressed={tripType === "hourly"} onClick={() => setTripType("hourly")}>By the hour</button>
               </div>
 
+              <h3 className="calc__section">Where to</h3>
               <PlaceInput label="Pickup location" value={pickup} onChange={setPickup} placeholder="Address, airport or place" sessionToken={token} />
               {stops.map((s, i) => (
                 <div key={s.id} className="stop">
@@ -176,6 +181,7 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
               {stops.length < 8 && <button type="button" className="linkbtn" onClick={() => setStops((l) => [...l, { id: nextStop.current++, v: empty }])}>+ Add a stop</button>}
               <PlaceInput label="Destination" value={dropoff} onChange={setDropoff} placeholder="Address, airport or place" sessionToken={token} />
 
+              <h3 className="calc__section">When and who</h3>
               <div className="calc__row">
                 <div className="field"><label htmlFor="c-date">Pickup date</label><input id="c-date" type="date" min={today} value={date} onChange={(e) => setDate(e.target.value)} /></div>
                 <div className="field"><label htmlFor="c-time">Pickup time</label><input id="c-time" type="time" value={time} onChange={(e) => setTime(e.target.value)} /></div>
@@ -209,6 +215,7 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
                   <span className="help muted">Hourly bookings include a mileage allowance. Extra miles are charged separately and itemized in your quote.</span></div>
               )}
 
+              <h3 className="calc__section">Extras</h3>
               <div className="meetgreet">
                 <label className="choice">
                   <input type="checkbox" checked={meetGreet} onChange={(e) => setMeetGreet(e.target.checked)} aria-describedby="mg-help" />
