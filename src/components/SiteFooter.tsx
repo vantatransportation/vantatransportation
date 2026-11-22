@@ -1,6 +1,7 @@
 import Link from "next/link";
 import ThemeToggle from "./ThemeToggle";
 import SocialLinks from "./SocialLinks";
+import InstallApp from "./InstallApp";
 import { text } from "@/lib/content";
 
 export default function SiteFooter({ content }: { content: Record<string, unknown> }) {
@@ -37,6 +38,7 @@ export default function SiteFooter({ content }: { content: Record<string, unknow
           </div>
         </div>
         <ThemeToggle className="theme-toggle--footer" />
+        <InstallApp />
         <p className="footer__legal">© {new Date().getFullYear()} Vanta Transportation. Booking and quote requests are not confirmed until we confirm them with you directly.</p>
       </div>
     </footer>

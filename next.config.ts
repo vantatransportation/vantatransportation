@@ -30,6 +30,9 @@ const nextConfig: NextConfig = {
   },
   async headers() {
     return [
+      // The service worker and its offline page must always be revalidated so a new deploy reaches users promptly.
+      { source: "/sw.js", headers: [{ key: "Cache-Control", value: "no-cache, no-store, must-revalidate" }, { key: "Service-Worker-Allowed", value: "/" }] },
+      { source: "/offline.html", headers: [{ key: "Cache-Control", value: "no-cache" }] },
       {
         source: "/:path*",
         headers: [
