@@ -116,6 +116,13 @@ The customer approves in PayPal's pop-up; the server then captures the order and
 ### 9. Themes and accessibility
 Dark, Light and System (default) are chosen with the toggle in the header, footer and admin sidebar; the choice is saved in the browser and applied before first paint. Colours are CSS variables in `src/app/globals.css`. `npm test` checks WCAG AA contrast (4.5:1 text, 3:1 borders/focus) for both themes. See UPGRADE_NOTES_2.md for what was and was not verified.
 
+### 10. Driver invitations (Supabase Auth)
+Admin > Drivers > "Send sign-in invitation" emails the driver a Supabase link. The link opens **`/driver/set-password`** (the only auth landing page in this project; there is no `/auth/callback`). The page reads the token Supabase puts in the URL `#hash`, checks it, lets the driver choose a password, signs them in and sends them to `/driver`.
+In Supabase, Authentication > URL Configuration:
+- **Site URL:** `https://vantatransportation.com`
+- **Redirect URLs:** `https://vantatransportation.com/driver/set-password` (add `http://localhost:3000/driver/set-password` only for local testing, and the `www.` form only if you serve the site there)
+Keep `{{ .ConfirmationURL }}` in the Invite and Reset Password email templates. Expired or used links show a clear message; Admin > Drivers > "Send new link" issues a fresh one. See `FIX_NOTES_DRIVER_INVITE.md`.
+
 ### 6. Deployment
 Deploy to Vercel (or any Node host): import the repo, add every variable from `.env.example` in the host's settings, set `NEXT_PUBLIC_SITE_URL` to the live URL, deploy. Never commit `.env.local`.
 
