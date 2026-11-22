@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { getSiteData, text } from "@/lib/content";
 import ContactForm from "@/components/ContactForm";
+import SocialLinks from "@/components/SocialLinks";
 
 export const metadata: Metadata = { title: "Contact" };
 
@@ -60,6 +61,11 @@ export default async function Contact({ searchParams }: { searchParams: SP }) {
                 </p>
               </div>
             )}
+            <div className="contact-social">
+              <h3>Follow Us</h3>
+              <p className="muted">Connect with Vanta Transportation on social media.</p>
+              <SocialLinks />
+            </div>
             <p style={{ marginTop: "2rem" }}>
               <Link href="/#faq" className="muted" style={{ textDecoration: "underline" }}>Read common questions</Link>
             </p>

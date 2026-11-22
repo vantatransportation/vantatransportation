@@ -1,5 +1,6 @@
 import Link from "next/link";
 import ThemeToggle from "./ThemeToggle";
+import SocialLinks from "./SocialLinks";
 import { text } from "@/lib/content";
 
 export default function SiteFooter({ content }: { content: Record<string, unknown> }) {
@@ -13,6 +14,7 @@ export default function SiteFooter({ content }: { content: Record<string, unknow
           <div>
             <h4>Vanta Transportation</h4>
             <p className="muted">{text(content, "footer.tagline", "Chauffeured transportation.")}</p>
+            <SocialLinks className="social--footer" />
           </div>
           <div>
             <h4>Explore</h4>
