@@ -52,3 +52,9 @@ own or are licensed to use.
 2. Disable both images: the home page shows the original hero.
 3. Admin, Family section: upload an image, save, reload the home page.
 4. Check the home page in light and dark theme and on a phone width.
+
+## 5. Family section data path (reference)
+
+Admin form -> `POST /api/admin/family` (one atomic upsert of the six `family_section.*` rows in `site_content`, group "Home",
+verified against what the database returns, then the site is revalidated) -> public home page reads the same six rows with
+`loadFamilyContent()` (service-role client, anon fallback) -> `buildFamilyView()` -> `FamilySection`. See FIX_NOTES_FAMILY_SECTION.md.

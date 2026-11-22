@@ -10,6 +10,7 @@ import { getAdminClient } from "@/lib/supabase/admin";
 import { loadPublicPolicies } from "@/lib/policies";
 import { loadHeroView } from "@/lib/hero-data";
 import { buildFamilyView } from "@/lib/family-section";
+import { loadFamilyContent } from "@/lib/family-data";
 
 export const revalidate = 60;
 
@@ -18,7 +19,7 @@ export default async function Home() {
   const featured = vehicles.slice(0, 6);
   const policies = await loadPublicPolicies(getAdminClient());
   const heroView = await loadHeroView(); // null (no active images, or tables not migrated yet) keeps the original hero
-  const family = buildFamilyView(content);
+  const family = buildFamilyView(await loadFamilyContent()); // own read: an edit saved in Admin must not depend on the all-content batch above
 
   return (
     <>

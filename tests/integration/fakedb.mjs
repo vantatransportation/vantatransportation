@@ -17,7 +17,7 @@ const UNIQUE = { customers: ["email_normalized"], bookings: ["submission_key", "
 function splitTop(s) { const out = []; let d = 0, cur = ""; for (const ch of s) { if (ch === "(") d++; if (ch === ")") d--; if (ch === "," && d === 0) { out.push(cur.trim()); cur = ""; } else cur += ch; } if (cur.trim()) out.push(cur.trim()); return out; }
 
 export class FakeDb {
-  constructor() { this.tables = {}; this.seq = 1000; this.auth = { getUser: async (t) => (t === "good" ? { data: { user: { id: "admin-1", email: "a@x.com" } }, error: null } : { data: { user: null }, error: { message: "bad" } }) }; this.storage = {}; this.missing = new Set(); }
+  constructor() { this.tables = {}; this.seq = 1000; this.auth = { getUser: async (t) => (t === "good" ? { data: { user: { id: "admin-1", email: "a@x.com" } }, error: null } : { data: { user: null }, error: { message: "bad" } }) }; this.storage = {}; this.missing = new Set(); this.failWritesFor = new Set(); }
   /** Simulates a table that has not been created yet (for example migration 0010 / 0011 not applied). */
   dropTableForTest(name) { this.missing.add(name); }
   /** Mirrors the backfill in migration 0010: one assignment per vehicle that has a legacy tier_id. Idempotent. */
@@ -48,7 +48,7 @@ class Query {
   constructor(db, table) { this.db = db; this.table = table; this.op = "select"; this.f = []; this.sel = "*"; this.ord = null; this.lim = null; this.head = false; this.countMode = false; }
   select(cols = "*", opts = {}) { this.sel = cols; if (opts.head) this.head = true; if (opts.count) this.countMode = true; return this; }
   insert(p) { this.op = "insert"; this.p = p; return this; }
-  upsert(p) { this.op = "upsert"; this.p = p; return this; }
+  upsert(p, opts = {}) { this.op = "upsert"; this.p = p; this.upsertOn = opts.onConflict; return this; }
   update(p) { this.op = "update"; this.p = p; return this; }
   delete() { this.op = "delete"; return this; }
   eq(c, v) { this.f.push((r) => r[c] === v); return this; }
@@ -90,7 +90,16 @@ class Query {
       }
     } else if (this.op === "upsert") {
       const list = Array.isArray(this.p) ? this.p : [this.p]; result = [];
+      if (db.failWritesFor?.has(this.table)) return { data: null, error: { code: "XX000", message: "simulated write failure" }, count: null };
       for (const raw of list) {
+        if (this.upsertOn) {
+          // Real upsert: insert, or update the row that has the same conflict column(s) (PostgREST on_conflict).
+          const cols = this.upsertOn.split(",");
+          const hit = rows.find((x) => cols.every((c) => x[c] === raw[c]));
+          if (hit) { Object.assign(hit, raw, { updated_at: new Date().toISOString() }); result.push(hit); }
+          else { const row = { id: randomUUID(), created_at: new Date().toISOString(), updated_at: new Date().toISOString(), ...raw }; rows.push(row); result.push(row); }
+          continue;
+        }
         const ex = rows.find((x) => x.notification_id === raw.notification_id && x.user_id === raw.user_id);
         if (!ex) { const row = { created_at: new Date().toISOString(), ...raw }; rows.push(row); result.push(row); }
       }

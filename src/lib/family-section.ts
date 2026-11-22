@@ -29,10 +29,26 @@ export interface FamilyView {
 
 const str = (v: unknown, fallback: string): string => (typeof v === "string" && v.trim() ? v.trim() : fallback);
 
+/**
+ * A jsonb value that was stored as a JSON *string* ('{"url":...}', 'false') instead of an object/boolean is read as what it
+ * means. Without this such a row was silently ignored: the section fell back to the Vanta mark / "shown" even though the
+ * admin form (which reads the same row) displayed the saved image.
+ */
+function unwrap(v: unknown): unknown {
+  if (typeof v !== "string") return v;
+  const s = v.trim();
+  if (s === "true") return true;
+  if (s === "false") return false;
+  if (s.startsWith("{")) {
+    try { return JSON.parse(s); } catch { return v; }
+  }
+  return v;
+}
+
 /** Null when the section is switched off. A missing image keeps the section (the component shows a branded panel). */
 export function buildFamilyView(content: Record<string, unknown>): FamilyView | null {
-  if (content[familyKey("enabled")] === false) return null;
-  const raw = content[familyKey("image")] as { url?: unknown; alt?: unknown } | null | undefined;
+  if (unwrap(content[familyKey("enabled")]) === false) return null;
+  const raw = unwrap(content[familyKey("image")]) as { url?: unknown; alt?: unknown } | null | undefined;
   const url = raw && typeof raw === "object" && typeof raw.url === "string" ? raw.url.trim() : "";
   const image = url && /^https:\/\//i.test(url)
     ? { src: photoUrl(url, 1200, 750), srcSet: isCloudinaryUrl(url) ? `${photoUrl(url, 640, 400)} 640w, ${photoUrl(url, 1200, 750)} 1200w` : "", alt: typeof raw?.alt === "string" ? raw.alt.trim() : "" }
@@ -72,10 +88,10 @@ export function validateFamilyInput(input: unknown, cloud: string): { ok: true; 
 
 /** Current values for the admin form (stored values, falling back to the defaults for rows that do not exist yet). */
 export function buildFamilyInput(content: Record<string, unknown>): FamilyInput {
-  const img = content[familyKey("image")] as { url?: unknown; publicId?: unknown; alt?: unknown } | null | undefined;
+  const img = unwrap(content[familyKey("image")]) as { url?: unknown; publicId?: unknown; alt?: unknown } | null | undefined;
   const s = (v: unknown) => (typeof v === "string" ? v : "");
   return {
-    enabled: content[familyKey("enabled")] !== false,
+    enabled: unwrap(content[familyKey("enabled")]) !== false,
     title: s(content[familyKey("title")]) || FAMILY_DEFAULTS.title,
     subtitle: s(content[familyKey("subtitle")]) || FAMILY_DEFAULTS.subtitle,
     body: s(content[familyKey("body")]) || FAMILY_DEFAULTS.body,

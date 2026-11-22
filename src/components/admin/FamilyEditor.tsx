@@ -10,6 +10,11 @@ import { FAMILY_LIMITS, type FamilyInput } from "@/lib/family-section";
 export default function FamilyEditor({ initial }: { initial: FamilyInput }) {
   const router = useRouter();
   const [v, setV] = useState<FamilyInput>(initial);
+  // Re-sync from the server after router.refresh() (the form then shows what the database holds) without remounting,
+  // so the "Saved" message is not wiped. Edits are not touched unless the stored values themselves changed.
+  const stored = JSON.stringify(initial);
+  const [seen, setSeen] = useState(stored);
+  if (stored !== seen) { setSeen(stored); setV(initial); }
   const [state, setState] = useState<{ kind: "idle" | "saving" | "ok" | "error"; text?: string }>({ kind: "idle" });
   const set = <K extends keyof FamilyInput>(k: K, val: FamilyInput[K]) => setV((s) => ({ ...s, [k]: val }));
 
@@ -18,7 +23,8 @@ export default function FamilyEditor({ initial }: { initial: FamilyInput }) {
     setState({ kind: "saving" });
     const { ok, data } = await postJson("/api/admin/family", { content: v });
     if (!ok) return setState({ kind: "error", text: String(data.error ?? "Could not save.") });
-    setState({ kind: "ok", text: "Saved. The home page updates within moments." });
+    if (data.content) setV(data.content as FamilyInput); // exactly what the database stored
+    setState({ kind: "ok", text: data.revalidated === false ? "Saved. The home page may take up to a minute to show the change." : "Saved. The home page shows the change now." });
     router.refresh();
   }
 
