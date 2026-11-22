@@ -6,6 +6,7 @@ import { zonedToUtc, formatPickup } from "@/lib/geo/time";
 import { BUSINESS_TZ } from "@/lib/config";
 import { computeRoute } from "@/lib/geo/google";
 import { loadFleet, lookupPromo, routeToInput } from "@/lib/fare/service";
+import { resolveTierChoice } from "@/lib/vehicle-tiers";
 import { calculateQuote, formatMoney } from "@/lib/pricing/engine";
 import { calculateRoundTrip, withExtras } from "@/lib/pricing/roundtrip";
 import { loadActiveRoundTripRules, loadBookingSettings, pickRule, seatExtra } from "@/lib/policies";
@@ -30,6 +31,7 @@ export async function POST(request: Request) {
   const message = clean(body.message, 3000) || null;
   const routeKey = body.routeKey === "no_tolls" ? "no_tolls" : "fastest";
   const vehicleId = typeof body.vehicleId === "string" ? body.vehicleId : "";
+  const requestedTierId = typeof body.tierId === "string" && body.tierId ? body.tierId : null;
   const submissionKey = typeof body.submissionKey === "string" && /^[\w-]{16,80}$/.test(body.submissionKey) ? body.submissionKey : null;
   const budgetDollars = body.desiredBudget === "" || body.desiredBudget == null ? null : Number(body.desiredBudget);
 
@@ -57,6 +59,14 @@ export async function POST(request: Request) {
     // A route or price is optional: out-of-area or unroutable trips are still saved for manual review.
     const fleet = await loadFleet(db);
     const vehicle = fleet.find((v) => v.id === vehicleId) ?? null;
+    // A tier sent with the request must be one of the vehicle's tiers. It is saved with the request so a later booking keeps it.
+    // (A request without a tier is still accepted: staff pick the tier when converting it.)
+    let tierId: string | null = null;
+    if (vehicle && requestedTierId) {
+      const choice = resolveTierChoice(vehicle.tiers, requestedTierId);
+      if (!choice.ok) return json({ error: choice.error }, 422);
+      tierId = choice.tier?.id ?? null;
+    }
     const routeRes = vehicle ? await computeRoute(trip, routeKey === "no_tolls") : null;
     const route = routeRes && routeRes.ok ? routeRes.route : null;
 
@@ -84,7 +94,7 @@ export async function POST(request: Request) {
     const customerId = await findOrCreateCustomer(db, { name, email, phone });
     const ins = await db.from("quote_requests").insert({
       customer_id: customerId, name, email, phone, vehicle_id: vehicle?.id ?? null, original_quote_cents: originalCents,
-      trip: { trip, routeKey, route: route ? { distanceMiles: route.distanceMiles, durationMinutes: route.durationMinutes, toll: route.toll } : null },
+      trip: { trip, routeKey, tierId, route: route ? { distanceMiles: route.distanceMiles, durationMinutes: route.durationMinutes, toll: route.toll } : null },
       source: vehicle ? "calculator" : "manual", service_region: region,
       desired_budget_cents: budgetDollars != null ? Math.round(budgetDollars * 100) : null, message, submission_key: submissionKey,
     }).select("id").single();

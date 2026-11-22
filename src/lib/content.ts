@@ -5,6 +5,7 @@ import { getAdminClient } from "@/lib/supabase/admin";
 import { defaultSiteData } from "@/data/defaults";
 import type { Category, SiteData, Service, Vehicle } from "@/lib/types";
 import { describePhotoProblem } from "@/lib/vehicle-photo";
+import { loadVehicleTiers } from "@/lib/vehicle-tiers";
 import { FLEET_CATEGORY_SELECT, FLEET_VEHICLE_SELECT, describeFleet, mapCategoryRows, mapVehicleRows } from "@/lib/fleet-data";
 
 /**
@@ -36,7 +37,9 @@ export async function loadFleetData(): Promise<{ categories: Category[]; vehicle
         console.error(`[site] fleet read failed via ${via} client`, { categories: cats.error?.message, vehicles: vehs.error?.message });
         continue;
       }
-      const vehicles = mapVehicleRows(vehs.data);
+      // Tiers come from the join table (never embedded in the vehicles query). Failures fall back to each vehicle's legacy tier.
+      const { byVehicle } = await loadVehicleTiers(db, (vehs.data ?? []) as { id: string; tier_id?: string | null }[]);
+      const vehicles = mapVehicleRows(vehs.data, byVehicle);
       // Diagnostics (no secrets): vehicles whose stored image value is unusable, and why.
       const problems = (vehs.data ?? []).map((v) => ({ name: v.name as string, why: describePhotoProblem(v.image_url) })).filter((x) => x.why);
       if (problems.length) console.warn("[site] vehicles with an unusable photo value", problems);

@@ -34,7 +34,7 @@ export function FleetLedger({ vehicles }: { vehicles: Vehicle[] }) {
           <div className="fleet__body">
             <h3>{v.name}</h3>
             <p className="fleet__meta">
-              {v.tierName && <span className="tier-badge">{v.tierName}</span>}
+              {(v.tierNames?.length ? v.tierNames : v.tierName ? [v.tierName] : []).map((t) => <span key={t} className="tier-badge">{t}</span>)}
               <span>{v.capacityLabel || `Up to ${v.passengers} passengers`}</span>
             </p>
             <p>{v.description || v.similarModels}</p>
@@ -90,9 +90,9 @@ export function CtaBand({ title = "Ready to book your ride?" }: { title?: string
 export function TrustSection({ title, points }: { title: string; points: { title: string; description: string }[] }) {
   if (!points.length) return null;
   return (
-    <section className="section section--charcoal" id="family" aria-labelledby="family-title">
+    <section className="section section--charcoal" id="family" aria-labelledby="trust-title">
       <div className="container">
-        <h2 id="family-title" style={{ marginBottom: "2.5rem" }}>{title}</h2>
+        <h2 id="trust-title" style={{ marginBottom: "2.5rem" }}>{title}</h2>
         <div className="trust">
           {points.map((p) => (<div key={p.title} className="trust__item"><h3>{p.title}</h3><p>{p.description}</p></div>))}
         </div>

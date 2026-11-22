@@ -29,6 +29,7 @@ export async function POST(request: Request) {
   const submissionKey = typeof body.submissionKey === "string" && /^[\w-]{16,80}$/.test(body.submissionKey) ? body.submissionKey : null;
   const routeKey = body.routeKey === "no_tolls" ? "no_tolls" : "fastest";
   const vehicleId = typeof body.vehicleId === "string" ? body.vehicleId : "";
+  const tierId = typeof body.tierId === "string" && body.tierId ? body.tierId : null; // validated against the vehicle's tiers in createBooking
 
   const fields: Record<string, string> = {};
   if (name.length < 2) fields.name = "Enter your full name.";
@@ -46,7 +47,7 @@ export async function POST(request: Request) {
   if (!db) return json({ error: "Booking is temporarily unavailable. Please contact us directly." }, 503);
 
   try {
-    const result = await createBooking(db, { trip: parsed.trip, vehicleId, routeKey, customer: { name, email, phone }, notes, submissionKey, details: det.details });
+    const result = await createBooking(db, { trip: parsed.trip, vehicleId, tierId, routeKey, customer: { name, email, phone }, notes, submissionKey, details: det.details });
     if (!result.ok) return json({ error: result.error }, result.status);
 
     // The booking is already saved. Notifications can fail without affecting it.

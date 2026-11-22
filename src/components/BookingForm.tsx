@@ -65,7 +65,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
       const res = await fetch("/api/bookings", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          trip: stored.trip, vehicleId: stored.vehicleId, routeKey: stored.routeKey, submissionKey: stored.submissionKey,
+          trip: stored.trip, vehicleId: stored.vehicleId, tierId: stored.tierId, routeKey: stored.routeKey, submissionKey: stored.submissionKey,
           name: g("name"), email: g("email"), phone: g("phone"), notes: g("notes"), website: g("website"),
           bookingFor, passenger: bookingFor === "other" ? { name: g("p.name"), phone: g("p.phone"), email: g("p.email") } : null,
           luggageCount: g("luggage"), assistanceNotes: g("assistance"), pickupInstructions: g("pickupInstructions"), contacts,

@@ -6,7 +6,7 @@ import { pickRule, type RuleRow } from "@/lib/policies";
 import type { ParsedRoute } from "@/lib/geo/parse";
 import type { Trip } from "./trip";
 import { resolvePhotoSrc } from "@/lib/vehicle-photo";
-import type { TierPricing } from "@/lib/tier-pricing";
+import { loadVehicleTiers, type TierRow } from "@/lib/vehicle-tiers";
 
 export type RouteKey = "fastest" | "no_tolls";
 
@@ -15,10 +15,12 @@ export interface FleetVehicle {
   name: string;
   category: string;
   categoryId: string | null;
-  /** Fixed price and Meet & Greet fee of this vehicle's tier (admin-configured; null = not set). */
-  tierPricing: TierPricing | null;
-  tier: string;
-  tierId: string | null;
+  /**
+   * Every ACTIVE service tier this vehicle is offered in (from vehicle_tier_assignments), in tier order, each with its own
+   * admin-configured fixed price and Meet & Greet fee (null = not set). The vehicle is ONE record whatever the number of tiers.
+   * The trip estimate (`config`) belongs to the vehicle; the online charge belongs to the tier the customer picks.
+   */
+  tiers: TierRow[];
   passengers: number;
   /** Real photo URL, or null when none is assigned (the site then shows a branded placeholder). */
   image: string | null;
@@ -33,11 +35,13 @@ export interface FleetVehicle {
 export async function loadFleet(db: SupabaseClient): Promise<FleetVehicle[]> {
   const { data, error } = await db
     .from("vehicles")
-    .select("id,name,description,passenger_capacity,image_url,image_public_id,similar_models,tier_id, vehicle_categories(id,name,capacity_label,sort_order), vehicle_tiers(id,name,fixed_price_cents,meet_greet_fee_cents), pricing_configs(*, pricing_surcharges(*))")
+    .select("id,name,description,passenger_capacity,image_url,image_public_id,similar_models,tier_id, vehicle_categories(id,name,capacity_label,sort_order), pricing_configs(*, pricing_surcharges(*))")
     .eq("is_active", true)
     .eq("is_available", true)
     .order("sort_order");
   if (error) throw error;
+  // Tiers come from the join table (never embedded: with the legacy FK AND the join table PostgREST cannot resolve the embed).
+  const { byVehicle } = await loadVehicleTiers(db, (data ?? []) as { id: string; tier_id?: string | null }[]);
 
   return (data ?? []).map((v: Record<string, any>) => { // eslint-disable-line @typescript-eslint/no-explicit-any
     const active = (v.pricing_configs ?? []).find((c: Record<string, any>) => c.status === "active"); // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -56,8 +60,8 @@ export async function loadFleet(db: SupabaseClient): Promise<FleetVehicle[]> {
         }
       : null;
     return {
-      id: v.id, name: v.name, category: v.vehicle_categories?.name ?? "", categoryId: v.vehicle_categories?.id ?? null, tier: v.vehicle_tiers?.name ?? "", tierId: v.tier_id ?? null,
-      tierPricing: v.vehicle_tiers ? { id: v.vehicle_tiers.id ?? v.tier_id ?? null, name: v.vehicle_tiers.name, fixedPriceCents: v.vehicle_tiers.fixed_price_cents ?? null, meetGreetFeeCents: v.vehicle_tiers.meet_greet_fee_cents ?? null } : null,
+      id: v.id, name: v.name, category: v.vehicle_categories?.name ?? "", categoryId: v.vehicle_categories?.id ?? null,
+      tiers: byVehicle.get(v.id) ?? [],
       passengers: v.passenger_capacity, image: resolvePhotoSrc(v.image_url), imagePublicId: v.image_public_id ?? null,
       description: v.description ?? "", capacityLabel: v.vehicle_categories?.capacity_label ?? "", similarModels: v.similar_models ?? "", config,
     };
@@ -103,9 +107,10 @@ export const toPublicQuote = (q: Extract<QuoteResult, { ok: true }>, extras: Ext
 };
 
 export interface VehicleOption {
-  id: string; name: string; category: string; tier: string; passengers: number; image: string | null; similarModels: string;
+  id: string; name: string; category: string; passengers: number; image: string | null; similarModels: string;
   description: string; capacityLabel: string;
-  tierPricing: TierPricing | null;
+  /** The tiers this vehicle is offered in, each with its fixed price and Meet & Greet fee (display copy; the server recalculates). */
+  tiers: { id: string; name: string; fixedPriceCents: number | null; meetGreetFeeCents: number | null }[];
   quotable: boolean;
   quotes: Partial<Record<RouteKey, PublicQuote>>;
 }
@@ -117,6 +122,7 @@ export function buildVehicleOptions(fleet: FleetVehicle[], trip: Trip, routes: P
   const out: VehicleOption[] = [];
   for (const v of fleet) {
     if (v.passengers < trip.passengers) continue;
+    if (v.tiers.length === 0) continue; // a vehicle offered in no tier is not offered online (the admin list flags it)
     const quotes: VehicleOption["quotes"] = {};
     if (v.config) {
       for (const key of ["fastest", "no_tolls"] as RouteKey[]) {
@@ -140,7 +146,7 @@ export function buildVehicleOptions(fleet: FleetVehicle[], trip: Trip, routes: P
     }
     const quotable = Object.keys(quotes).length > 0;
     if (trip.tripType === "hourly" && v.config && !quotable) continue; // vehicle has no hourly rate
-    out.push({ id: v.id, name: v.name, category: v.category, tier: v.tier, passengers: v.passengers, image: v.image, similarModels: v.similarModels, description: v.description, capacityLabel: v.capacityLabel, tierPricing: v.tierPricing, quotable, quotes });
+    out.push({ id: v.id, name: v.name, category: v.category, passengers: v.passengers, image: v.image, similarModels: v.similarModels, description: v.description, capacityLabel: v.capacityLabel, tiers: v.tiers.map((t) => ({ id: t.id, name: t.name, fixedPriceCents: t.fixedPriceCents, meetGreetFeeCents: t.meetGreetFeeCents })), quotable, quotes });
   }
   return out;
 }

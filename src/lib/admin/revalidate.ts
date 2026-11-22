@@ -2,7 +2,7 @@ import "server-only";
 import { revalidatePath } from "next/cache";
 
 /** Tables whose rows are rendered on the public website. A successful write to any of them must refresh the site. */
-export const PUBLIC_TABLES = new Set(["vehicles", "vehicle_categories", "vehicle_tiers", "vehicle_standards", "faqs", "promotions", "site_content"]);
+export const PUBLIC_TABLES = new Set(["vehicles", "vehicle_categories", "vehicle_tiers", "vehicle_standards", "faqs", "promotions", "site_content", "vehicle_tier_assignments", "hero_slides", "hero_settings"]);
 
 /**
  * Drops the cached (ISR) copy of every public page so the next visitor gets fresh database values instead of waiting

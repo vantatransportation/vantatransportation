@@ -4,7 +4,7 @@ import { releaseAsset } from "@/lib/cloudinary";
 
 export const runtime = "nodejs";
 
-/** Deletes an uploaded-but-unsaved photo (admin cancelled). Refuses anything outside the vehicles folder or still in use. */
+/** Deletes an uploaded-but-unsaved photo (admin cancelled). Refuses anything outside our upload folders (vehicles, hero, site) or still in use. */
 export async function POST(request: Request) {
   const g = await guard(request);
   if (g instanceof Response) return g;

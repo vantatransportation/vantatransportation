@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { resources, type Resource } from "./resources";
 import { requireAdmin } from "./auth";
 import { getAdminClient } from "@/lib/supabase/admin";
+import { attachVehicleTiers } from "@/lib/vehicle-tiers";
 
 /** Every admin page calls this: layouts do not re-run on client navigation, so each page re-checks access. */
 export async function adminPage() {
@@ -20,13 +21,16 @@ export async function listRows(db: SupabaseClient, r: Resource, limit = 500): Pr
     console.error(`[admin] list ${r.slug} failed`, error);
     return [];
   }
-  return (data ?? []) as unknown as Row[];
+  const rows = (data ?? []) as unknown as Row[];
+  // A vehicle's tiers live in the join table: attach them as tier_ids / tier_names for the form and the list.
+  if (r.table === "vehicles") return (await attachVehicleTiers(db, rows as { id: unknown }[])) as unknown as Row[];
+  return rows;
 }
 
 export async function loadRefOptions(db: SupabaseClient, r: Resource): Promise<Record<string, { id: string; label: string }[]>> {
   const out: Record<string, { id: string; label: string }[]> = {};
   for (const f of r.fields) {
-    if (f.type !== "ref" || !f.ref || out[f.ref]) continue;
+    if ((f.type !== "ref" && f.type !== "multiref") || !f.ref || out[f.ref]) continue;
     const target = resources[f.ref];
     if (!target) continue;
     // Retired tiers (anything other than Premium / Luxury / Luxury Plus) cannot be assigned to vehicles.

@@ -26,6 +26,12 @@ from (values
   ('mid-size-sedans','premium','Mercedes-Benz E-Class','mercedes-benz-e-class','BMW 5 Series or similar','Refined mid-size sedan.', array['Black exterior','Black leather interior'], 4, null, '/vehicles/sedan.svg', 6)
 ) as v(cat, tier, name, slug, similar, descr, feats, pax, bags, img, ord);
 
+-- Vehicle <-> tier links (table from migration 0010; run migrations BEFORE this seed). Each vehicle gets its seeded tier.
+-- A vehicle can be offered in several tiers: assign more in Admin, Vehicles (nothing multi-tier is invented here). Idempotent.
+insert into public.vehicle_tier_assignments (vehicle_id, tier_id)
+  select id, tier_id from public.vehicles where tier_id is not null
+  on conflict (vehicle_id, tier_id) do nothing;
+
 -- DRAFT pricing: second client reference table (per mile / hourly / minimum fare).
 -- The client is still considering reductions (see notes), so these stay draft.
 insert into public.pricing_configs (vehicle_id, status, label, notes, per_mile, hourly_rate, minimum_fare, hourly_included_miles, hourly_extra_mile_rate, min_hours)

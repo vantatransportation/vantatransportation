@@ -6,6 +6,7 @@ import { notify } from "@/lib/notify";
 import { normalizePhotoFields, releaseAsset } from "@/lib/cloudinary";
 import { PUBLIC_TABLES, revalidateSite } from "@/lib/admin/revalidate";
 import { validateTierPricing } from "@/lib/tier-pricing";
+import { applyVehicleTiers, checkTierSelection } from "@/lib/vehicle-tiers";
 import { BUSINESS_TZ } from "@/lib/config";
 import { EMAIL_RE } from "@/lib/validation";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -27,6 +28,20 @@ async function archiveOtherActive(db: SupabaseClient, vehicleId: string, exceptI
   let q = db.from("pricing_configs").update({ status: "archived" }).eq("vehicle_id", vehicleId).eq("status", "active");
   if (exceptId) q = q.neq("id", exceptId);
   await q;
+}
+
+/**
+ * Vehicles only: takes `tier_ids` out of the column data (it is not a column) and validates it against the tiers that exist and are
+ * active. Returns null when the request carries no tier selection, a Response to send back when it is invalid, or the plan to apply
+ * after the vehicle row is saved.
+ */
+async function planVehicleTiers(db: SupabaseClient, table: string, data: Record<string, unknown>): Promise<{ ids: string[]; active: Map<string, number> } | Response | null> {
+  if (table !== "vehicles" || !("tier_ids" in data)) return null;
+  const ids = Array.isArray(data.tier_ids) ? (data.tier_ids as string[]) : [];
+  delete data.tier_ids;
+  const checked = await checkTierSelection(db, ids);
+  if (!checked.ok) return json({ error: checked.error }, checked.status);
+  return { ids, active: checked.active };
 }
 
 export async function POST(request: Request) {
@@ -59,10 +74,21 @@ export async function POST(request: Request) {
       c.data.sort_order = ((last.data?.sort_order as number | undefined) ?? 0) + 1;
     }
     if (resource.table === "vehicles") { const bad = normalizePhotoFields(c.data); if (bad) return json({ error: bad }, 422); }
+    // A vehicle's tiers are rows in vehicle_tier_assignments, not a column: validate them now, save them right after the vehicle.
+    const tierPlan = await planVehicleTiers(db, resource.table, c.data);
+    if (tierPlan instanceof Response) return tierPlan;
     if (resource.table === "drivers" && !EMAIL_RE.test(String(c.data.email ?? ""))) return json({ error: "Enter a valid driver email address." }, 422);
     if (resource.table === "pricing_configs" && c.data.status === "active") await archiveOtherActive(db, String(c.data.vehicle_id));
     const ins = await db.from(resource.table).insert(c.data).select("id").single();
     if (ins.error) return dbError(ins.error);
+    if (tierPlan) {
+      const saved = await applyVehicleTiers(db, ins.data.id, tierPlan.ids, tierPlan.active);
+      if (!saved.ok) {
+        await db.from("vehicles").delete().eq("id", ins.data.id); // the vehicle was created a moment ago: undo it rather than leave it without its tiers
+        return json({ error: `${saved.error} The vehicle was not created.` }, saved.status);
+      }
+      await db.from("activity_logs").insert({ actor_id: admin.id, action: "vehicles.tiers", entity_type: "vehicles", entity_id: ins.data.id, meta: { added: saved.added, removed: saved.removed } });
+    }
     await log("create", ins.data.id);
     publish();
     return json({ ok: true, id: ins.data.id });
@@ -72,10 +98,20 @@ export async function POST(request: Request) {
     if (!id) return json({ error: "Missing id." }, 400);
     const c = coerceValues(resource, values, true);
     if (!c.ok) return json({ error: c.error }, 422);
-    if (!Object.keys(c.data).length) return json({ ok: true });
+    const tierPlan = await planVehicleTiers(db, resource.table, c.data); // removes tier_ids from c.data
+    if (tierPlan instanceof Response) return tierPlan;
+    if (!Object.keys(c.data).length && !tierPlan) return json({ ok: true });
 
     const before = await db.from(resource.table).select("*").eq("id", id).maybeSingle();
     if (!before.data) return json({ error: "Not found." }, 404);
+    if (!Object.keys(c.data).length && tierPlan) {
+      // Only the tiers changed.
+      const saved = await applyVehicleTiers(db, id, tierPlan.ids, tierPlan.active);
+      if (!saved.ok) return json({ error: saved.error }, saved.status);
+      await db.from("activity_logs").insert({ actor_id: admin.id, action: "vehicles.tiers", entity_type: "vehicles", entity_id: id, meta: { added: saved.added, removed: saved.removed } });
+      publish();
+      return json({ ok: true });
+    }
     if (resource.table === "vehicles") { const bad = normalizePhotoFields(c.data, before.data); if (bad) return json({ error: bad }, 422); }
     if (resource.table === "drivers" && "email" in c.data && !EMAIL_RE.test(String(c.data.email ?? ""))) return json({ error: "Enter a valid driver email address." }, 422);
     // Deactivating a driver who still has open rides is allowed (they lose access at once); admins reassign those rides from the booking page.
@@ -92,6 +128,11 @@ export async function POST(request: Request) {
     if (resource.table === "vehicles" && "image_url" in c.data && (written.image_url ?? null) !== (c.data.image_url ?? null)) {
       console.error("[admin/crud] vehicle image_url did not persist", id);
       return json({ error: "The photo was not saved to the database. Please try again." }, 500);
+    }
+    if (tierPlan) {
+      const saved = await applyVehicleTiers(db, id, tierPlan.ids, tierPlan.active);
+      if (!saved.ok) { publish(); return json({ error: `${saved.error} The other changes to this vehicle were saved.` }, saved.status); }
+      await db.from("activity_logs").insert({ actor_id: admin.id, action: "vehicles.tiers", entity_type: "vehicles", entity_id: id, meta: { added: saved.added, removed: saved.removed } });
     }
     await log("update", id);
     publish();

@@ -1,6 +1,7 @@
 import { json, readJson } from "@/lib/http";
 import { guard } from "@/lib/admin/guard";
 import { revalidateSite } from "@/lib/admin/revalidate";
+import { FAMILY_PREFIX } from "@/lib/family-section";
 
 export const runtime = "nodejs";
 
@@ -10,6 +11,8 @@ export async function POST(request: Request) {
   if (g instanceof Response) return g;
   const body = await readJson(request);
   const key = typeof body?.key === "string" ? body.key : "";
+  // The family section has its own validated editor (image upload, length limits); the generic editor must not bypass it.
+  if (key.startsWith(FAMILY_PREFIX)) return json({ error: "Edit this section under Admin, Family section." }, 422);
   const text = typeof body?.value === "string" ? body.value.slice(0, 20000) : "";
   const { data: row } = await g.db.from("site_content").select("key,value").eq("key", key).maybeSingle();
   if (!row) return json({ error: "Unknown content item." }, 404);

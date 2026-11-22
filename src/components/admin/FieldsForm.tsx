@@ -22,8 +22,11 @@ type Props = {
   onCancel?: () => void;
 };
 
-function initialValue(f: Field, row: Row | undefined, tz: string): string | boolean {
+type FormValue = string | boolean | string[];
+
+function initialValue(f: Field, row: Row | undefined, tz: string): FormValue {
   const v = row?.[f.name];
+  if (f.type === "multiref") return Array.isArray(v) ? v.map(String) : [];
   if (f.type === "bool") return row ? Boolean(v) : f.name.startsWith("is_") || f.name === "show_on_mobile";
   if (v == null) return f.type === "select" && f.options && !row ? f.options[0] : "";
   if (f.type === "money") return (Number(v) / 100).toFixed(2);
@@ -35,11 +38,11 @@ function initialValue(f: Field, row: Row | undefined, tz: string): string | bool
 export default function FieldsForm({ resource, id, initial, refOptions = {}, tz, only, extra, submitLabel, onDone, onCancel }: Props) {
   const router = useRouter();
   const fields = resource.fields.filter((f) => !f.workflow && (!only || only.includes(f.name)));
-  const [vals, setVals] = useState<Record<string, string | boolean>>(() => Object.fromEntries(fields.map((f) => [f.name, initialValue(f, initial, tz)])));
+  const [vals, setVals] = useState<Record<string, FormValue>>(() => Object.fromEntries(fields.map((f) => [f.name, initialValue(f, initial, tz)])));
   const [state, setState] = useState<{ kind: "idle" | "saving" | "ok" | "error"; message?: string }>({ kind: "idle" });
   const [uploading, setUploading] = useState<string | null>(null);
 
-  const set = (name: string, v: string | boolean) => setVals((s) => ({ ...s, [name]: v }));
+  const set = (name: string, v: FormValue) => setVals((s) => ({ ...s, [name]: v }));
 
   async function upload(name: string, file: File) {
     setUploading(name);
@@ -79,6 +82,30 @@ export default function FieldsForm({ resource, id, initial, refOptions = {}, tz,
     <form className="form" onSubmit={submit} noValidate>
       {fields.map((f) => {
         if (f.hidden) return null;
+        if (f.type === "multiref") {
+          // Several choices (for example a vehicle's service tiers): one checkbox each. Unticking removes the assignment when saved.
+          const picked = Array.isArray(vals[f.name]) ? (vals[f.name] as string[]) : [];
+          const options = refOptions[f.ref ?? ""] ?? [];
+          return (
+            <fieldset key={f.name} className="field full tierpick">
+              <legend>{f.label}{f.required ? " *" : ""}</legend>
+              <div className="tierpick__opts">
+                {options.map((o) => {
+                  const on = picked.includes(o.id);
+                  return (
+                    <label key={o.id} className={`tierpick__opt${on ? " is-on" : ""}`}>
+                      <input type="checkbox" checked={on} onChange={(e) => set(f.name, e.target.checked ? [...picked, o.id] : picked.filter((x) => x !== o.id))} />
+                      <span>{o.label}</span>
+                    </label>
+                  );
+                })}
+                {options.length === 0 && <span className="muted">No tiers are available.</span>}
+              </div>
+              {picked.length === 0 && options.length > 0 && <span className="help tierpick__warn" role="note">No tier selected: this vehicle will not be offered in Calculate Your Fare until you choose at least one.</span>}
+              {f.help && <span className="help">{f.help}</span>}
+            </fieldset>
+          );
+        }
         const wide = f.type === "textarea" || f.type === "image" || f.type === "photo" || f.type === "tags";
         const cid = `f-${resource.slug}-${f.name}`;
         const v = vals[f.name];

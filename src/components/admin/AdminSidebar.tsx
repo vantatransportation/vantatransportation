@@ -10,7 +10,7 @@ import ThemeToggle from "../ThemeToggle";
 const NAV = [
   ["/admin", "Overview"], ["/admin/bookings", "Bookings"], ["/admin/drivers", "Drivers"], ["/admin/customers", "Customers"], ["/admin/leads", "CRM / Leads"],
   ["/admin/quotes", "Quote requests"], ["/admin/follow-ups", "Follow-ups"], ["/admin/vehicles", "Vehicles"], ["/admin/categories", "Vehicle categories"],
-  ["/admin/pricing", "Pricing management"], ["/admin/tiers", "Tier prices & fees"], ["/admin/payments", "Payments"], ["/admin/round-trip", "Round-trip rules"], ["/admin/booking-settings", "Booking settings"], ["/admin/faqs", "FAQs"], ["/admin/promotions", "Promotions"], ["/admin/content", "Website content"],
+  ["/admin/pricing", "Pricing management"], ["/admin/tiers", "Tier prices & fees"], ["/admin/payments", "Payments"], ["/admin/round-trip", "Round-trip rules"], ["/admin/booking-settings", "Booking settings"], ["/admin/faqs", "FAQs"], ["/admin/promotions", "Promotions"], ["/admin/content", "Website content"], ["/admin/hero", "Hero slideshow"], ["/admin/family", "Family section"],
   ["/admin/standards", "Vehicle standards"], ["/admin/notifications", "Notifications"], ["/admin/settings", "Settings"],
 ] as const;
 

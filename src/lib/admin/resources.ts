@@ -3,14 +3,14 @@
  * forms (client) and the server-side validation/whitelisting of writes, so the
  * browser can only change columns listed here.
  */
-export type FieldType = "text" | "textarea" | "number" | "money" | "bool" | "select" | "datetime" | "image" | "photo" | "ref" | "tags";
+export type FieldType = "text" | "textarea" | "number" | "money" | "bool" | "select" | "datetime" | "image" | "photo" | "ref" | "multiref" | "tags";
 
 export interface Field {
   name: string;
   label: string;
   type: FieldType;
   options?: string[];
-  /** Resource slug whose rows supply the choices (type "ref"). */
+  /** Resource slug whose rows supply the choices (types "ref" and "multiref"). A "multiref" is a list of ids, stored in a join table, not a column. */
   ref?: string;
   required?: boolean;
   help?: string;
@@ -26,7 +26,7 @@ export interface Field {
 export interface Column {
   label: string;
   path: string;
-  kind?: "text" | "bool" | "money" | "date" | "status";
+  kind?: "text" | "bool" | "money" | "date" | "status" | "tags";
 }
 
 export interface Resource {
@@ -91,12 +91,13 @@ export const resources: Record<string, Resource> = {
   },
   vehicles: {
     slug: "vehicles", table: "vehicles", title: "Vehicles", singular: "vehicle",
-    select: "*, vehicle_categories(name, capacity_label), vehicle_tiers(name)", orderBy: "sort_order", canCreate: true, canDelete: true, sortable: true,
+    // No vehicle_tiers embed: a vehicle's tiers come from vehicle_tier_assignments (attached as tier_ids / tier_names by listRows).
+    select: "*, vehicle_categories(name, capacity_label)", orderBy: "sort_order", canCreate: true, canDelete: true, sortable: true,
     fields: [
       { name: "name", label: "Name", type: "text", required: true },
       { name: "slug", label: "URL slug", type: "text", help: "Leave blank to generate from the name." },
       { name: "category_id", label: "Category", type: "ref", ref: "categories", required: true },
-      { name: "tier_id", label: "Tier", type: "ref", ref: "tiers" },
+      { name: "tier_ids", label: "Service tiers", type: "multiref", ref: "tiers", help: "Tick every tier this vehicle is offered in. It appears in each ticked tier in Calculate Your Fare, and in no other. Each tier has its own fixed price (Tier prices & fees). A vehicle with no tier is not offered online." },
       { name: "similar_models", label: "Similar models", type: "text" },
       { name: "description", label: "Description", type: "textarea" },
       { name: "features", label: "Features", type: "tags", help: "One per line or comma separated." },
@@ -108,7 +109,7 @@ export const resources: Record<string, Resource> = {
       { name: "is_available", label: "Available to book", type: "bool" },
     ],
     columns: [
-      { label: "Vehicle", path: "name" }, { label: "Category", path: "vehicle_categories.name" }, { label: "Tier", path: "vehicle_tiers.name" },
+      { label: "Vehicle", path: "name" }, { label: "Category", path: "vehicle_categories.name" }, { label: "Tiers", path: "tier_names", kind: "tags" },
       { label: "Capacity range", path: "vehicle_categories.capacity_label" }, { label: "Max seats", path: "passenger_capacity" }, { label: "Shown", path: "is_active", kind: "bool" }, { label: "Available", path: "is_available", kind: "bool" },
     ],
     refLabel: (r) => String(r.name ?? ""),

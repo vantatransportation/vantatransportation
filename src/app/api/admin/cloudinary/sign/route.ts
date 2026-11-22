@@ -5,7 +5,7 @@ import { cloudinaryConfigured, createUploadSignature, validUpload } from "@/lib/
 
 export const runtime = "nodejs";
 
-/** Issues a short-lived signed upload for ONE image, only to a signed-in admin. There is no unsigned public upload. */
+/** Issues a short-lived signed upload for ONE image, only to a signed-in admin. The folder comes from `purpose` (vehicles, hero, site); there is no unsigned public upload. */
 export async function POST(request: Request) {
   const g = await guard(request);
   if (g instanceof Response) return g;
@@ -13,7 +13,7 @@ export async function POST(request: Request) {
   const body = await readJson(request);
   const problem = validUpload(body?.contentType, body?.size);
   if (problem) return json({ error: problem }, 422);
-  return json({ ok: true, ...createUploadSignature() });
+  return json({ ok: true, ...createUploadSignature(body?.purpose) });
 }
 
 /** Lets the admin UI show a configuration message before anyone tries to upload. Reveals no credentials. */

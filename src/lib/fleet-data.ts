@@ -9,10 +9,11 @@
  */
 import type { Category, Vehicle } from "@/lib/types";
 import { resolvePhotoSrc, hasRealPhoto } from "@/lib/vehicle-photo";
+import type { TierRow } from "@/lib/vehicle-tiers";
 
 /** Explicit column lists: the service-role client must never be used with select("*") for public output. */
 export const FLEET_VEHICLE_SELECT =
-  "id,name,similar_models,description,passenger_capacity,luggage_capacity,image_url,is_active,is_available,sort_order,vehicle_tiers(name,is_active),vehicle_categories(name,slug,capacity_label,is_active)";
+  "id,name,similar_models,description,passenger_capacity,luggage_capacity,image_url,is_active,is_available,sort_order,tier_id,vehicle_categories(name,slug,capacity_label,is_active)";
 export const FLEET_CATEGORY_SELECT = "id,name,slug,description,capacity_label,image_url,is_active,sort_order";
 
 type Row = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -31,15 +32,18 @@ export function mapCategoryRows(rows: Row[] | null | undefined): Category[] {
  * Maps vehicle rows. Rows that are not active are dropped (needed because the service-role client bypasses the
  * "public read active vehicles" RLS policy). A tier or category that is itself inactive is treated as absent, which is
  * exactly what the RLS policies do for the anonymous client's embedded rows.
+ *
+ * Tiers: a vehicle can be offered in several. `tiersByVehicle` (from loadVehicleTiers: the join table, active tiers only) supplies
+ * them; each vehicle is still ONE card. Vehicles are never embedded with `vehicle_tiers(...)` any more (ambiguous since migration 0010).
  */
-export function mapVehicleRows(rows: Row[] | null | undefined): Vehicle[] {
+export function mapVehicleRows(rows: Row[] | null | undefined, tiersByVehicle: Map<string, TierRow[]> = new Map()): Vehicle[] {
   return (rows ?? []).filter((v) => v.is_active !== false).map((v) => {
     const cat = v.vehicle_categories && v.vehicle_categories.is_active !== false ? v.vehicle_categories : null;
-    const tier = v.vehicle_tiers && v.vehicle_tiers.is_active !== false ? v.vehicle_tiers : null;
+    const tierNames = (tiersByVehicle.get(v.id) ?? []).map((t) => t.name);
     return {
       id: v.id, name: v.name,
       categoryName: cat?.name ?? "", categorySlug: cat?.slug ?? "",
-      tierName: tier?.name ?? "", similarModels: v.similar_models ?? "",
+      tierName: tierNames[0] ?? "", tierNames, similarModels: v.similar_models ?? "",
       description: v.description ?? "", passengers: v.passenger_capacity, luggage: v.luggage_capacity ?? null,
       image: resolvePhotoSrc(v.image_url), capacityLabel: cat?.capacity_label ?? "", isAvailable: v.is_available !== false,
     };

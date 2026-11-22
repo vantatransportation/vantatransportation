@@ -26,11 +26,15 @@ export interface QuoteDto {
   totalCents: number; currency: string; lineItems: LineItemDto[]; tollStatus: "included" | "unavailable" | "avoided"; minimumApplied: boolean;
   roundTrip?: { discountCents: number; twoOneWayCents: number; ruleLabel: string | null; legs: { label: string; totalCents: number }[] };
 }
+export interface TierOptionDto { id: string; name: string; fixedPriceCents: number | null; meetGreetFeeCents: number | null }
 export interface VehicleOptionDto {
-  id: string; name: string; category: string; tier: string; passengers: number; image: string | null; similarModels: string;
+  id: string; name: string; category: string; passengers: number; image: string | null; similarModels: string;
   description: string; capacityLabel: string;
-  /** Fixed price and Meet & Greet fee of this vehicle's tier, for DISPLAY. The server recalculates everything that is charged. */
-  tierPricing: { id: string | null; name: string; fixedPriceCents: number | null; meetGreetFeeCents: number | null } | null;
+  /**
+   * Every service tier this vehicle is offered in, each with ITS fixed price and Meet & Greet fee, for DISPLAY. The vehicle appears
+   * once here and is listed under each of these tiers by the calculator. The server recalculates everything that is charged.
+   */
+  tiers: TierOptionDto[];
   quotable: boolean; quotes: Partial<Record<RouteKey, QuoteDto>>;
 }
 export interface FareResponse {
@@ -39,7 +43,7 @@ export interface FareResponse {
   /** Child seat charge for the selected seats, in cents (an add-on charged online, not part of the trip estimate). */
   seatFeeCents?: number;
   /** The three service tiers with their configured fixed price and Meet & Greet fee (null = not set). */
-  tiers?: { name: string; fixedPriceCents: number | null; meetGreetFeeCents: number | null }[];
+  tiers?: TierOptionDto[];
   /** Whether airport Meet & Greet can be requested at all. */
   meetGreetEnabled?: boolean;
   seatInfo?: { oneWayCents: number; roundTripCents: number; max: number };
@@ -52,6 +56,8 @@ export interface StoredTrip {
   trip: TripPayload;
   vehicleId: string;
   vehicleName: string;
+  /** The service tier chosen in the calculator. The server validates the vehicle/tier pair again when the booking is created. */
+  tierId?: string;
   routeKey: RouteKey;
   submissionKey: string;
   display: {

@@ -77,7 +77,7 @@ export async function POST(request: Request) {
       pricingAvailable: vehicles.some((v) => v.quotable),
       seatFeeCents: seat.line?.cents ?? 0,
       meetGreetEnabled: settings.meetGreetEnabled,
-      tiers: (tierRows.data ?? []).map((t: Record<string, any>) => ({ name: t.name, fixedPriceCents: t.fixed_price_cents ?? null, meetGreetFeeCents: t.meet_greet_fee_cents ?? null })), // eslint-disable-line @typescript-eslint/no-explicit-any
+      tiers: (tierRows.data ?? []).map((t: Record<string, any>) => ({ id: t.id, name: t.name, fixedPriceCents: t.fixed_price_cents ?? null, meetGreetFeeCents: t.meet_greet_fee_cents ?? null })), // eslint-disable-line @typescript-eslint/no-explicit-any
       seatInfo: { oneWayCents: settings.seats.oneWayCents, roundTripCents: settings.seats.roundTripCents, max: settings.seats.max },
       region: { key: regionKey, label: REGION_LABEL[regionKey], manualReview: fulfilmentFor(regionKey).requiresManualReview },
     });

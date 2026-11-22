@@ -20,11 +20,13 @@ export async function POST(request: Request) {
   const vehicleId = q.vehicle_id ?? (typeof body?.vehicleId === "string" ? body.vehicleId : null);
   if (!vehicleId) return json({ error: "Choose a vehicle for this request before converting." }, 422);
 
-  const stored = q.trip as { trip?: Trip; routeKey?: RouteKey; route?: { distanceMiles: number; durationMinutes: number; toll: { status: "none" | "known" | "unavailable"; amount: number | null; currency: string | null } } | null };
+  const stored = q.trip as { trip?: Trip; routeKey?: RouteKey; tierId?: string | null; route?: { distanceMiles: number; durationMinutes: number; toll: { status: "none" | "known" | "unavailable"; amount: number | null; currency: string | null } } | null };
   if (!stored?.trip) return json({ error: "The stored trip details are incomplete." }, 422);
 
+  // Tier: the staff member's choice wins, then the tier the customer chose in the calculator. A vehicle with several tiers needs one.
+  const tierId = (typeof body?.tierId === "string" && body.tierId ? body.tierId : null) ?? (typeof stored.tierId === "string" && stored.tierId ? stored.tierId : null);
   const result = await createBooking(g.db, {
-    trip: stored.trip, vehicleId, routeKey: stored.routeKey ?? "fastest",
+    trip: stored.trip, vehicleId, tierId, routeKey: stored.routeKey ?? "fastest",
     customer: { name: q.name, email: q.email ?? "", phone: q.phone ?? "" }, notes: q.message,
     submissionKey: `quote-${q.id}`, routeOverride: stored.route ? { ...stored.route, polyline: "" } : undefined,
     priceOverrideCents: q.revised_price_cents, quoteRequestId: q.id,

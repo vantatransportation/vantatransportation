@@ -7,11 +7,20 @@ import { hasRealPhoto, photoUrl } from "@/lib/vehicle-photo";
 const TYPES = ["image/jpeg", "image/png", "image/webp"];
 const MAX = 8 * 1024 * 1024;
 
+type Purpose = "vehicles" | "hero" | "site";
+const WORDS: Record<Purpose, { saved: string; removeAsk: string; removed: string; alt: string; empty: string }> = {
+  vehicles: { saved: "Uploaded. Save the vehicle to publish this photo.", removeAsk: "Remove this photo? The website will show the branded placeholder after you save.", removed: "Photo removed. Save the vehicle to apply.", alt: "Current vehicle photo", empty: "No photo assigned. A branded placeholder is shown on the website." },
+  hero: { saved: "Uploaded.", removeAsk: "Remove this image?", removed: "Image removed.", alt: "Current image", empty: "No image yet." },
+  site: { saved: "Uploaded. Save the section to publish this image.", removeAsk: "Remove this image? The section shows the Vanta mark after you save.", removed: "Image removed. Save the section to apply.", alt: "Current image", empty: "No image assigned. The section shows the Vanta mark." },
+};
+
 /**
- * Vehicle photo control. Flow: choose a file, preview it locally, upload it straight to Cloudinary with a
- * server-signed request, then save the vehicle form. The API secret never reaches this component.
+ * Image control. Flow: choose a file, preview it locally, upload it straight to Cloudinary with a server-signed request
+ * (the server picks the folder from `purpose`), then save the surrounding form. The API secret never reaches this component.
+ * `purpose` defaults to vehicle photos, which behave exactly as before.
  */
-export default function PhotoField({ id, url, publicId, onChange }: { id: string; url: string; publicId: string; onChange: (url: string, publicId: string) => void }) {
+export default function PhotoField({ id, url, publicId, onChange, purpose = "vehicles", allowRemove = true }: { id: string; url: string; publicId: string; onChange: (url: string, publicId: string) => void; purpose?: Purpose; allowRemove?: boolean }) {
+  const words = WORDS[purpose];
   const [configured, setConfigured] = useState<boolean | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
@@ -42,7 +51,7 @@ export default function PhotoField({ id, url, publicId, onChange }: { id: string
     if (!file) return;
     setBusy(true); setMsg(null);
     try {
-      const sig = await postJson("/api/admin/cloudinary/sign", { contentType: file.type, size: file.size });
+      const sig = await postJson("/api/admin/cloudinary/sign", { contentType: file.type, size: file.size, purpose });
       if (!sig.ok) throw new Error(String(sig.data.error ?? "Could not start the upload."));
       const d = sig.data as { cloudName: string; apiKey: string; timestamp: number; folder: string; allowed_formats: string; signature: string };
       const fd = new FormData();
@@ -55,7 +64,7 @@ export default function PhotoField({ id, url, publicId, onChange }: { id: string
       unsaved.current = out.public_id;
       onChange(out.secure_url, out.public_id);
       setFile(null); setPreview(null);
-      setMsg({ kind: "ok", text: "Uploaded. Save the vehicle to publish this photo." });
+      setMsg({ kind: "ok", text: words.saved });
     } catch (e) {
       setMsg({ kind: "error", text: e instanceof Error ? e.message : "Upload failed." });
     }
@@ -63,10 +72,10 @@ export default function PhotoField({ id, url, publicId, onChange }: { id: string
   }
 
   async function remove() {
-    if (!window.confirm("Remove this photo? The website will show the branded placeholder after you save.")) return;
+    if (!window.confirm(words.removeAsk)) return;
     await discardUnsaved();
     onChange("", "");
-    setMsg({ kind: "ok", text: "Photo removed. Save the vehicle to apply." });
+    setMsg({ kind: "ok", text: words.removed });
   }
 
   const current = hasRealPhoto(url) ? url : null;
@@ -76,7 +85,7 @@ export default function PhotoField({ id, url, publicId, onChange }: { id: string
       <div className="photo-field__row">
         <figure className="photo-field__frame">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          {preview ? <img src={preview} alt="Preview of the selected photo" /> : current ? <img src={photoUrl(current, 480, 300)} alt="Current vehicle photo" /> : <span className="muted">No photo assigned. A branded placeholder is shown on the website.</span>}
+          {preview ? <img src={preview} alt="Preview of the selected photo" /> : current ? <img src={photoUrl(current, 480, 300)} alt={words.alt} /> : <span className="muted">{words.empty}</span>}
           <figcaption className="muted">{preview ? "Preview (not uploaded yet)" : current ? "Currently assigned" : ""}</figcaption>
         </figure>
         <div className="photo-field__actions">
@@ -87,7 +96,7 @@ export default function PhotoField({ id, url, publicId, onChange }: { id: string
             </label>
           )}
           {file && <><button type="button" className="btn btn--primary btn-sm" onClick={upload} disabled={busy}>{busy ? "Uploading…" : "Upload this photo"}</button><button type="button" className="btn btn--ghost btn-sm" onClick={cancel} disabled={busy}>Cancel</button></>}
-          {current && !file && <button type="button" className="btn btn--ghost btn-sm" onClick={remove}>Remove photo</button>}
+          {current && !file && allowRemove && <button type="button" className="btn btn--ghost btn-sm" onClick={remove}>Remove photo</button>}
           <span className="help">JPG, PNG or WebP, up to 8 MB. {publicId ? "Stored in Cloudinary." : ""}</span>
         </div>
       </div>

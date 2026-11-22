@@ -2,17 +2,30 @@
 import { randomUUID } from "node:crypto";
 
 const REL = {
-  vehicles: { vehicle_categories: ["one", "category_id", "vehicle_categories"], vehicle_tiers: ["one", "tier_id", "vehicle_tiers"], pricing_configs: ["many", "vehicle_id", "pricing_configs"] },
+  // `vehicles -> vehicle_tiers` is deliberately NOT modelled: since migration 0010 PostgREST cannot resolve that embed (direct FK + junction
+  // table), so FakeDb rejects it like the real API does (see run()). Vehicles reach their tiers through vehicle_tier_assignments.
+  vehicles: { vehicle_categories: ["one", "category_id", "vehicle_categories"], vehicle_tier_assignments: ["many", "vehicle_id", "vehicle_tier_assignments"], pricing_configs: ["many", "vehicle_id", "pricing_configs"] },
+  vehicle_tier_assignments: { vehicle_tiers: ["one", "tier_id", "vehicle_tiers"], vehicles: ["one", "vehicle_id", "vehicles"] },
   pricing_configs: { pricing_surcharges: ["many", "pricing_config_id", "pricing_surcharges"], vehicles: ["one", "vehicle_id", "vehicles"] },
   bookings: { vehicles: ["one", "vehicle_id", "vehicles"] },
   quote_requests: { vehicles: ["one", "vehicle_id", "vehicles"] },
 };
+// Composite unique constraints (all columns together).
+const UNIQUE_SETS = { vehicle_tier_assignments: [["vehicle_id", "tier_id"]] };
 const UNIQUE = { customers: ["email_normalized"], bookings: ["submission_key", "reference"], quote_requests: ["submission_key", "access_token"], notification_logs: ["dedupe_key"], admin_notifications: ["dedupe_key"], stripe_events: ["id"], paypal_events: ["id"], payments: ["stripe_session_id"], booking_messages: ["dedupe_key"] };
 
 function splitTop(s) { const out = []; let d = 0, cur = ""; for (const ch of s) { if (ch === "(") d++; if (ch === ")") d--; if (ch === "," && d === 0) { out.push(cur.trim()); cur = ""; } else cur += ch; } if (cur.trim()) out.push(cur.trim()); return out; }
 
 export class FakeDb {
-  constructor() { this.tables = {}; this.seq = 1000; this.auth = { getUser: async (t) => (t === "good" ? { data: { user: { id: "admin-1", email: "a@x.com" } }, error: null } : { data: { user: null }, error: { message: "bad" } }) }; this.storage = {}; }
+  constructor() { this.tables = {}; this.seq = 1000; this.auth = { getUser: async (t) => (t === "good" ? { data: { user: { id: "admin-1", email: "a@x.com" } }, error: null } : { data: { user: null }, error: { message: "bad" } }) }; this.storage = {}; this.missing = new Set(); }
+  /** Simulates a table that has not been created yet (for example migration 0010 / 0011 not applied). */
+  dropTableForTest(name) { this.missing.add(name); }
+  /** Mirrors the backfill in migration 0010: one assignment per vehicle that has a legacy tier_id. Idempotent. */
+  backfillTierAssignments() {
+    for (const v of this.t("vehicles")) {
+      if (v.tier_id && !this.t("vehicle_tier_assignments").some((a) => a.vehicle_id === v.id && a.tier_id === v.tier_id)) this.t("vehicle_tier_assignments").push({ id: randomUUID(), vehicle_id: v.id, tier_id: v.tier_id, created_at: new Date().toISOString() });
+    }
+  }
   t(name) { return (this.tables[name] ??= []); }
   seed(name, rows) { for (const r of rows) this.t(name).push({ id: randomUUID(), created_at: new Date().toISOString(), ...r }); }
   from(name) { return new Query(this, name); }
@@ -52,7 +65,13 @@ class Query {
   then(res, rej) { return this.run().then(res, rej); }
 
   async run() {
-    const db = this.db; const rows = db.t(this.table);
+    const db = this.db;
+    if (db.missing.has(this.table)) return { data: null, error: { code: "42P01", message: `relation "public.${this.table}" does not exist` }, count: null };
+    // Real PostgREST (once the junction table exists) refuses to guess between the direct FK and the many-to-many path.
+    if (this.op === "select" && this.table === "vehicles" && /vehicle_tiers\s*\(/.test(this.sel) && !db.missing.has("vehicle_tier_assignments")) {
+      return { data: null, error: { code: "PGRST201", message: "Could not embed because more than one relationship was found for 'vehicles' and 'vehicle_tiers'" }, count: null };
+    }
+    const rows = db.t(this.table);
     const match = () => rows.filter((r) => this.f.every((fn) => fn(r)));
     let result; let error = null;
     if (this.op === "insert") {
@@ -64,7 +83,8 @@ class Query {
         if (this.table === "payments") { row.refunded_cents ??= 0; row.status ??= "pending"; }
         if (this.table === "quote_requests") { row.access_token ??= randomUUID().replace(/-/g, "") + randomUUID().replace(/-/g, ""); row.status ??= "new"; row.customer_response ??= "pending"; row.discount_decision ??= "pending"; }
         if (this.table === "notification_logs") { row.attempts ??= 0; }
-        const dup = (UNIQUE[this.table] ?? []).find((c) => row[c] != null && rows.some((x) => x[c] === row[c]));
+        const dup = (UNIQUE[this.table] ?? []).find((c) => row[c] != null && rows.some((x) => x[c] === row[c]))
+          ?? (UNIQUE_SETS[this.table] ?? []).find((cols) => rows.some((x) => cols.every((c) => x[c] === row[c])))?.join("+");
         if (dup) { error = { code: "23505", message: "duplicate " + dup }; result = null; break; }
         rows.push(row); result.push(row);
       }

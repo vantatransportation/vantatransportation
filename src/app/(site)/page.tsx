@@ -3,9 +3,13 @@ import Link from "next/link";
 import { getSiteData, listOf, text } from "@/lib/content";
 import OpenCalculator from "@/components/OpenCalculator";
 import TripStrip from "@/components/TripStrip";
+import HeroSlideshow from "@/components/HeroSlideshow";
+import FamilySection from "@/components/FamilySection";
 import { CategoryGrid, CoverageSection, CtaBand, FaqList, FleetLedger, ServiceNotes, StandardsList, TrustSection } from "@/components/Sections";
 import { getAdminClient } from "@/lib/supabase/admin";
 import { loadPublicPolicies } from "@/lib/policies";
+import { loadHeroView } from "@/lib/hero-data";
+import { buildFamilyView } from "@/lib/family-section";
 
 export const revalidate = 60;
 
@@ -13,10 +17,13 @@ export default async function Home() {
   const { content, categories, vehicles, standards, faqs } = await getSiteData();
   const featured = vehicles.slice(0, 6);
   const policies = await loadPublicPolicies(getAdminClient());
+  const heroView = await loadHeroView(); // null (no active images, or tables not migrated yet) keeps the original hero
+  const family = buildFamilyView(content);
 
   return (
     <>
-      <section className="hero">
+      <section className={`hero${heroView ? " hero--media" : ""}`}>
+        {heroView && <HeroSlideshow view={heroView} />}
         <div className="container">
           <div className="hero__grid">
             <div>
@@ -37,6 +44,8 @@ export default async function Home() {
       </section>
 
       <TrustSection title="Thoughtful rides for the people who matter most" points={listOf(content, "trust.points")} />
+
+      {family && <FamilySection view={family} />}
 
       <section className="section" id="categories">
         <div className="container">

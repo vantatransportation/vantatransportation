@@ -11,7 +11,8 @@ import { SEAT_LABEL, SEAT_TYPES, type ChildSeats, type SeatType } from "@/lib/ch
 import { formatMoney } from "@/lib/pricing/engine";
 import { newKey } from "@/lib/uuid";
 import type { CalculatorPrefill } from "@/lib/calculator-events";
-import { TRIP_STORAGE_KEY, type FareResponse, type PlaceValue, type RouteKey, type StoredTrip, type TripPayload, type VehicleOptionDto } from "@/lib/fare/client-types";
+import { TRIP_STORAGE_KEY, type FareResponse, type PlaceValue, type RouteKey, type StoredTrip, type TierOptionDto, type TripPayload, type VehicleOptionDto } from "@/lib/fare/client-types";
+import { tierChoicesFrom, vehiclesInTier } from "@/lib/vehicle-tiers";
 
 const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select,textarea,[tabindex]:not([tabindex="-1"])';
 const empty: PlaceValue = { text: "" };
@@ -47,6 +48,7 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
   const [lastTrip, setLastTrip] = useState<TripPayload | null>(null);
   const [routeKey, setRouteKey] = useState<RouteKey>("fastest");
   const [vehicleId, setVehicleId] = useState("");
+  const [tierId, setTierId] = useState(""); // the service tier being browsed; a vehicle is listed under every tier it is assigned to
   const [panel, setPanel] = useState<"summary" | "quote" | "sent">("summary");
   const nextStop = useRef(1);
   const [today] = useState(() => new Date().toISOString().slice(0, 10));
@@ -81,11 +83,14 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
 
   const seatCount0 = SEAT_TYPES.reduce((n, t) => n + (lastTrip?.childSeats?.[t] ?? 0), 0);
   const route = result?.routes.find((r) => r.key === routeKey) ?? result?.routes[0] ?? null;
-  const vehicle: VehicleOptionDto | undefined = result?.vehicles.find((v) => v.id === vehicleId);
+  // Tier filter: only tiers that have at least one vehicle for this trip; the list shows ONLY the vehicles assigned to the chosen tier.
+  const tierChoices: TierOptionDto[] = result ? tierChoicesFrom(result.vehicles, result.tiers) : [];
+  const tierVehicles: VehicleOptionDto[] = result ? vehiclesInTier(result.vehicles, tierId) : [];
+  const vehicle: VehicleOptionDto | undefined = tierVehicles.find((v) => v.id === vehicleId);
   const quote = vehicle?.quotes[route?.key ?? "fastest"] ?? null;
   // What is charged ONLINE (display only; the server recalculates it): fixed tier price + Meet & Greet + child seats.
   // The trip estimate (mileage/hours/tolls) is shown separately and is never added to it.
-  const tp = vehicle?.tierPricing ?? null;
+  const tp = vehicle?.tiers.find((t) => t.id === tierId) ?? null; // the SELECTED tier's prices (the same vehicle can have different ones in another tier)
   const seatFee = result?.seatFeeCents ?? 0;
   const mgOffered = !meetGreet || (tp?.meetGreetFeeCents != null);
   const mgFee = meetGreet && tp?.meetGreetFeeCents != null ? tp.meetGreetFeeCents : 0;
@@ -108,7 +113,12 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
         setResult(r);
         setLastTrip(payload);
         setRouteKey("fastest");
-        setVehicleId((r.vehicles.find((v) => v.quotable) ?? r.vehicles[0])?.id ?? "");
+        // Keep the tier being browsed if it still has vehicles, otherwise start at the first tier that does.
+        const tiers = tierChoicesFrom(r.vehicles, r.tiers);
+        const nextTier = tiers.find((t) => t.id === tierId) ?? tiers[0];
+        setTierId(nextTier?.id ?? "");
+        const inTier = vehiclesInTier(r.vehicles, nextTier?.id);
+        setVehicleId((inTier.find((v) => v.quotable) ?? inTier[0])?.id ?? "");
       }
     } catch {
       setError({ text: "Could not reach the server. Check your connection and try again." });
@@ -119,7 +129,7 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
   function continueToBooking() {
     if (!lastTrip || !vehicle || !route || stale || !mgOffered) return;
     const stored: StoredTrip = {
-      trip: { ...lastTrip, meetGreet }, vehicleId: vehicle.id, vehicleName: vehicle.name, routeKey: route.key,
+      trip: { ...lastTrip, meetGreet }, vehicleId: vehicle.id, vehicleName: vehicle.name, tierId, routeKey: route.key,
       submissionKey: newKey(),
       display: {
         quote, distanceMiles: route.distanceMiles, durationMinutes: route.durationMinutes, routeLabel: route.label,
@@ -142,7 +152,7 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
     try {
       const res = await fetch("/api/quote-requests", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ trip: lastTrip, vehicleId: vehicle.id, routeKey: route.key, name: qr.name, email: qr.email, phone: qr.phone, desiredBudget: qr.budget, message: qr.message, website: qr.website, submissionKey: qrKey }),
+        body: JSON.stringify({ trip: lastTrip, vehicleId: vehicle.id, tierId, routeKey: route.key, name: qr.name, email: qr.email, phone: qr.phone, desiredBudget: qr.budget, message: qr.message, website: qr.website, submissionKey: qrKey }),
       });
       const data = await res.json().catch(() => ({}));
       if (res.ok) setPanel("sent");
@@ -277,13 +287,37 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
                     })}
                   </fieldset>
                 )}
+                {tierChoices.length > 1 && (
+                  <fieldset className="opts" aria-describedby="tier-help">
+                    <legend>Service tier</legend>
+                    <p id="tier-help" className="muted" style={{ marginBottom: ".5rem" }}>Choose a tier to see the vehicles offered in it. Some vehicles are offered in more than one tier; each tier has its own fixed price.</p>
+                    {tierChoices.map((t) => {
+                      const n = vehiclesInTier(result.vehicles, t.id).length;
+                      return (
+                        <label key={t.id} className={`opt${tierId === t.id ? " is-on" : ""}`}>
+                          <input type="radio" name="tier" checked={tierId === t.id} onChange={() => {
+                            setTierId(t.id);
+                            // Keep the chosen vehicle if this tier also offers it; otherwise pick the tier's first bookable vehicle.
+                            const inTier = vehiclesInTier(result.vehicles, t.id);
+                            if (!inTier.some((v) => v.id === vehicleId)) setVehicleId((inTier.find((v) => v.quotable) ?? inTier[0])?.id ?? "");
+                            setPanel("summary");
+                          }} />
+                          <span><strong>{t.name}</strong><br /><small>{n} {n === 1 ? "vehicle" : "vehicles"}</small></span>
+                          <span className="opt__price">{t.fixedPriceCents != null ? formatMoney(t.fixedPriceCents) : <small>Price to be confirmed</small>}</span>
+                        </label>
+                      );
+                    })}
+                  </fieldset>
+                )}
                 <fieldset className="vgrid">
                   <legend>Choose your vehicle</legend>
                   {result.vehicles.length === 0 && <p className="muted">No vehicle fits {payload.passengers} passengers online. Please contact us for a larger option.</p>}
                   <ul>
-                    {result.vehicles.map((v) => {
+                    {tierVehicles.map((v) => {
                       const q = v.quotes[route?.key ?? "fastest"];
                       const on = vehicleId === v.id;
+                      const vt = v.tiers.find((t) => t.id === tierId) ?? null;
+                      const otherTiers = v.tiers.filter((t) => t.id !== tierId).map((t) => t.name);
                       return (
                         <li key={v.id}>
                           <label className={`vcard${on ? " is-on" : ""}`}>
@@ -291,12 +325,13 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
                             <VehiclePhoto src={v.image} name={v.name} width={640} height={400} sizes="(max-width: 860px) 100vw, 320px" />
                             <span className="vcard__body">
                               <strong className="vcard__name">{v.name}</strong>
-                              <span className="vcard__meta">{v.tier && <span className="tier-badge">{v.tier}</span>}<span>{v.capacityLabel || `Up to ${v.passengers} passengers`}</span></span>
+                              <span className="vcard__meta">{vt && <span className="tier-badge">{vt.name}</span>}<span>{v.capacityLabel || `Up to ${v.passengers} passengers`}</span></span>
+                              {otherTiers.length > 0 && <small className="vcard__sub">Also offered in {otherTiers.join(", ")}</small>}
                               {(v.description || v.similarModels) && <span className="vcard__desc">{v.description || v.similarModels}</span>}
                               <span className="vcard__foot">
                                 <span className="vcard__prices">
-                                  <span className="vcard__price">{v.tierPricing?.fixedPriceCents != null ? formatMoney(v.tierPricing.fixedPriceCents) : <small>Fixed price to be confirmed</small>}</span>
-                                  <small className="vcard__sub">{v.tier ? `Fixed ${v.tier} price, charged online` : "Price on request"}</small>
+                                  <span className="vcard__price">{vt?.fixedPriceCents != null ? formatMoney(vt.fixedPriceCents) : <small>Fixed price to be confirmed</small>}</span>
+                                  <small className="vcard__sub">{vt ? `Fixed ${vt.name} price, charged online` : "Price on request"}</small>
                                   {q && <small className="vcard__sub">Estimated trip fare {formatMoney(q.totalCents, q.currency)} (information only)</small>}
                                 </span>
                                 <span className="vcard__select">{on ? "✓ Selected" : "Select"}</span>
@@ -322,7 +357,7 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
             {result && vehicle && panel === "summary" && (
               <div className="summary">
                 <h3>{vehicle.name}</h3>
-                <p className="muted">{[vehicle.tier, vehicle.capacityLabel].filter(Boolean).join(" · ")}{lastTrip?.returnLeg ? " · Round trip" : ""}</p>
+                <p className="muted">{[tp?.name, vehicle.capacityLabel].filter(Boolean).join(" · ")}{lastTrip?.returnLeg ? " · Round trip" : ""}</p>
                 {seatCount0 > 0 && <p className="muted">{SEAT_CONFIRMATION_NOTE}</p>}
                 <h4 className="summary__h">Charged online</h4>
                 {tp?.fixedPriceCents != null ? (

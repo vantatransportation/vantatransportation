@@ -12,6 +12,7 @@ import { NO_SEATS, SEAT_TYPES } from "@/lib/child-seats";
 import { paymentPlan } from "@/lib/payments";
 import { availableProviders } from "@/lib/payment-providers";
 import { onlineCharge, CHARGE_REASON_TEXT, type OnlineCharge } from "@/lib/tier-pricing";
+import { resolveTierChoice } from "@/lib/vehicle-tiers";
 import type { BookingDetails } from "@/lib/booking-details";
 import { loadFleet, lookupPromo, routeToInput, type RouteKey } from "./service";
 import type { Trip } from "./trip";
@@ -19,6 +20,11 @@ import type { Trip } from "./trip";
 export interface CreateBookingInput {
   trip: Trip;
   vehicleId: string;
+  /**
+   * The service tier the customer chose. It must be one of the vehicle's assigned tiers (checked here on the server, whatever the
+   * browser sent). Optional only when the vehicle has exactly one tier. Quote conversions by staff may omit it for an untiered vehicle.
+   */
+  tierId?: string | null;
   routeKey: RouteKey;
   customer: { name: string; email: string; phone: string };
   notes: string | null;
@@ -63,6 +69,10 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
   const vehicle = fleet.find((v) => v.id === input.vehicleId);
   if (!vehicle) return { ok: false, status: 422, error: "That vehicle is not available. Please choose another." };
   if (vehicle.passengers < trip.passengers) return { ok: false, status: 422, error: "That vehicle does not seat your group. Please choose a larger vehicle." };
+  // The vehicle/tier pair is validated here, from the database: a combination the business does not offer never reaches the bookings table.
+  const choice = resolveTierChoice(vehicle.tiers, input.tierId, { allowUntiered: input.priceOverrideCents != null });
+  if (!choice.ok) return { ok: false, status: 422, error: choice.error };
+  const tier = choice.tier; // the selected tier; its fixed price and Meet & Greet fee drive the online charge
 
   const settings = await loadBookingSettings(db);
   if (trip.meetGreet && !settings.meetGreetEnabled) return { ok: false, status: 422, error: "Airport Meet & Greet is not currently available. Please untick it or contact us." };
@@ -92,7 +102,7 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
   const seatCents = seatRes.line?.cents ?? 0;
   // The online charge is calculated here, from the database, whatever the browser displayed. Quote conversions at an
   // agreed price carry no online charge.
-  const chargeRes = input.priceOverrideCents != null ? null : onlineCharge(vehicle.tierPricing, { meetGreet: wantsMG, addonsCents: seatCents });
+  const chargeRes = input.priceOverrideCents != null ? null : onlineCharge(tier, { meetGreet: wantsMG, addonsCents: seatCents });
   if (chargeRes && !chargeRes.ok && wantsMG && (chargeRes.reason === "meet_greet_unavailable" || chargeRes.reason === "tier_missing")) {
     return { ok: false, status: 422, error: `${CHARGE_REASON_TEXT[chargeRes.reason]} Please untick Meet & Greet or contact us.` };
   }
@@ -147,12 +157,12 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
 
   const ins = await db.from("bookings").insert({
     tracking_code: generateTrackingCode(), // unguessable credential for the public Track page; the sequential reference is NOT one
-    customer_id: customerId, vehicle_id: vehicle.id, tier_id: vehicle.tierId, status: "new_request", trip_type: trip.tripType,
+    customer_id: customerId, vehicle_id: vehicle.id, tier_id: tier?.id ?? null, status: "new_request", trip_type: trip.tripType,
     pickup_address: trip.pickup.text, dropoff_address: trip.dropoff.text, pickup_at: trip.pickupAtIso, passengers: trip.passengers,
     hours: trip.hours, distance_miles: route?.distanceMiles ?? null, duration_minutes: route?.durationMinutes ?? null, avoid_tolls: avoid,
     estimated_fare_cents: totalCents, currency, notes: input.notes, submission_key: input.submissionKey, source_quote_request_id: input.quoteRequestId ?? null,
     child_seats: SEAT_TYPES.filter((t) => (trip.childSeats ?? NO_SEATS)[t] > 0).map((t) => ({ type: t, quantity: (trip.childSeats ?? NO_SEATS)[t] })),
-    child_seat_fee_cents: seatCents, tier_name: vehicle.tier || null, fixed_price_cents: online?.fixedPriceCents ?? null,
+    child_seat_fee_cents: seatCents, tier_name: tier?.name ?? null, fixed_price_cents: online?.fixedPriceCents ?? null,
     meet_greet_selected: wantsMG, meet_greet_fee_cents: online && wantsMG ? online.meetGreetCents : null, online_amount_cents: online?.totalCents ?? null, payment_status: plan ? "unpaid" : "not_required",
     trip_direction: rt ? "round_trip" : "one_way", booking_for: details.bookingFor, luggage_count: details.luggageCount,
     assistance_notes: details.assistanceNotes, pickup_instructions: details.pickupInstructions,

@@ -72,6 +72,12 @@ export const defaultSiteData: SiteData = {
       { title: "Clear booking information", description: "See your estimate, the waiting-time and no-show policies, and what is requested versus confirmed." },
       { title: "Airport transfers and Meet & Greet", description: "Pre-arranged airport rides. Request a driver to meet the passenger inside the airport." },
     ],
+    "family_section.enabled": true,
+    "family_section.title": "Every Passenger Is Family.",
+    "family_section.subtitle": "We Drive Them Like They're Our Own.",
+    "family_section.body": "We believe every passenger deserves the care and attention we'd give our own loved ones. Whether we're transporting someone's grandparents, parents, siblings, or children, we approach every journey with patience, respect, responsibility, and an unwavering commitment to their safety.",
+    "family_section.closing": "Because someone is waiting for them at the other end.",
+    "family_section.image": { url: "", publicId: "", alt: "" },
     pillars: [
       { title: "See the fare first", description: "Enter your trip and get an itemized estimate before you send a request." },
       { title: "Room to negotiate", description: "If a quote does not suit your budget, tell us. We review every request personally." },

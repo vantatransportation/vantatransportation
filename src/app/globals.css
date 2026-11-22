@@ -531,3 +531,58 @@ table { max-width: 100%; }
 .tl__step--current .tl__dot { border-color: var(--silver); box-shadow: 0 0 0 4px rgba(192, 197, 206, .25); }
 .tl__step--ended .tl__dot { border-color: var(--danger); color: var(--danger); background: transparent; box-shadow: none; }
 @media (max-width: 520px) { .tl__step { grid-template-columns: 24px 1fr; gap: .6rem; } .tl__dot { width: 24px; height: 24px; } .tl__step::before { left: 11px; top: 24px; } }
+
+/* ===== Hero background slideshow (admin-controlled; see src/components/HeroSlideshow.tsx) =====
+   The photo layer is absolutely positioned behind the hero content, so it can never shift the layout. Over photographs the hero
+   always uses the dark palette (in both themes) so the heading, buttons and trip form stay readable. */
+.hero--media {
+  --black: #000000; --charcoal: #141517; --graphite: #232528; --dark-grey: #6e737a; --silver: #b9bcc1; --light: #e9eaec; --white: #ffffff;
+  --muted: #b4b8be; --line: rgba(185, 188, 193, 0.28); --on-silver: #0a0a0a; --on-white: #0a0a0a; --focus: #ffffff;
+  background: #050506; color: var(--light);
+}
+.hero--media > .container { position: relative; z-index: 1; pointer-events: none; }
+.hero--media > .container > * { pointer-events: auto; }
+.hero-ss { position: absolute; inset: 0; z-index: 0; overflow: hidden; background: #050506; }
+.hero-ss__layer { position: absolute; inset: 0; }
+.hero-ss__layer img { width: 100%; height: 100%; object-fit: cover; object-position: center; user-select: none; }
+.hero-ss__layer[data-role="idle"] { opacity: 0; visibility: hidden; }
+.hero-ss__layer[data-role="prev"] { z-index: 1; }
+.hero-ss__layer[data-role="active"] { z-index: 2; }
+.hero-ss__overlay { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
+/* Fade: the new image fades in over the previous one (which stays opaque underneath, so the background never shows through). */
+@keyframes hero-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes hero-slide-in { from { transform: translateX(100%); } to { transform: none; } }
+@keyframes hero-slide-out { from { transform: none; } to { transform: translateX(-30%); } }
+@keyframes hero-zoom { from { transform: scale(1); } to { transform: scale(1.08); } }
+.hero-ss[data-changed="1"] .hero-ss__layer[data-role="active"] { animation: hero-in var(--hero-fade, 1200ms) ease both; }
+.hero-ss[data-transition="slide"][data-changed="1"] .hero-ss__layer[data-role="active"] { animation: hero-slide-in var(--hero-fade, 1200ms) ease both; }
+.hero-ss[data-transition="slide"][data-changed="1"] .hero-ss__layer[data-role="prev"] { animation: hero-slide-out var(--hero-fade, 1200ms) ease both; }
+.hero-ss[data-transition="zoom"] .hero-ss__layer[data-role="active"] img { animation: hero-zoom var(--hero-zoom, 8000ms) linear both; }
+.hero-ss[data-transition="zoom"] .hero-ss__layer[data-role="prev"] img { transform: scale(1.08); }
+.hero-ss__dots { position: absolute; z-index: 4; top: 1rem; right: var(--pad); display: flex; gap: .15rem; }
+.hero-ss__dot { width: 28px; height: 28px; padding: 0; border: 0; background: transparent; cursor: pointer; display: grid; place-items: center; }
+.hero-ss__dot::before { content: ""; width: 10px; height: 10px; border-radius: 50%; border: 1px solid #fff; background: transparent; transition: background .2s; }
+.hero-ss__dot[aria-current="true"]::before { background: #fff; }
+.hero-ss__dot:focus-visible { outline: 3px solid #fff; outline-offset: 0; border-radius: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  .hero-ss__layer, .hero-ss__layer img { animation: none !important; transition: none !important; }
+  .hero__mark::after { animation: none; }
+}
+
+/* ===== "Every Passenger Is Family." section =====
+   A bordered dark card: image on top with rounded corners and centred text on phones (as in the design), image beside the text from tablet width. */
+.family__card { display: grid; gap: clamp(1.25rem, 3vw, 2rem); padding: clamp(.9rem, 2.4vw, 1.5rem); background: var(--black); border: 1px solid var(--line); border-radius: 24px; max-width: 1040px; margin-inline: auto; }
+.family__media { border-radius: 20px; overflow: hidden; aspect-ratio: 16 / 9; background: var(--graphite); }
+.family__media img { width: 100%; height: 100%; object-fit: cover; object-position: center; }
+.family__fallback { width: 100%; height: 100%; display: grid; place-items: center; background: radial-gradient(ellipse 70% 80% at 50% 45%, var(--grad-a) 0%, var(--graphite) 100%); }
+.family__fallback img { width: min(52%, 240px); height: auto; opacity: .9; }
+.family__text { display: grid; gap: 1.1rem; text-align: center; align-content: center; padding: .25rem clamp(.25rem, 2vw, 1rem) clamp(.5rem, 2vw, 1.25rem); }
+.family__title { font-size: clamp(1.9rem, 5.2vw, 2.6rem); line-height: 1.12; }
+.family__sub { font-family: var(--font-display); font-size: clamp(1.3rem, 3.8vw, 1.75rem); line-height: 1.3; color: var(--muted); text-wrap: balance; }
+.family__body { font-size: clamp(1rem, 2.4vw, 1.12rem); line-height: 1.75; color: var(--muted); text-wrap: pretty; }
+.family__closing { font-family: var(--font-display); font-size: clamp(1.25rem, 3.6vw, 1.6rem); line-height: 1.3; font-weight: 600; color: var(--white); text-wrap: balance; }
+@media (min-width: 861px) {
+  .family__card { grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); align-items: stretch; }
+  .family__media { aspect-ratio: auto; min-height: 380px; }
+  .family__text { text-align: left; padding: clamp(.5rem, 2vw, 1.5rem) clamp(.5rem, 2vw, 1.5rem) clamp(.5rem, 2vw, 1.5rem) 0; }
+}

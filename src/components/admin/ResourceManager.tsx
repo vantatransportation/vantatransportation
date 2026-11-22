@@ -43,6 +43,11 @@ export default function ResourceManager({ resource, rows, refOptions = {}, tz, c
     if (c.kind === "bool") return <span className={`pill ${v ? "pill--ok" : ""}`}>{v ? "Yes" : "No"}</span>;
     if (c.kind === "money") return fmtMoney(v);
     if (c.kind === "date") return fmtDate(v, tz);
+    if (c.kind === "tags") {
+      // A list (for example a vehicle's tiers). An empty list is flagged because the vehicle is then not offered in any tier.
+      const list = Array.isArray(v) ? v.map(String) : [];
+      return list.length ? <span className="tags">{list.map((t) => <span key={t} className="pill pill--ok">{t}</span>)}</span> : <span className="pill pill--warn" title="Not offered in Calculate Your Fare">None assigned</span>;
+    }
     if (c.kind === "status") return v ? <span className={`pill ${STATUS_CLASS[String(v)] ?? ""}`}>{label(String(v))}</span> : null;
     return v == null ? "" : String(v).length > 90 ? String(v).slice(0, 90) + "…" : String(v);
   };

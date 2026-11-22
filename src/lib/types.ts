@@ -1,6 +1,10 @@
 export interface Category { id: string; name: string; slug: string; description: string; capacityLabel: string; image: string }
 export interface Vehicle {
-  id: string; name: string; categoryName: string; categorySlug: string; tierName: string;
+  id: string; name: string; categoryName: string; categorySlug: string;
+  /** The vehicle's first (lowest-order) service tier, or "" when it has none. Use `tierNames` to show every tier. */
+  tierName: string;
+  /** Every active service tier the vehicle is offered in, in tier order. */
+  tierNames?: string[];
   similarModels: string; description: string; passengers: number; luggage: number | null;
   /** Real photo URL, or null (a branded placeholder is shown). */
   image: string | null; capacityLabel: string; isAvailable: boolean;

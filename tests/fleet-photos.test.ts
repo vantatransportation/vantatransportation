@@ -58,6 +58,7 @@ before(async () => {
     { ...base, name: "Hidden Van", category_id: cat("vans"), tier_id: premium, sort_order: 6, is_active: false, image_url: url("hidden") },
     { ...base, name: "Retired Car", category_id: cat("retired"), tier_id: premium, sort_order: 7, image_url: url("retired") },
   ]);
+  svc.backfillTierAssignments(); // what migration 0010 does to an existing database
   for (const v of svc.t("vehicles")) ids[v.name] = v.id;
   svc.seed("admin_users", [{ user_id: "admin-1", email: "a@x.com" }]);
   content = await import("../src/lib/content.ts");

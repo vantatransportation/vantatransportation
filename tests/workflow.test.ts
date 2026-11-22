@@ -68,6 +68,7 @@ before(async () => {
     { name: "E-Class", category_id: cat, tier_id: tier, passenger_capacity: 4, is_active: true, is_available: true, sort_order: 1, image_url: "/vehicles/sedan.svg" },
     { name: "Sprinter", category_id: cat, tier_id: tierPremium, passenger_capacity: 14, is_active: true, is_available: true, sort_order: 2, image_url: "/vehicles/van.svg" },
   ]);
+  db.backfillTierAssignments(); // what migration 0010 does to an existing database
   ids = { eclass: db.t("vehicles")[0].id, sprinter: db.t("vehicles")[1].id };
   // DRAFT pricing only, to start with.
   db.seed("pricing_configs", [{ vehicle_id: ids.eclass, status: "draft", per_mile: 6, hourly_rate: 100, minimum_fare: 100, base_fare: 0, hourly_included_miles: 20, hourly_included_scope: "booking", hourly_extra_mile_rate: 3, min_hours: 2, currency: "USD" }]);
@@ -696,9 +697,9 @@ test("tiers: exactly three are offered with their fixed price and Meet & Greet f
   assert.deepEqual(d.tiers.map((t: any) => t.name), ["Premium", "Luxury", "Luxury Plus"]);
   assert.deepEqual(d.tiers.map((t: any) => t.meetGreetFeeCents), [2500, 3500, 5000]); // initial approved fees
   const lux = d.vehicles.find((v: any) => v.name === "E-Class"), prem = d.vehicles.find((v: any) => v.name === "Sprinter");
-  assert.equal(lux.tier, "Luxury"); assert.equal(prem.tier, "Premium");
-  assert.deepEqual([lux.tierPricing.fixedPriceCents, lux.tierPricing.meetGreetFeeCents], [15000, 3500]);
-  assert.deepEqual([prem.tierPricing.fixedPriceCents, prem.tierPricing.meetGreetFeeCents], [10000, 2500]);
+  assert.deepEqual(lux.tiers.map((t: any) => t.name), ["Luxury"]); assert.deepEqual(prem.tiers.map((t: any) => t.name), ["Premium"]);
+  assert.deepEqual([lux.tiers[0].fixedPriceCents, lux.tiers[0].meetGreetFeeCents], [15000, 3500]);
+  assert.deepEqual([prem.tiers[0].fixedPriceCents, prem.tiers[0].meetGreetFeeCents], [10000, 2500]);
   assert.ok(ec.totalCents > 0 && ec.totalCents !== 15000); // the mileage-based estimate is still calculated, and is not the fixed price
   assert.ok(!JSON.stringify(ec.lineItems).includes("Fixed"));
 });
@@ -709,7 +710,7 @@ test("Meet & Greet: fee comes from the selected tier on the server; changing tie
   assert.equal(base.meet_greet_selected, false);
   assert.equal(base.online_amount_cents, 15000);                       // deselected: no fee in the charge
 
-  const lux = await makeBooking({ airport: airportBlock, fixedPriceCents: 1, meetGreetCents: 1, onlineAmountCents: 1, tierId: "x" }, { meetGreet: true });
+  const lux = await makeBooking({ airport: airportBlock, fixedPriceCents: 1, meetGreetCents: 1, onlineAmountCents: 1 }, { meetGreet: true }); // a tierId is validated, not trusted: see tests/vehicle-tiers.test.ts
   assert.equal(lux.res.status, 200);
   assert.equal(lux.row.meet_greet_selected, true);
   assert.equal(lux.row.fixed_price_cents, 15000); assert.equal(lux.row.meet_greet_fee_cents, 3500);

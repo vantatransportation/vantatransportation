@@ -2,6 +2,8 @@ import "server-only";
 import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { CLOUDINARY_FOLDER, isCloudinaryUrl } from "@/lib/vehicle-photo";
+import { UPLOAD_FOLDERS, folderForPurpose, parsePurpose, type UploadPurpose } from "@/lib/hero";
+import { familyKey } from "@/lib/family-section";
 
 /** Cloudinary (vehicle photos). The API secret is read only here, on the server, and never sent to a browser. */
 export const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/webp"];
@@ -19,9 +21,12 @@ export function signParams(params: Record<string, string | number>, secret = api
   return createHash("sha1").update(str + secret).digest("hex");
 }
 
-/** Parameters and signature the browser needs to upload ONE image into the vehicles folder. */
-export function createUploadSignature(nowSec = Math.floor(Date.now() / 1000)) {
-  const params = { allowed_formats: ALLOWED_FORMATS, folder: CLOUDINARY_FOLDER, timestamp: nowSec };
+/**
+ * Parameters and signature the browser needs to upload ONE image. The folder is chosen by the server from a fixed list
+ * (vehicles by default, hero slideshow, site images); an unknown purpose falls back to the vehicles folder.
+ */
+export function createUploadSignature(purpose: UploadPurpose | unknown = "vehicles", nowSec = Math.floor(Date.now() / 1000)) {
+  const params = { allowed_formats: ALLOWED_FORMATS, folder: folderForPurpose(parsePurpose(purpose)), timestamp: nowSec };
   return { cloudName: cloudName(), apiKey: apiKey(), ...params, signature: signParams(params) };
 }
 
@@ -54,11 +59,23 @@ export async function destroyAsset(publicId: string): Promise<boolean> {
   }
 }
 
-/** Deletes an asset only if no vehicle still references it. */
+/**
+ * Deletes an asset only if nothing still references it: a vehicle photo, a hero slide or the family-section image.
+ * Only assets inside our own upload folders (vehicles, hero, site) are ever deleted. If a reference check cannot be
+ * completed the asset is kept ("skipped"): an orphaned file costs nothing, a deleted live image breaks the site.
+ */
 export async function releaseAsset(db: SupabaseClient, publicId: string | null | undefined): Promise<"deleted" | "in_use" | "skipped"> {
-  if (!publicId || !publicId.startsWith(`${CLOUDINARY_FOLDER}/`)) return "skipped";
-  const { data } = await db.from("vehicles").select("id").eq("image_public_id", publicId).limit(1);
-  if (data && data.length > 0) return "in_use";
+  if (!publicId || publicId.includes("..") || !UPLOAD_FOLDERS.some((f) => publicId.startsWith(`${f}/`))) return "skipped";
+  const [vehicles, slides, family] = await Promise.all([
+    db.from("vehicles").select("id").eq("image_public_id", publicId).limit(1),
+    db.from("hero_slides").select("id").eq("image_public_id", publicId).limit(1),
+    db.from("site_content").select("value").eq("key", familyKey("image")).maybeSingle(),
+  ]);
+  if (vehicles.data && vehicles.data.length > 0) return "in_use";
+  if (slides.data && slides.data.length > 0) return "in_use";
+  if ((family.data?.value as { publicId?: unknown } | null | undefined)?.publicId === publicId) return "in_use";
+  // The hero table does not exist before migration 0011; that is fine (nothing can reference the asset there).
+  if (vehicles.error) return "skipped";
   return (await destroyAsset(publicId)) ? "deleted" : "skipped";
 }
 

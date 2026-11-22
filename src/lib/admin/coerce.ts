@@ -11,7 +11,7 @@ function coerceField(f: Field, raw: unknown): { ok: true; value: unknown } | { o
   if (f.type === "bool") return { ok: true, value: raw === true || raw === "true" };
   if (blank) {
     if (f.required) return { ok: false, error: `${f.label} is required.` };
-    return { ok: true, value: f.type === "tags" ? [] : null };
+    return { ok: true, value: f.type === "tags" || f.type === "multiref" ? [] : null };
   }
   switch (f.type) {
     case "text":
@@ -47,6 +47,19 @@ function coerceField(f: Field, raw: unknown): { ok: true; value: unknown } | { o
       const s = String(raw);
       if (!UUID_RE.test(s)) return { ok: false, error: `${f.label} is invalid.` };
       return { ok: true, value: s };
+    }
+    case "multiref": {
+      // A list of ids (for example a vehicle's tiers): valid UUIDs only, lower-cased and de-duplicated. Existence is checked by the caller.
+      if (!Array.isArray(raw)) return { ok: false, error: `${f.label} is invalid.` };
+      const ids: string[] = [];
+      for (const item of raw) {
+        const id = String(item);
+        if (!UUID_RE.test(id)) return { ok: false, error: `${f.label} is invalid.` };
+        if (!ids.includes(id.toLowerCase())) ids.push(id.toLowerCase());
+      }
+      if (ids.length > 20) return { ok: false, error: `${f.label} has too many selections.` };
+      if (f.required && ids.length === 0) return { ok: false, error: `${f.label} is required.` };
+      return { ok: true, value: ids };
     }
     case "tags": {
       const list = Array.isArray(raw) ? raw.map(String) : String(raw).split(/[\n,]/);
