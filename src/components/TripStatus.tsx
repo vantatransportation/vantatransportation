@@ -1,5 +1,6 @@
 "use client";
 
+import { driverInitials } from "@/lib/driver/profile";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import ChatPanel from "@/components/chat/ChatPanel";
@@ -73,7 +74,21 @@ export default function TripStatus({ credential, initial, tz }: { credential: Cl
       {trip.driver && (
         <section className="panel" aria-label="Your driver" style={{ marginTop: "1rem" }}>
           <h3>Your driver</h3>
-          <p><strong>{trip.driver.firstName}</strong>{trip.driver.vehicle ? ` · ${trip.driver.vehicle}` : ""}</p>
+          <div style={{ display: "flex", gap: ".85rem", alignItems: "center" }}>
+            {trip.driver.photoUrl
+              ? (
+                <>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img src={trip.driver.photoUrl} alt={`${trip.driver.name}, your driver`} width={64} height={64} style={{ borderRadius: "50%", objectFit: "cover", flex: "none" }} />
+                </>
+              )
+              : <span aria-hidden="true" style={{ width: 64, height: 64, borderRadius: "50%", display: "grid", placeItems: "center", background: "var(--surface-2, #1c1c1c)", fontWeight: 700, flex: "none" }}>{driverInitials(trip.driver.name)}</span>}
+            <div>
+              <p><strong>{trip.driver.name}</strong></p>
+              {trip.driver.vehicle && <p className="muted">{trip.driver.vehicle}</p>}
+              {trip.driver.plate && <p className="muted">License plate: <strong>{trip.driver.plate}</strong></p>}
+            </div>
+          </div>
         </section>
       )}
 
@@ -105,6 +120,7 @@ export default function TripStatus({ credential, initial, tz }: { credential: Cl
         <HelplineButton helpline={trip.helpline} />
       </section>
 
+      {trip.driver && !trip.chatAvailable && !trip.ended && <p className="muted" style={{ marginTop: "1rem" }}>Messaging with your driver opens once they start your ride or are on the way. For anything urgent, use Call Vanta Support.</p>}
       {trip.chatAvailable && <ChatPanel role="customer" endpoint={chatEndpoint} headers={chatHeaders} title="Message your driver" />}
     </>
   );

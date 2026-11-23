@@ -1,7 +1,7 @@
 import { json, readJson, sameOrigin } from "@/lib/http";
 import { getDriverForApi } from "@/lib/driver/auth";
 import { getAdminClient } from "@/lib/supabase/admin";
-import { AWAITING_PAYMENT_MESSAGE, canTransition, DRIVER_FLOW, rideMayProgress, type BookingStatus } from "@/lib/booking-status";
+import { AWAITING_PAYMENT_MESSAGE, START_RIDE_STATUS, canTransition, DRIVER_FLOW, rideMayProgress, startRideWindow, type BookingStatus } from "@/lib/booking-status";
 import { notify } from "@/lib/notify";
 import { BUSINESS_TZ } from "@/lib/config";
 
@@ -31,6 +31,15 @@ export async function POST(request: Request) {
 
   // Server-side payment gate: an assigned driver cannot start or progress a ride until a verified payment confirmed the booking.
   if (!rideMayProgress(b)) return json({ error: AWAITING_PAYMENT_MESSAGE, code: "awaiting_payment" }, 409);
+
+  // Start Ride opens exactly two hours before pickup. The SERVER clock decides; the browser's clock is never consulted.
+  if (to === START_RIDE_STATUS) {
+    const w = startRideWindow(b.pickup_at, Date.now());
+    if (!w.allowed) {
+      const at = w.opensAt ? new Date(w.opensAt).toLocaleString("en-US", { timeZone: BUSINESS_TZ, dateStyle: "medium", timeStyle: "short" }) : null;
+      return json({ error: at ? `You can start this ride from ${at}, two hours before pickup.` : "This ride has no valid pickup time.", code: "too_early", opensAt: w.opensAt }, 409);
+    }
+  }
 
   // The update repeats the conditions, so a refund, cancellation or reassignment that lands between the read and the write wins.
   const upd = await db.from("bookings").update({ status: to }).eq("id", id).eq("driver_id", driver.id).eq("status", from).not("confirmed_at", "is", null).in("payment_status", ["paid", "deposit_paid", "partially_refunded"]).select("id");

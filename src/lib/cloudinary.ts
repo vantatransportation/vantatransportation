@@ -39,8 +39,8 @@ export function validUpload(contentType: unknown, size: unknown): string | null 
 }
 
 /** An assigned photo must be an image in OUR Cloudinary account and folder. Arbitrary URLs are rejected. */
-export function validPhotoRef(url: string, publicId: string): boolean {
-  if (!/^[\w\-./]+$/.test(publicId) || !publicId.startsWith(`${CLOUDINARY_FOLDER}/`) || publicId.includes("..")) return false;
+export function validPhotoRef(url: string, publicId: string, folder: string = CLOUDINARY_FOLDER): boolean {
+  if (!/^[\w\-./]+$/.test(publicId) || !publicId.startsWith(`${folder}/`) || publicId.includes("..")) return false;
   const cn = cloudName();
   return isCloudinaryUrl(url, cn || undefined) && Boolean(cn) && url.includes(`/${publicId}`);
 }
@@ -66,13 +66,16 @@ export async function destroyAsset(publicId: string): Promise<boolean> {
  */
 export async function releaseAsset(db: SupabaseClient, publicId: string | null | undefined): Promise<"deleted" | "in_use" | "skipped"> {
   if (!publicId || publicId.includes("..") || !UPLOAD_FOLDERS.some((f) => publicId.startsWith(`${f}/`))) return "skipped";
-  const [vehicles, slides, family] = await Promise.all([
+  const [vehicles, slides, family, drivers] = await Promise.all([
     db.from("vehicles").select("id").eq("image_public_id", publicId).limit(1),
     db.from("hero_slides").select("id").eq("image_public_id", publicId).limit(1),
     db.from("site_content").select("value").eq("key", familyKey("image")).maybeSingle(),
+    db.from("drivers").select("id").eq("image_public_id", publicId).limit(1),
   ]);
   if (vehicles.data && vehicles.data.length > 0) return "in_use";
   if (slides.data && slides.data.length > 0) return "in_use";
+  if (drivers.data && drivers.data.length > 0) return "in_use";
+  if (drivers.error) return "skipped"; // migration 0012 not applied yet: keep the asset rather than risk deleting a live one
   if ((family.data?.value as { publicId?: unknown } | null | undefined)?.publicId === publicId) return "in_use";
   // The hero table does not exist before migration 0011; that is fine (nothing can reference the asset there).
   if (vehicles.error) return "skipped";
@@ -83,7 +86,7 @@ export async function releaseAsset(db: SupabaseClient, publicId: string | null |
  * Cross-field check for vehicle photos, run after the generic field validation. Mutates `data` so the url and
  * public id always travel together. Returns an error message, or null when fine.
  */
-export function normalizePhotoFields(data: Record<string, unknown>, existing?: Record<string, unknown> | null): string | null {
+export function normalizePhotoFields(data: Record<string, unknown>, existing?: Record<string, unknown> | null, folder: string = CLOUDINARY_FOLDER): string | null {
   if (!("image_url" in data)) { delete data.image_public_id; return null; }
   // Unchanged photo (for example the admin edited another field): keep it even if uploads are not configured right now.
   if (existing && data.image_url === (existing.image_url ?? null) && (data.image_public_id ?? null) === (existing.image_public_id ?? null)) return null;
@@ -91,6 +94,6 @@ export function normalizePhotoFields(data: Record<string, unknown>, existing?: R
   if (url === null) { data.image_public_id = null; return null; } // removed: back to the branded placeholder
   const publicId = typeof data.image_public_id === "string" ? data.image_public_id : "";
   if (typeof url === "string" && url.startsWith("/")) { data.image_public_id = null; return null; } // legacy local illustration
-  if (typeof url !== "string" || !validPhotoRef(url, publicId)) return "The photo must be uploaded through the Cloudinary uploader into the vehicles folder.";
+  if (typeof url !== "string" || !validPhotoRef(url, publicId, folder)) return `The photo must be uploaded through the Cloudinary uploader into the ${folder.split("/").pop()} folder.`;
   return null;
 }

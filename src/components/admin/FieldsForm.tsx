@@ -133,7 +133,7 @@ export default function FieldsForm({ resource, id, initial, refOptions = {}, tz,
                 {(refOptions[f.ref ?? ""] ?? []).map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
               </select>
             ) : f.type === "photo" ? (
-              <PhotoField id={cid} url={String(v)} publicId={String(vals[f.companion ?? ""] ?? "")} onChange={(u, pid) => { set(f.name, u); if (f.companion) set(f.companion, pid); }} />
+              <PhotoField id={cid} purpose={f.purpose ?? "vehicles"} url={String(v)} publicId={String(vals[f.companion ?? ""] ?? "")} onChange={(u, pid) => { set(f.name, u); if (f.companion) set(f.companion, pid); }} />
             ) : f.type === "image" ? (
               <div className="upload">
                 {typeof v === "string" && v && (/* eslint-disable-next-line @next/next/no-img-element */ <img src={v} alt="" />)}

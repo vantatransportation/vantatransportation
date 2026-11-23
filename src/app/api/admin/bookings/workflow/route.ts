@@ -1,3 +1,4 @@
+import { driverDisplayName } from "@/lib/driver/profile";
 import { json, readJson } from "@/lib/http";
 import { guard } from "@/lib/admin/guard";
 import { notify } from "@/lib/notify";
@@ -37,7 +38,7 @@ export async function POST(request: Request) {
   const when = b.pickup_at ? new Date(b.pickup_at).toLocaleString("en-US", { timeZone: BUSINESS_TZ, dateStyle: "medium", timeStyle: "short" }) : undefined;
   const luggage = b.checked_bags != null || b.carry_on_bags != null ? `${b.checked_bags ?? 0} checked, ${b.carry_on_bags ?? 0} carry-on` : undefined;
   const customer = async () => (await g.db.from("customers").select("name,email").eq("id", b.customer_id).maybeSingle()).data as Row | null;
-  const driverOf = async (driverId: string) => (await g.db.from("drivers").select("id,full_name,email,phone,vehicle_plate,is_active").eq("id", driverId).maybeSingle()).data as Row | null;
+  const driverOf = async (driverId: string) => (await g.db.from("drivers").select("id,full_name,first_name,preferred_name,email,phone,vehicle_plate,is_active").eq("id", driverId).maybeSingle()).data as Row | null;
 
   switch (body?.action) {
     case "approve_assign":
@@ -88,13 +89,13 @@ export async function POST(request: Request) {
         const settings = await loadBookingSettings(g.db);
         const payable = availableProviders(settings).length > 0 && b.online_amount_cents != null && b.payment_token && site;
         await notify(g.db, "booking.approved", { type: "booking", id }, {
-          ...common, Driver: firstName(driver.full_name) ?? undefined, // first name only; no driver phone or plate is ever emailed to customers
+          ...common, Driver: driverDisplayName(driver) ?? firstName(driver.full_name) ?? undefined, // preferred or first name; the driver's phone is never emailed to customers
           "Booking page": site && b.tracking_code ? `${site}/track#id=${b.tracking_code}` : undefined, _trackingId: b.tracking_code ?? undefined, "Amount due online": b.online_amount_cents != null ? formatMoney(b.online_amount_cents, b.currency ?? "USD") : undefined,
           _customerEmail: cust.email, _customerName: cust.name, _payUrl: payable ? `${site}/pay/${b.payment_token}` : undefined,
         }, { dedupeSuffix: assignment.data.id });
       }
       if (!isApprove && cust?.email) {
-        await notify(g.db, "booking.reassigned", { type: "booking", id }, { ...common, Driver: firstName(driver.full_name) ?? undefined, _customerEmail: cust.email, _customerName: cust.name }, { dedupeSuffix: assignment.data.id });
+        await notify(g.db, "booking.reassigned", { type: "booking", id }, { ...common, Driver: driverDisplayName(driver) ?? firstName(driver.full_name) ?? undefined, _customerEmail: cust.email, _customerName: cust.name }, { dedupeSuffix: assignment.data.id });
       }
       if (!isApprove && previous) {
         const old = await driverOf(previous);

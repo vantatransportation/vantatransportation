@@ -13,5 +13,5 @@ export default async function Page() {
   const db = getAdminClient();
   const rides = db ? await loadDriverRides(db, driver.id) : [];
   const helpline = db ? await getHelpline(db) : null;
-  return <DriverDashboard name={driver.name} plate={driver.plate} initial={rides} tz={BUSINESS_TZ} helpline={helpline} />;
+  return <DriverDashboard name={driver.name} plate={driver.plate} initial={rides} tz={BUSINESS_TZ} helpline={helpline} serverNow={new Date().toISOString()} />;
 }

@@ -8,6 +8,7 @@ import { resources, toClient } from "@/lib/admin/resources";
 import { BUSINESS_TZ } from "@/lib/config";
 import BookingOps from "@/components/admin/BookingOps";
 import BookingWorkflow from "@/components/admin/BookingWorkflow";
+import BookingConversation, { type ConversationMessage } from "@/components/admin/BookingConversation";
 import { DRIVER_FLOW, canTransition, type BookingStatus } from "@/lib/booking-status";
 import { getHelpline } from "@/lib/helpline";
 import { loadBookingSettings } from "@/lib/policies";
@@ -164,6 +165,7 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
       )}
       <BookingOps id={id} status={b.status} fulfilmentMode={b.fulfilment_mode ?? "review"} partnerName={b.partner_name ?? null} hasMeetGreet={airports.some((a) => a.meet_greet_requested)} meetGreetStatus={(airports.find((a) => a.meet_greet_requested)?.meet_greet_status as string | undefined) ?? null} waitingIncluded={settings.waitingIncludedMinutes} waitingRateApproved={settings.waitingRateCents != null} />
       {b.notes && <div className="panel"><h3>Customer notes</h3><p>{b.notes}</p></div>}
+      <BookingConversation messages={((await db.from("booking_messages").select("id,sender_role,body,quick_reply,created_at,driver_id").eq("booking_id", id).order("created_at", { ascending: true }).limit(500)).data ?? []) as ConversationMessage[]} customerName={(b.customers as { name?: string } | null)?.name ?? "Customer"} driverNames={Object.fromEntries(driverRows.map((d) => [d.id, d.full_name]))} tz={BUSINESS_TZ} />
       <h2>Manage</h2>
       <FieldsForm resource={toClient(resources.bookings)} id={id} initial={b} refOptions={refs} tz={BUSINESS_TZ} only={["vehicle_id", "pickup_address", "dropoff_address", "pickup_at", "passengers", "estimated_fare_cents", "admin_notes"]} />
       <NotesPanel entityType="booking" entityId={id} notes={(notes.data ?? []) as NoteRow[]} tz={BUSINESS_TZ} />

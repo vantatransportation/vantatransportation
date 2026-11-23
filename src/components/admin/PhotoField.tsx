@@ -7,9 +7,10 @@ import { hasRealPhoto, photoUrl } from "@/lib/vehicle-photo";
 const TYPES = ["image/jpeg", "image/png", "image/webp"];
 const MAX = 8 * 1024 * 1024;
 
-type Purpose = "vehicles" | "hero" | "site";
+type Purpose = "vehicles" | "hero" | "site" | "drivers";
 const WORDS: Record<Purpose, { saved: string; removeAsk: string; removed: string; alt: string; empty: string }> = {
   vehicles: { saved: "Uploaded. Save the vehicle to publish this photo.", removeAsk: "Remove this photo? The website will show the branded placeholder after you save.", removed: "Photo removed. Save the vehicle to apply.", alt: "Current vehicle photo", empty: "No photo assigned. A branded placeholder is shown on the website." },
+  drivers: { saved: "Uploaded. Save the driver to publish this picture.", removeAsk: "Remove this picture? Customers will see no photo for this driver after you save.", removed: "Picture removed. Save the driver to apply.", alt: "Current driver picture", empty: "No picture. The driver's initials are shown instead." },
   hero: { saved: "Uploaded.", removeAsk: "Remove this image?", removed: "Image removed.", alt: "Current image", empty: "No image yet." },
   site: { saved: "Uploaded. Save the section to publish this image.", removeAsk: "Remove this image? The section shows the Vanta mark after you save.", removed: "Image removed. Save the section to apply.", alt: "Current image", empty: "No image assigned. The section shows the Vanta mark." },
 };

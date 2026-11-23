@@ -1,6 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { DRIVER_FLOW, canTransition, isOpenForDriver, rideMayProgress, type BookingStatus } from "@/lib/booking-status";
+import { DRIVER_FLOW, canTransition, chatAllowedForStatus, isOpenForDriver, rideMayProgress, startRideWindow, type BookingStatus } from "@/lib/booking-status";
 
 /**
  * What a driver may see about THEIR OWN assigned rides. Deliberately excludes pricing, payment state, tokens, internal notes
@@ -12,6 +12,8 @@ export interface DriverRide {
   passengers: number; checkedBags: number | null; carryOnBags: number | null; assistanceNotes: string | null; pickupInstructions: string | null; notes: string | null;
   contactName: string | null; passengerName: string | null;
   open: boolean; awaitingPayment: boolean; nextStatuses: BookingStatus[];
+  /** ISO time the Start Ride button unlocks (two hours before pickup), computed on the server. Null when the pickup time is invalid. */
+  startOpensAt: string | null; chatOpen: boolean;
 }
 
 const COLS = "id,reference,status,pickup_at,pickup_address,dropoff_address,passengers,checked_bags,carry_on_bags,assistance_notes,pickup_instructions,notes,customer_id,driver_id,confirmed_at,payment_status";
@@ -44,6 +46,7 @@ export async function loadDriverRides(db: SupabaseClient, driverId: string): Pro
       passengerName: open ? pax?.full_name ?? null : null,
       open, awaitingPayment: open && !mayProgress,
       nextStatuses: mayProgress ? DRIVER_FLOW.filter((to) => canTransition("driver", status, to)) : [],
+      startOpensAt: startRideWindow(b.pickup_at, Date.now()).opensAt, chatOpen: chatAllowedForStatus(status),
     } satisfies DriverRide;
   });
 }

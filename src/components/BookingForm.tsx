@@ -161,13 +161,19 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
             <div className="form-grid" style={{ marginTop: ".75rem" }}>
               <div className="field"><label htmlFor="a-airport">Airport</label><input id="a-airport" name="a.airport" defaultValue={airportGuess} required aria-invalid={!!err["airport.airport"]} />{fe("airport.airport")}</div>
               <div className="field"><label htmlFor="a-dir">Arrival or departure</label><select id="a-dir" name="a.direction" defaultValue={pickupIsAirport ? "arrival" : "departure"}><option value="arrival">Arrival (pickup at the airport)</option><option value="departure">Departure (drop-off at the airport)</option></select></div>
-              <div className="field"><label htmlFor="a-airline">Airline</label><input id="a-airline" name="a.airline" /></div>
-              <div className="field"><label htmlFor="a-flight">Flight number</label><input id="a-flight" name="a.flightNumber" /></div>
+              <div className="field"><label htmlFor="a-flight">Flight number</label><input id="a-flight" name="a.flightNumber" autoComplete="off" placeholder="e.g. BA 117" /></div>
               <div className="field"><label htmlFor="a-fdate">Flight date</label><input id="a-fdate" name="a.flightDate" type="date" defaultValue={trip.date} />{fe("airport.flightDate")}</div>
-              <div className="field"><label htmlFor="a-ftime">Flight time</label><input id="a-ftime" name="a.flightTime" type="time" />{fe("airport.flightTime")}</div>
-              <div className="field"><label htmlFor="a-term">Terminal (if known)</label><input id="a-term" name="a.terminal" /></div>
-              <div className="field"><label htmlFor="a-pname">Passenger name for the driver</label><input id="a-pname" name="a.passengerName" /></div>
-              <div className="field full"><label htmlFor="a-inst">Airport pickup instructions (optional)</label><textarea id="a-inst" name="a.instructions" style={{ minHeight: 80 }} /></div>
+              <div className="field full"><label htmlFor="a-pname">Passenger name for the driver</label><input id="a-pname" name="a.passengerName" /></div>
+              <details className="field full" style={{ border: "1px solid var(--line, #333)", borderRadius: 10, padding: ".6rem .85rem" }}>
+                <summary style={{ cursor: "pointer", fontWeight: 600, minHeight: 44, display: "flex", alignItems: "center" }}>Additional information (optional)</summary>
+                <div className="form-grid" style={{ marginTop: ".75rem" }}>
+                  <div className="field full"><label htmlFor="a-inst">Special instructions</label><textarea id="a-inst" name="a.instructions" style={{ minHeight: 80 }} /></div>
+                  {/* Flight details are not looked up automatically (no flight-data provider is configured), so they stay available here if the passenger knows them. */}
+                  <div className="field"><label htmlFor="a-airline">Airline</label><input id="a-airline" name="a.airline" /></div>
+                  <div className="field"><label htmlFor="a-ftime">Flight time</label><input id="a-ftime" name="a.flightTime" type="time" />{fe("airport.flightTime")}</div>
+                  <div className="field"><label htmlFor="a-term">Terminal</label><input id="a-term" name="a.terminal" /></div>
+                </div>
+              </details>
             </div>
           )}
         </fieldset>

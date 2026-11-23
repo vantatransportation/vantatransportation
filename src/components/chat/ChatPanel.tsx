@@ -103,7 +103,7 @@ export default function ChatPanel({ role, endpoint, bookingId, intervalMs = 4000
           </form>
           <p className="muted" style={{ marginTop: ".5rem", fontSize: ".8rem" }}>Messages are saved and can be reviewed by Vanta for support. Do not send card numbers or passwords.</p>
         </>
-      ) : <p className="muted" style={{ marginTop: ".5rem" }}>Chat is closed because this ride is no longer open. Earlier messages are shown above.</p>}
+      ) : <p className="muted" style={{ marginTop: ".5rem" }}>Chat is not open right now. It opens once the driver has started the ride or is on the way, and closes when the ride ends. Earlier messages are shown above.</p>}
       <div role="alert" aria-live="polite">{error && <div className="notice notice--error" style={{ marginTop: ".5rem" }}>{error}</div>}</div>
     </section>
   );

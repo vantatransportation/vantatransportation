@@ -4,19 +4,20 @@ import { STATUS_LABEL, isOpenForDriver, type BookingStatus } from "@/lib/booking
 import { UUID_RE, chatOpen } from "@/lib/chat-server";
 import { buildTimeline, firstName, normalizeTrackingCode, type TimelineStep } from "@/lib/tracking";
 import { getHelpline, type Helpline } from "@/lib/helpline";
+import { driverDisplayName } from "@/lib/driver/profile";
 
 /**
  * What a customer may see about ONE booking, reached with that booking's secret: the tracking ID (public Track page) or the
  * private link token (older emails and the pay flow). Nothing here is ever returned for any other booking.
  *
- * Deliberately NOT included: customer or driver phone numbers and email addresses, the driver's full name and plate,
+ * Driver details shown (only for an assigned, still-open ride): preferred/first name, picture, vehicle and plate. Deliberately NOT included: customer or driver phone numbers and email addresses, the driver's surname,
  * internal admin notes, other passengers, payment provider references, the payment token or any admin data.
  */
 export interface TripView {
   reference: string; status: BookingStatus; statusLabel: string; headline: string; steps: TimelineStep[]; ended: boolean;
   pickupAt: string; pickup: string; dropoff: string | null; stops: string[]; passengers: number;
   vehicle: string | null; vehicleCategory: string | null; tier: string | null;
-  driver: { firstName: string; vehicle: string | null } | null;
+  driver: { name: string; photoUrl: string | null; vehicle: string | null; plate: string | null } | null;
   confirmed: boolean; paymentStatus: string; awaitingPayment: boolean;
   chatOpen: boolean; chatAvailable: boolean; terminalNote: string | null;
   helpline: Helpline | null;
@@ -48,9 +49,9 @@ export async function loadTrip(db: SupabaseClient, cred: Credential | string): P
   let driver: TripView["driver"] = null;
   // Only a first name and the vehicle description, and only while a driver is assigned and the ride is still to be done.
   if (b.driver_id && open) {
-    const { data: d } = await db.from("drivers").select("full_name,vehicle_description").eq("id", b.driver_id).maybeSingle();
-    const fn = d ? firstName(d.full_name) : null;
-    if (fn) driver = { firstName: fn, vehicle: d?.vehicle_description ?? null };
+    const { data: d } = await db.from("drivers").select("full_name,first_name,preferred_name,vehicle_description,vehicle_plate,image_url").eq("id", b.driver_id).maybeSingle();
+    const nm = d ? driverDisplayName(d) ?? firstName(d.full_name) : null;
+    if (nm) driver = { name: nm, photoUrl: d?.image_url ?? null, vehicle: d?.vehicle_description ?? null, plate: d?.vehicle_plate ?? null };
   }
   const stops = await db.from("booking_stops").select("position,address").eq("booking_id", b.id).order("position");
   const released = Boolean(b.payment_released_at && b.driver_id);
@@ -68,7 +69,7 @@ export async function loadTrip(db: SupabaseClient, cred: Credential | string): P
       stops: (stops.data ?? []).map((s: Record<string, unknown>) => String(s.address)), passengers: b.passengers,
       vehicle: veh?.name ?? null, vehicleCategory: veh?.vehicle_categories?.name ?? null, tier: b.tier_name ?? null, driver,
       confirmed, paymentStatus: String(b.payment_status), awaitingPayment: released && open && !settled && !confirmed,
-      chatOpen: chatOpen(b), chatAvailable: Boolean(b.driver_id) && open,
+      chatOpen: chatOpen(b), chatAvailable: chatOpen(b),
       terminalNote: status === "rejected" ? (b.rejection_reason ?? "We were unable to accept this request.") : status === "cancelled" ? (b.cancellation_reason ?? "This booking was cancelled.") : null,
       helpline: await getHelpline(db),
       charges: c.kind === "token" && hasAmount ? { fixedPriceCents: b.fixed_price_cents, rushCents: b.rush_surcharge_cents ?? 0, tipCents: b.tip_cents ?? 0, meetGreetCents: b.meet_greet_selected ? b.meet_greet_fee_cents ?? 0 : 0, seatCents: b.child_seat_fee_cents ?? 0, totalCents: b.online_amount_cents, currency: b.currency ?? "USD" } : null,

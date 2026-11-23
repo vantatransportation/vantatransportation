@@ -1113,7 +1113,7 @@ test("tracking response shows real progress and contains no private data", async
   await approve(b);
   t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
   assert.equal(t.headline, "Approved: awaiting payment"); assert.equal(t.awaitingPayment, true); assert.equal(t.confirmed, false);
-  assert.equal(t.driver.firstName, "Dana"); assert.equal(t.driver.vehicle, "Black Escalade");
+  assert.equal(t.driver.name, "Dana"); assert.equal(t.driver.vehicle, "Black Escalade"); assert.ok(!("phone" in t.driver));
   assert.equal(t.helpline.display, "+1 555-010-0199");
   await pay(b.row.payment_token);
   await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", db.t("payments").find((x: any) => x.booking_id === b.row.id), {}, "evt_track_1")));
@@ -1123,7 +1123,8 @@ test("tracking response shows real progress and contains no private data", async
   assert.equal(t.steps.find((s: any) => s.state === "current").key, "on_the_way");
   assert.ok(t.steps.filter((s: any) => s.state === "done").map((s: any) => s.key).includes("confirmed"));
   const raw = JSON.stringify(t);
-  for (const secret of ["4105550100", "ann@example.com", "INTERNAL-NOTE-SECRET", "4105550999", "dana@example.com", "VT-123", b.row.payment_token, "Dana Driver", "stripe", "cs_test_", "tel:"]) assert.ok(!raw.includes(secret), secret);
+  for (const secret of ["4105550100", "ann@example.com", "INTERNAL-NOTE-SECRET", "4105550999", "dana@example.com", b.row.payment_token, "Dana Driver", "stripe", "cs_test_", "tel:"]) assert.ok(!raw.includes(secret), secret);
+  assert.equal(t.driver.plate, "VT-123");                                          // the assigned driver's plate is now shown to the booking's customer (client-approved)
   assert.equal(t.charges, null); assert.equal(t.payable, false);                  // no amounts or pay button for the public tracking credential
   await wf(b.row.id, { action: "cancel", reason: "Changed plans" });
   t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
@@ -1153,6 +1154,11 @@ test("chat: only the booking's customer (tracking ID) and its CURRENTLY assigned
     const chatBefore = await trackChat("GET", a.row.tracking_code, undefined, "10.7.0.1");
     assert.equal(chatBefore.status, 404);                                       // no driver assigned yet: chat is not available
     await approve(a, d1.id); await approve(other, d2.id);
+    // Assigned but the driver has not started the ride or left for pickup: chat is closed for BOTH sides, enforced by the API (not just the UI).
+    assert.equal((await trackChat("POST", a.row.tracking_code, { body: "hello early", clientId: "client-0000-early" }, "10.7.0.9")).status, 409);
+    assert.equal(db.t("booking_messages").filter((m: any) => m.booking_id === a.row.id).length, 0);
+    a.row.status = "getting_ready"; other.row.status = "getting_ready"; // the driver has started the ride: chat opens
+    assert.equal((await trackChat("GET", a.row.tracking_code, undefined, "10.7.0.8")).status, 200);
 
     const drvPost = (token: string, bookingId: string, body: unknown, clientId: string) => asDriver(token, () => routes.driverMessages.POST(post("/api/driver/messages", { bookingId, body, clientId })));
     const drvGet = (token: string, bookingId: string) => asDriver(token, () => routes.driverMessages.GET(new Request(`http://site.test/api/driver/messages?booking=${bookingId}`, { headers: HDR() })));
@@ -1179,6 +1185,9 @@ test("chat: only the booking's customer (tracking ID) and its CURRENTLY assigned
     assert.equal((await (await drvGet("drv1", a.row.id)).json()).messages.length, 1);
     assert.equal((await drvGet("drv2", a.row.id)).status, 404);
     assert.equal((await drvPost("drv2", a.row.id, "sneaky", "client-0005-aaaa")).status, 404);
+    a.row.status = "assigned"; // pushed back (for example by an admin): chat closes again at once
+    assert.equal((await drvPost("drv1", a.row.id, "too early", "client-0006-early")).status, 409);
+    a.row.status = "getting_ready";
     assert.equal((await drvPost("drv1", a.row.id, "Be there in 3 minutes", "client-0006-aaaa")).status, 200);
     assert.equal((await drvPost("nobody", a.row.id, "hello", "client-0007-aaaa")).status, 401);
 
@@ -1189,7 +1198,7 @@ test("chat: only the booking's customer (tracking ID) and its CURRENTLY assigned
     assert.equal((await drvGet("drv2", a.row.id)).status, 200);
     assert.equal((await drvPost("drv2", a.row.id, "I am your new driver", "client-0009-aaaa")).status, 200);
     const t = (await (await trackPost(a.row.tracking_code, "10.7.2.1")).json()).trip;
-    assert.equal(t.driver.firstName, "Eli");
+    assert.equal(t.driver.name, "Eli");
     assert.equal(brevoTo("dana@example.com").filter((c) => JSON.stringify(c.body).includes(a.row.reference)).length >= 1, true); // old driver was told
 
     // A closed booking stops accepting messages.
@@ -1256,12 +1265,20 @@ test("payment gate: a driver cannot progress a ride until a verified payment set
     await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p2, {}, "evt_gate_ok")));
     assert.ok(b.row.confirmed_at); assert.equal(b.row.status, "confirmed");
     assert.equal((await step("drv2", b.row.id, "completed")).status, 409);   // cannot skip steps
+    // Start Ride opens exactly two hours before pickup, decided by the server clock. A direct API call before that is refused.
+    const HOUR = 3600_000;
+    b.row.pickup_at = new Date(Date.now() + 2 * HOUR + 120_000).toISOString();   // 2h 02m away: still locked
+    const early = await step("drv2", b.row.id, "getting_ready");
+    assert.equal(early.status, 409); assert.equal((await early.json()).code, "too_early"); assert.equal(b.row.status, "confirmed");
+    assert.equal((await mine(b.row.id)) === undefined, true); // (this driver is drv2, so the ride belongs to d2, not d1)
+    b.row.pickup_at = new Date(Date.now() + 2 * HOUR - 60_000).toISOString();    // 1h 59m away: open
     for (const to of ["getting_ready", "on_the_way", "arrived", "picked_up", "completed"]) assert.equal((await step("drv2", b.row.id, to)).status, 200, to);
     assert.equal(b.row.status, "completed");
 
     // 7. Refunded after confirmation: progress stops until an admin resolves it; cancelled and declined never progress.
     const r = await flow(); await approve(r, d2.id); await pay(r.row.payment_token);
     await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", db.t("payments").find((x: any) => x.booking_id === r.row.id), {}, "evt_gate_r")));
+    r.row.pickup_at = new Date(Date.now() + 3600_000).toISOString(); // inside the two-hour start window
     assert.equal((await step("drv2", r.row.id, "getting_ready")).status, 200);
     r.row.payment_status = "refunded";
     assert.equal((await step("drv2", r.row.id, "on_the_way")).status, 409);

@@ -7,10 +7,11 @@ import { CLOUDINARY_FOLDER, isCloudinaryUrl } from "./vehicle-photo.ts";
 export const HERO_FOLDER = "vanta/hero";
 /** Family-section (and other site) images. */
 export const SITE_FOLDER = "vanta/site";
-export const UPLOAD_FOLDERS = [CLOUDINARY_FOLDER, HERO_FOLDER, SITE_FOLDER] as const;
-export type UploadPurpose = "vehicles" | "hero" | "site";
-export const parsePurpose = (v: unknown): UploadPurpose => (v === "hero" || v === "site" ? v : "vehicles");
-export const folderForPurpose = (p: UploadPurpose): string => (p === "hero" ? HERO_FOLDER : p === "site" ? SITE_FOLDER : CLOUDINARY_FOLDER);
+export const DRIVERS_FOLDER = "vanta/drivers";
+export const UPLOAD_FOLDERS = [CLOUDINARY_FOLDER, HERO_FOLDER, SITE_FOLDER, DRIVERS_FOLDER] as const;
+export type UploadPurpose = "vehicles" | "hero" | "site" | "drivers";
+export const parsePurpose = (v: unknown): UploadPurpose => (v === "hero" || v === "site" || v === "drivers" ? v : "vehicles");
+export const folderForPurpose = (p: UploadPurpose): string => (p === "hero" ? HERO_FOLDER : p === "site" ? SITE_FOLDER : p === "drivers" ? DRIVERS_FOLDER : CLOUDINARY_FOLDER);
 
 export const MAX_HERO_SLIDES = 12;
 export const TRANSITIONS = ["fade", "slide", "zoom"] as const;

@@ -2,12 +2,13 @@ import "server-only";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { getAdminClient } from "@/lib/supabase/admin";
+import { driverDisplayName } from "@/lib/driver/profile";
 
 /** Separate cookies from the admin session: signing in as a driver never grants admin access, and vice versa. */
 export const DRIVER_ACCESS_COOKIE = "vd_at";
 export const DRIVER_REFRESH_COOKIE = "vd_rt";
 
-export interface DriverUser { id: string; userId: string; name: string; email: string; phone: string | null; plate: string | null }
+export interface DriverUser { id: string; userId: string; name: string; displayName: string; email: string; phone: string | null; plate: string | null; vehicle: string | null; location: string | null; preferredArea: string | null; imageUrl: string | null }
 export type DriverState = { status: "ok"; driver: DriverUser } | { status: "expired" } | { status: "none" };
 
 /** Valid Supabase session AND a drivers row linked to that user AND the driver is active. Deactivating a driver cuts access immediately. */
@@ -20,9 +21,9 @@ export async function getDriverState(): Promise<DriverState> {
   if (!token) return refreshable;
   const { data, error } = await db.auth.getUser(token);
   if (error || !data.user) return refreshable;
-  const { data: d } = await db.from("drivers").select("id,user_id,full_name,email,phone,vehicle_plate,is_active").eq("user_id", data.user.id).maybeSingle();
+  const { data: d } = await db.from("drivers").select("id,user_id,full_name,first_name,preferred_name,email,phone,vehicle_plate,vehicle_description,location,preferred_area,image_url,is_active").eq("user_id", data.user.id).maybeSingle();
   if (!d || d.is_active === false) return { status: "none" };
-  return { status: "ok", driver: { id: d.id, userId: d.user_id, name: d.full_name, email: d.email, phone: d.phone ?? null, plate: d.vehicle_plate ?? null } };
+  return { status: "ok", driver: { id: d.id, userId: d.user_id, name: d.full_name, displayName: driverDisplayName(d) ?? d.full_name, email: d.email, phone: d.phone ?? null, plate: d.vehicle_plate ?? null, vehicle: d.vehicle_description ?? null, location: d.location ?? null, preferredArea: d.preferred_area ?? null, imageUrl: d.image_url ?? null } };
 }
 
 export async function getDriverForApi(): Promise<DriverUser | null> {

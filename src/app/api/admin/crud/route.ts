@@ -4,6 +4,8 @@ import { resources } from "@/lib/admin/resources";
 import { coerceValues } from "@/lib/admin/coerce";
 import { notify } from "@/lib/notify";
 import { normalizePhotoFields, releaseAsset } from "@/lib/cloudinary";
+import { DRIVERS_FOLDER } from "@/lib/hero";
+import { deriveDriverColumns, driverProfileProblem } from "@/lib/driver/profile";
 import { PUBLIC_TABLES, revalidateSite } from "@/lib/admin/revalidate";
 import { validateTierPricing } from "@/lib/tier-pricing";
 import { applyVehicleTiers, checkTierSelection } from "@/lib/vehicle-tiers";
@@ -78,6 +80,11 @@ export async function POST(request: Request) {
     const tierPlan = await planVehicleTiers(db, resource.table, c.data);
     if (tierPlan instanceof Response) return tierPlan;
     if (resource.table === "drivers" && !EMAIL_RE.test(String(c.data.email ?? ""))) return json({ error: "Enter a valid driver email address." }, 422);
+    if (resource.table === "drivers") {
+      const bad = driverProfileProblem(c.data) ?? normalizePhotoFields(c.data, null, DRIVERS_FOLDER);
+      if (bad) return json({ error: bad }, 422);
+      Object.assign(c.data, deriveDriverColumns(c.data)); // full_name and vehicle_description stay in step with the new fields
+    }
     if (resource.table === "pricing_configs" && c.data.status === "active") await archiveOtherActive(db, String(c.data.vehicle_id));
     const ins = await db.from(resource.table).insert(c.data).select("id").single();
     if (ins.error) return dbError(ins.error);
@@ -114,6 +121,12 @@ export async function POST(request: Request) {
     }
     if (resource.table === "vehicles") { const bad = normalizePhotoFields(c.data, before.data); if (bad) return json({ error: bad }, 422); }
     if (resource.table === "drivers" && "email" in c.data && !EMAIL_RE.test(String(c.data.email ?? ""))) return json({ error: "Enter a valid driver email address." }, 422);
+    if (resource.table === "drivers") {
+      const merged = { ...before.data, ...c.data };
+      const bad = driverProfileProblem(merged) ?? normalizePhotoFields(c.data, before.data, DRIVERS_FOLDER);
+      if (bad) return json({ error: bad }, 422);
+      Object.assign(c.data, deriveDriverColumns(merged));
+    }
     // Deactivating a driver who still has open rides is allowed (they lose access at once); admins reassign those rides from the booking page.
     if (resource.table === "vehicle_tiers") { const bad = validateTierPricing(c.data); if (bad) return json({ error: bad }, 422); }
 
@@ -137,7 +150,7 @@ export async function POST(request: Request) {
     await log("update", id);
     publish();
     // A replaced or removed photo is deleted from Cloudinary only when no other vehicle still uses it.
-    if (resource.table === "vehicles" && "image_public_id" in c.data && before.data.image_public_id && before.data.image_public_id !== c.data.image_public_id) await releaseAsset(db, before.data.image_public_id);
+    if ((resource.table === "vehicles" || resource.table === "drivers") && "image_public_id" in c.data && before.data.image_public_id && before.data.image_public_id !== c.data.image_public_id) await releaseAsset(db, before.data.image_public_id);
 
     // Customer emails on booking status changes. Confirmed, cancelled and no-show are always sent;
     // other statuses only when the "every status change" setting is on. Deduplicated per status.

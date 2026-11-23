@@ -12,5 +12,5 @@ export async function GET() {
   if (!driver) return json({ error: "Please sign in again." }, 401);
   const db = getAdminClient();
   if (!db) return json({ error: "Database is not configured." }, 503);
-  return json({ rides: await loadDriverRides(db, driver.id), plate: driver.plate });
+  return json({ rides: await loadDriverRides(db, driver.id), plate: driver.plate, serverNow: new Date().toISOString() });
 }

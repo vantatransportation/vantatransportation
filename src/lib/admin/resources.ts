@@ -19,6 +19,8 @@ export interface Field {
   hidden?: boolean;
   /** For type "photo": the field that stores the Cloudinary public id. */
   companion?: string;
+  /** For type "photo": the upload folder purpose (defaults to vehicles). */
+  purpose?: "vehicles" | "drivers";
   /** Shown for filtering and display only. NEVER writable through the generic editor: it changes only through checked workflow actions. */
   workflow?: boolean;
 }
@@ -116,19 +118,26 @@ export const resources: Record<string, Resource> = {
   },
   drivers: {
     slug: "drivers", table: "drivers", title: "Drivers", singular: "driver",
-    select: "id,full_name,email,phone,vehicle_plate,vehicle_description,is_active,user_id,notes,created_at", orderBy: "full_name", canCreate: true, canDelete: false,
-    searchPaths: ["full_name", "email", "vehicle_plate"],
+    select: "id,full_name,first_name,last_name,preferred_name,email,vehicle_year,vehicle_make,vehicle_model,vehicle_plate,vehicle_description,location,preferred_area,image_url,image_public_id,is_active,user_id,notes,created_at", orderBy: "full_name", canCreate: true, canDelete: false,
+    searchPaths: ["full_name", "preferred_name", "email", "vehicle_plate", "location"],
     fields: [
-      { name: "full_name", label: "Full name", type: "text", required: true },
+      { name: "first_name", label: "First name", type: "text", required: true },
+      { name: "last_name", label: "Last name", type: "text", required: true },
+      { name: "preferred_name", label: "Preferred name (optional; shown to customers instead of the first name)", type: "text" },
       { name: "email", label: "Email (used for sign-in and assignment emails)", type: "text", required: true },
-      { name: "phone", label: "Phone (staff only, never shown to customers)", type: "text" },
-      { name: "vehicle_plate", label: "Vehicle plate", type: "text" },
-      { name: "vehicle_description", label: "Vehicle (shown to the customer once assigned)", type: "text" },
+      { name: "vehicle_year", label: "Car year", type: "number", required: true, step: 1 },
+      { name: "vehicle_make", label: "Car make", type: "text", required: true },
+      { name: "vehicle_model", label: "Car model", type: "text", required: true },
+      { name: "vehicle_plate", label: "License plate", type: "text", required: true },
+      { name: "location", label: "Location", type: "text", required: true },
+      { name: "preferred_area", label: "Preferred area (city and/or ZIP code)", type: "text" },
+      { name: "image_url", label: "Driver picture (optional)", type: "photo", companion: "image_public_id", purpose: "drivers", help: "A clear head-and-shoulders photo. Shown to the customer once the driver is assigned. Without one, the driver's initials are shown." },
+      { name: "image_public_id", label: "Photo ID", type: "text", hidden: true },
       { name: "notes", label: "Internal notes", type: "textarea" },
       { name: "is_active", label: "Active (can be assigned and can sign in)", type: "bool" },
     ],
-    columns: [{ label: "Driver", path: "full_name" }, { label: "Email", path: "email" }, { label: "Vehicle", path: "vehicle_description" }, { label: "Plate", path: "vehicle_plate" }, { label: "Active", path: "is_active", kind: "bool" }],
-    refLabel: (r) => String(r.full_name ?? ""),
+    columns: [{ label: "Driver", path: "full_name" }, { label: "Email", path: "email" }, { label: "Vehicle", path: "vehicle_description" }, { label: "Plate", path: "vehicle_plate" }, { label: "Location", path: "location" }, { label: "Active", path: "is_active", kind: "bool" }],
+    refLabel: (r) => String(r.preferred_name || r.full_name || ""),
   },
   standards: {
     slug: "standards", table: "vehicle_standards", title: "Vehicle standards", singular: "standard",

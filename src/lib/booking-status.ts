@@ -64,3 +64,21 @@ export function rideMayProgress(b: { confirmed_at?: string | null; payment_statu
   return Boolean(b.confirmed_at) && PAID_STATES.includes(String(b.payment_status));
 }
 export const AWAITING_PAYMENT_MESSAGE = "This ride cannot start yet: the customer's payment has not been confirmed. You will be able to continue as soon as it is.";
+
+/**
+ * "Start Ride" is the driver's first progress step on a ride (status getting_ready). It opens exactly two hours before the
+ * scheduled pickup. Leaving for pickup (on_the_way) is a separate step and is NOT time-restricted here.
+ * Both the driver API (authoritative, uses the SERVER clock) and the dashboard (display only) use this one function.
+ */
+export const START_RIDE_STATUS: BookingStatus = "getting_ready";
+export const START_WINDOW_MS = 2 * 60 * 60 * 1000;
+export function startRideWindow(pickupAt: string | Date | null | undefined, nowMs: number): { allowed: boolean; opensAt: string | null } {
+  const t = pickupAt ? new Date(pickupAt).getTime() : NaN;
+  if (!Number.isFinite(t)) return { allowed: false, opensAt: null };
+  const opens = t - START_WINDOW_MS;
+  return { allowed: nowMs >= opens, opensAt: new Date(opens).toISOString() };
+}
+
+/** Chat between customer and driver opens once the driver has started the ride or is on the way, and closes with the ride. */
+export const CHAT_STATES: BookingStatus[] = ["getting_ready", "on_the_way", "arrived", "picked_up", "in_progress"];
+export const chatAllowedForStatus = (s: string) => (CHAT_STATES as string[]).includes(s);
