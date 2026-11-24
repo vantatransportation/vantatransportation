@@ -62,11 +62,11 @@ export function validateBookingDetails(body: Record<string, unknown>): DetailsRe
     if (name.length < 2) fields["airport.airport"] = "Enter the airport.";
     const flightDate = clean(a.flightDate, 10);
     if (flightDate && !/^\d{4}-\d{2}-\d{2}$/.test(flightDate)) fields["airport.flightDate"] = "Enter a valid flight date.";
-    const flightTime = clean(a.flightTime, 5);
-    if (flightTime && !/^\d{2}:\d{2}$/.test(flightTime)) fields["airport.flightTime"] = "Enter a valid flight time.";
+    // Airline, flight time and terminal are no longer collected from customers (no flight-data provider is configured, so nothing is looked up).
+    // Existing database columns and historical airport records are untouched; new bookings simply leave them empty.
     airport = {
-      airport: name, airline: opt(a.airline, 80), flightNumber: opt(a.flightNumber, 12), direction: a.direction === "departure" ? "departure" : "arrival",
-      flightDate: flightDate || null, flightTime: flightTime || null, terminal: opt(a.terminal, 40), passengerName: opt(a.passengerName, 120),
+      airport: name, airline: null, flightNumber: opt(a.flightNumber, 12), direction: a.direction === "departure" ? "departure" : "arrival",
+      flightDate: flightDate || null, flightTime: null, terminal: null, passengerName: opt(a.passengerName, 120),
       pickupInstructions: opt(a.pickupInstructions, 500), meetGreet: a.meetGreet === true,
     };
   }

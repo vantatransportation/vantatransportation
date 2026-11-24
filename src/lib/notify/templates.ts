@@ -97,7 +97,7 @@ export function buildNotification(event: NotifyEvent, d: Data): BuiltNotificatio
         emails: d._customerEmail ? [{
           audience: "customer", to: customerTo(d), subject: `Your Vanta booking is confirmed (${v(d, "Reference")})`, heading: "Your booking is confirmed",
           intro: "Thank you. Your payment was received and verified, and your booking is confirmed. You can follow your ride with the tracking ID below.",
-          fields: pick(withTracking(d), ["Reference", "Tracking ID", "Pickup", "Stops", "Destination", "When", "Vehicle", "Tier", "Amount paid", "Payment status", "Remaining online balance", "Vanta support phone"]),
+          fields: pick(withTracking(d), ["Reference", "Tracking ID", "Driver", "Driver vehicle", "License plate", "Pickup", "Stops", "Destination", "When", "Vehicle", "Tier", "Amount paid", "Payment status", "Remaining online balance", "Vanta support phone"]),
           footnote: "Keep your tracking ID private: anyone who has it can see this booking's progress. For help with your ride, call Vanta support. We do not share driver or customer phone numbers; you can message your driver from the tracking page.",
           ...(d._trackUrl ? { ctaLabel: "Track your ride", ctaUrl: d._trackUrl } : {}),
         }] : [],
@@ -108,8 +108,8 @@ export function buildNotification(event: NotifyEvent, d: Data): BuiltNotificatio
         admin: null,
         emails: d._customerEmail ? [{
           audience: "customer", to: customerTo(d), subject: `Your Vanta booking is approved (${v(d, "Reference")})`, heading: "Your booking is approved",
-          intro: d._payUrl ? "Good news: your booking has been approved and a driver has been assigned. To confirm it, complete payment online using the secure link below. Your booking is confirmed only after your payment is received and verified." : "Good news: your booking has been approved and a driver has been assigned. We will arrange payment with you directly; your booking is confirmed once payment is received.",
-          fields: pick(withTracking(d), ["Reference", "Tracking ID", "When", "Pickup", "Destination", "Driver", "Amount due online"]),
+          intro: d._payUrl ? "Good news: your booking has been approved and a driver has been assigned. To confirm it, complete payment online using the secure link below. Your booking is confirmed only after your payment is received and verified, and we will then email you your driver's name, vehicle and license plate." : "Good news: your booking has been approved and a driver has been assigned. We will arrange payment with you directly; your booking is confirmed once payment is received, and we will then email you your driver's details.",
+          fields: pick(withTracking(d), ["Reference", "Tracking ID", "When", "Pickup", "Destination", "Amount due online"]),
           ...(ctaUrl ? { ctaLabel: d._payUrl ? "Pay online" : "View your booking", ctaUrl } : {}),
         }] : [],
       };
@@ -119,8 +119,8 @@ export function buildNotification(event: NotifyEvent, d: Data): BuiltNotificatio
         admin: null,
         emails: d._customerEmail ? [{
           audience: "customer", to: customerTo(d), subject: `Your driver has changed (${v(d, "Reference")})`, heading: "Your driver has changed",
-          intro: "A different driver has been assigned to your booking. Your pickup details have not changed.",
-          fields: pick(d, ["Reference", "When", "Pickup", "Destination", "Driver"]),
+          intro: "A different driver has been assigned to your confirmed booking. Your pickup details have not changed.",
+          fields: pick(d, ["Reference", "When", "Pickup", "Destination", "Driver", "Driver vehicle", "License plate"]),
         }] : [],
       };
     case "booking.rejected":

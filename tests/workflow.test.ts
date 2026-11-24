@@ -90,6 +90,10 @@ before(async () => {
     driverMessages: await import("../src/app/api/driver/messages/route.ts"),
     driverStatusRoute: await import("../src/app/api/driver/status/route.ts"),
     trackChat: await import("../src/app/api/track/messages/route.ts"),
+    trackRating: await import("../src/app/api/track/rating/route.ts"),
+    driverRate: await import("../src/app/api/driver/rate-customer/route.ts"),
+    adminPoints: await import("../src/app/api/admin/drivers/points/route.ts"),
+    adminVisibility: await import("../src/app/api/admin/drivers/visibility/route.ts"),
     feed: await import("../src/app/api/admin/notifications/feed/route.ts"),
     read: await import("../src/app/api/admin/notifications/read/route.ts"),
     sign: await import("../src/app/api/admin/cloudinary/sign/route.ts"),
@@ -1113,10 +1117,12 @@ test("tracking response shows real progress and contains no private data", async
   await approve(b);
   t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
   assert.equal(t.headline, "Approved: awaiting payment"); assert.equal(t.awaitingPayment, true); assert.equal(t.confirmed, false);
-  assert.equal(t.driver.name, "Dana"); assert.equal(t.driver.vehicle, "Black Escalade"); assert.ok(!("phone" in t.driver));
+  assert.equal(t.driver, null);                                                   // no driver details until the booking is confirmed by verified payment
   assert.equal(t.helpline.display, "+1 555-010-0199");
   await pay(b.row.payment_token);
   await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", db.t("payments").find((x: any) => x.booking_id === b.row.id), {}, "evt_track_1")));
+  t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
+  assert.equal(t.driver.name, "Dana"); assert.equal(t.driver.vehicle, "Black Escalade"); assert.equal(t.driver.plate, "VT-123"); assert.ok(!("phone" in t.driver)); // confirmed + paid + assigned: now shown
   await wf(b.row.id, { action: "advance", status: "on_the_way" });
   t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
   assert.equal(t.headline, "Your driver is on the way"); assert.equal(t.confirmed, true);
@@ -1157,7 +1163,7 @@ test("chat: only the booking's customer (tracking ID) and its CURRENTLY assigned
     // Assigned but the driver has not started the ride or left for pickup: chat is closed for BOTH sides, enforced by the API (not just the UI).
     assert.equal((await trackChat("POST", a.row.tracking_code, { body: "hello early", clientId: "client-0000-early" }, "10.7.0.9")).status, 409);
     assert.equal(db.t("booking_messages").filter((m: any) => m.booking_id === a.row.id).length, 0);
-    a.row.status = "getting_ready"; other.row.status = "getting_ready"; // the driver has started the ride: chat opens
+    for (const x of [a, other]) { x.row.status = "getting_ready"; x.row.confirmed_at = new Date().toISOString(); x.row.payment_status = "paid"; } // paid and confirmed, and the driver has started the ride: chat opens
     assert.equal((await trackChat("GET", a.row.tracking_code, undefined, "10.7.0.8")).status, 200);
 
     const drvPost = (token: string, bookingId: string, body: unknown, clientId: string) => asDriver(token, () => routes.driverMessages.POST(post("/api/driver/messages", { bookingId, body, clientId })));
@@ -1300,4 +1306,159 @@ test("pure rule: rideMayProgress", async () => {
   assert.equal(rideMayProgress(ok), true);
   assert.equal(rideMayProgress({ ...ok, payment_status: "deposit_paid" }), true);
   for (const bad of [{ ...ok, confirmed_at: null }, { ...ok, payment_status: "unpaid" }, { ...ok, payment_status: "failed" }, { ...ok, payment_status: "pending" }, { ...ok, payment_status: "refunded" }, { ...ok, payment_status: "review" }, { ...ok, status: "cancelled" }, { ...ok, status: "rejected" }, { ...ok, status: "no_show" }, { ...ok, status: "completed" }]) assert.equal(rideMayProgress(bad), false, JSON.stringify(bad));
+});
+
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// ===== Phase 2: dispatch window, ratings, performance points, visibility, driver details, emails =====
+const withAuth = async <T,>(fn: () => Promise<T>) => {
+  const orig = db.auth.getUser;
+  db.auth.getUser = async (t: string) => t === "good" ? { data: { user: { id: "admin-1", email: "a@x.com" } }, error: null } : t === "drv1" ? { data: { user: { id: "u-d1", email: "dana@example.com" } }, error: null } : t === "drv2" ? { data: { user: { id: "u-d2", email: "eli@example.com" } }, error: null } : { data: { user: null }, error: { message: "bad" } };
+  try { return await fn(); } finally { db.auth.getUser = orig; }
+};
+const confirmPaid = async (b: any) => {
+  await pay(b.row.payment_token);
+  await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", db.t("payments").filter((x: any) => x.booking_id === b.row.id).pop(), {}, `evt_p2_${++ev}`)));
+  assert.ok(b.row.confirmed_at);
+};
+const rate = (code: string | null, body: unknown, ip: string) => {
+  const h: Record<string, string> = { ...HDR({ "x-forwarded-for": ip }) }; if (code) h["x-tracking-id"] = code;
+  return routes.trackRating.POST(new Request("http://site.test/api/track/rating", { method: "POST", headers: h, body: JSON.stringify(body) }));
+};
+const HOUR_MS = 3600_000;
+
+test("Leave for Pickup is server-gated by the dispatch window and separate from Start Ride", async () => {
+  await withAuth(async () => {
+    const d1 = aDriver(); d1.user_id = "u-d1";
+    const step = (id: string, status: string) => asDriver("drv1", () => routes.driverStatusRoute.POST(post("/api/driver/status", { id, status })));
+    const b = await flow(); await approve(b, d1.id); await confirmPaid(b);
+    b.row.pickup_at = new Date(Date.now() + 3 * 24 * HOUR_MS).toISOString();      // days away: neither step is allowed
+    for (const to of ["on_the_way", "getting_ready"]) { const r = await step(b.row.id, to); assert.equal(r.status, 409, to); assert.equal((await r.json()).code, "too_early"); }
+    assert.notEqual(b.row.status, "on_the_way");
+    b.row.pickup_at = new Date(Date.now() + 4 * HOUR_MS + 120_000).toISOString();  // 4h02m: default 4-hour dispatch window not open yet
+    assert.equal((await step(b.row.id, "on_the_way")).status, 409);
+    b.row.pickup_at = new Date(Date.now() + 3 * HOUR_MS).toISOString();            // 3h: may leave for pickup, but Start Ride (2h) is still locked
+    assert.equal((await step(b.row.id, "getting_ready")).status, 409);
+    assert.equal((await step(b.row.id, "on_the_way")).status, 200);
+    assert.equal(b.row.status, "on_the_way");
+  });
+});
+
+test("dispatch window rule is pure, clamped and never below the Start Ride window", async () => {
+  const { leaveForPickupWindow, clampDispatchMinutes, DEFAULT_DISPATCH_MINUTES } = await import("../src/lib/booking-status.ts");
+  assert.equal(DEFAULT_DISPATCH_MINUTES, 240);
+  assert.equal(clampDispatchMinutes(30), 120); assert.equal(clampDispatchMinutes("abc"), 240); assert.equal(clampDispatchMinutes(99999), 2880);
+  const now = Date.parse("2026-12-01T12:00:00Z"), pickup = new Date(now + 4 * HOUR_MS).toISOString();
+  assert.equal(leaveForPickupWindow(pickup, now).allowed, true); assert.equal(leaveForPickupWindow(pickup, now - 1).allowed, false);
+  assert.equal(leaveForPickupWindow(pickup, now, 360).allowed, true);               // admin widened it to 6 hours
+  assert.equal(leaveForPickupWindow("bad", now).allowed, false);
+});
+
+test("customer star rating: only the booking's own completed ride, validated on the server, once", async () => {
+  await withAuth(async () => {
+    const d1 = aDriver();
+    const a = await flow(); const other = await flow(); await approve(a, d1.id); await approve(other, d1.id);
+    assert.equal((await rate(a.row.tracking_code, { stars: 5 }, "10.20.0.1")).status, 409);   // not completed yet
+    a.row.status = "completed";
+    assert.equal((await rate(null, { stars: 5 }, "10.20.0.2")).status, 404);                   // no credential
+    assert.equal((await rate(a.row.payment_token, { stars: 5 }, "10.20.0.3")).status, 404);   // a different credential type
+    for (const bad of [0, 6, 2.5, "x"]) assert.equal((await rate(a.row.tracking_code, { stars: bad }, "10.20.0.4")).status, 422, String(bad));
+    assert.equal((await rate(a.row.tracking_code, { stars: 4, feedback: "x".repeat(1001) }, "10.20.0.5")).status, 422);
+    assert.equal((await rate(a.row.tracking_code, { stars: 4, feedback: "Smooth ride", bookingId: other.row.id, driverId: "forged" }, "10.20.0.6")).status, 200);
+    const rows = db.t("driver_ratings"); assert.equal(rows.length, 1);
+    assert.equal(rows[0].booking_id, a.row.id); assert.equal(rows[0].driver_id, d1.id); assert.equal(rows[0].customer_id, a.row.customer_id); assert.equal(rows[0].stars, 4); assert.equal(rows[0].feedback, "Smooth ride");
+    assert.equal((await rate(a.row.tracking_code, { stars: 1 }, "10.20.0.7")).status, 409);   // duplicate refused, original kept
+    assert.equal(db.t("driver_ratings").length, 1); assert.equal(db.t("driver_ratings")[0].stars, 4);
+    const t = (await (await trackPost(a.row.tracking_code, "10.20.0.8")).json()).trip;
+    assert.deepEqual(t.rating, { canRate: true, rated: true });
+    const { driverRatingSummary } = await import("../src/lib/ratings.ts");
+    assert.deepEqual(await driverRatingSummary(db, d1.id), { avg: 4, count: 1 });
+  });
+});
+
+test("driver rates the customer: own completed ride only, once, stored separately and never shown to the customer", async () => {
+  await withAuth(async () => {
+    const d1 = aDriver(); d1.user_id = "u-d1";
+    if (!db.t("drivers").some((d: any) => d.user_id === "u-d2")) db.seed("drivers", [{ full_name: "Eli Other", email: "eli@example.com", phone: "4105550888", vehicle_plate: "VT-456", is_active: true, user_id: "u-d2" }]);
+    const b = await flow(); await approve(b, d1.id);
+    const go = (token: string, body: object) => asDriver(token, () => routes.driverRate.POST(post("/api/driver/rate-customer", body)));
+    assert.equal((await go("drv1", { bookingId: b.row.id, stars: 5 })).status, 409);   // not completed
+    b.row.status = "completed";
+    assert.equal((await go("nobody", { bookingId: b.row.id, stars: 5 })).status, 401);
+    assert.equal((await go("drv2", { bookingId: b.row.id, stars: 5 })).status, 404);   // another driver's ride
+    assert.equal((await go("drv1", { bookingId: "nope", stars: 5 })).status, 400);
+    assert.equal((await go("drv1", { bookingId: b.row.id, stars: 9 })).status, 422);
+    const before = db.t("driver_ratings").length;
+    assert.equal((await go("drv1", { bookingId: b.row.id, stars: 3, feedback: "Late to the curb" })).status, 200);
+    assert.equal((await go("drv1", { bookingId: b.row.id, stars: 5 })).status, 409);
+    const rows = db.t("customer_ratings").filter((r: any) => r.booking_id === b.row.id);
+    assert.equal(rows.length, 1); assert.equal(rows[0].driver_id, d1.id); assert.equal(rows[0].customer_id, b.row.customer_id); assert.equal(rows[0].stars, 3);
+    assert.equal(db.t("driver_ratings").length, before);                                // the two rating systems are separate
+    const t = (await (await trackPost(b.row.tracking_code, "10.20.1.1")).json()).trip;
+    assert.ok(!JSON.stringify(t).includes("Late to the curb"));                          // the customer never sees the driver's rating of them
+  });
+});
+
+test("admin performance points: admin-only, 0-100, logged, independent of star ratings; visibility switches are independent", async () => {
+  await withAuth(async () => {
+    const d1 = aDriver();
+    const pts = (body: object, cookie = "good") => { const prev = (globalThis as any).__cookies; (globalThis as any).__cookies = cookie ? { vt_at: cookie } : {}; return routes.adminPoints.POST(post("/api/admin/drivers/points", body)).finally(() => { (globalThis as any).__cookies = prev; }); };
+    const vis = (body: object, cookie = "good") => { const prev = (globalThis as any).__cookies; (globalThis as any).__cookies = cookie ? { vt_at: cookie } : {}; return routes.adminVisibility.POST(post("/api/admin/drivers/visibility", body)).finally(() => { (globalThis as any).__cookies = prev; }); };
+    d1.performance_points = 100;
+    assert.equal((await pts({ driverId: d1.id, adjustment: -5 }, "")).status, 401);          // not signed in
+    assert.equal((await pts({ driverId: d1.id, adjustment: -5 }, "drv1")).status, 401);      // a driver is not an admin
+    assert.equal((await pts({ driverId: d1.id, adjustment: 1 })).status, 422);                // 101
+    assert.equal((await pts({ driverId: d1.id, adjustment: -101 })).status, 422);             // -1
+    assert.equal((await pts({ driverId: d1.id, adjustment: 1.5 })).status, 422);
+    assert.equal((await pts({ driverId: d1.id, adjustment: -30, reason: "Late twice" })).status, 200);
+    assert.equal(d1.performance_points, 70);
+    assert.equal((await pts({ driverId: d1.id, newPoints: 95 })).status, 200); assert.equal(d1.performance_points, 95);
+    assert.equal((await pts({ driverId: d1.id, newPoints: 101 })).status, 422); assert.equal(d1.performance_points, 95);
+    assert.equal((await pts({ driverId: d1.id, adjustment: 5, newPoints: 50 })).status, 422);  // ambiguous request
+    const h = db.t("driver_points_history").filter((x: any) => x.driver_id === d1.id);
+    assert.equal(h.length, 2); assert.deepEqual([h[0].previous_points, h[0].new_points, h[0].adjustment, h[0].reason, h[0].admin_email], [100, 70, -30, "Late twice", "a@x.com"]);
+    assert.deepEqual([h[1].previous_points, h[1].new_points, h[1].adjustment], [70, 95, 25]);
+    // The generic editor cannot be used to forge points or visibility.
+    await adminAs(() => routes.crud.POST(post("/api/admin/crud", { resource: "drivers", action: "update", id: d1.id, values: { performance_points: 0, show_points_to_driver: true } })));
+    assert.equal(d1.performance_points, 95); assert.ok(!d1.show_points_to_driver);
+    // Visibility: independent switches, data kept, driver-facing profile follows them.
+    const { loadDriverProfile } = await import("../src/lib/driver/rides.ts");
+    const b = await flow(); await approve(b, d1.id); b.row.status = "completed"; await rate(b.row.tracking_code, { stars: 5 }, "10.20.2.1");
+    let p: any = await loadDriverProfile(db, d1.id); assert.equal(p.rating, null); assert.equal(p.points, null);   // hidden by default
+    assert.equal((await vis({ driverId: d1.id, showRating: true }, "drv1")).status, 401);
+    assert.equal((await vis({ driverId: d1.id, showRating: true })).status, 200);
+    p = await loadDriverProfile(db, d1.id); assert.deepEqual(p.rating, { avg: 4.5, count: 2 }); assert.equal(p.points, null);   // this driver has the 4-star rating from the earlier test plus this 5-star one
+      // rating shown, points still hidden
+    assert.equal((await vis({ driverId: d1.id, showPoints: true })).status, 200);
+    assert.equal((await vis({ driverId: d1.id, showRating: false })).status, 200);
+    p = await loadDriverProfile(db, d1.id); assert.equal(p.rating, null); assert.equal(p.points, 95);                          // now the reverse
+    assert.equal(db.t("driver_ratings").length > 0 && d1.performance_points === 95, true);                                     // hiding deleted nothing
+    assert.equal((await vis({ driverId: d1.id })).status, 400);
+    assert.ok(!JSON.stringify(await (await routes.driverStatusRoute.POST(post("/api/driver/status", {}))).json().catch(() => ({}))).includes("performance"));
+  });
+});
+
+test("driver dashboard layout rules: earliest upcoming first, active separate, at most one completed ride", async () => {
+  const { splitRides } = await import("../src/lib/driver/dashboard.ts");
+  const R = (id: string, status: string, at: string): any => ({ id, status, pickupAt: at });
+  const rides = [R("c1", "completed", "2026-11-01T10:00:00Z"), R("u3", "assigned", "2026-12-09T10:00:00Z"), R("a1", "on_the_way", "2026-12-01T08:00:00Z"), R("u1", "confirmed", "2026-12-02T10:00:00Z"), R("c2", "completed", "2026-11-20T10:00:00Z"), R("u2", "assigned", "2026-12-05T10:00:00Z"), R("x", "cancelled", "2026-12-03T10:00:00Z")];
+  const s = splitRides(rides);
+  assert.deepEqual(s.active.map((r) => r.id), ["a1"]);
+  assert.equal(s.next?.id, "u1"); assert.deepEqual(s.later.map((r) => r.id), ["u2", "u3"]);
+  assert.equal(s.lastCompleted?.id, "c2");                                             // only the latest completed ride
+  assert.equal(splitRides([]).next, null);
+});
+
+test("emails: driver details only after verified payment confirms the booking, from real records, once", async () => {
+  net.calls.length = 0;
+  const b = await flow(); await approve(b);
+  const approved = brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes(b.row.reference));
+  assert.ok(approved.length >= 1);
+  for (const c of approved) { const t = JSON.stringify(c.body); assert.ok(!t.includes("VT-123") && !t.includes("Black Escalade") && !t.includes("4105550999")); }   // not before payment
+  await confirmPaid(b);
+  const confirmed = brevoTo("ann@example.com").filter((c) => String(c.body?.subject ?? "").includes("is confirmed") && JSON.stringify(c.body).includes(b.row.reference));
+  assert.equal(confirmed.length, 1);
+  const html = JSON.stringify(confirmed[0].body);
+  for (const must of ["Dana", "Black Escalade", "VT-123", "Stop Cafe", b.row.tracking_code]) assert.ok(html.includes(must), must);
+  assert.ok(!html.includes("4105550999") && !html.includes("Dana Driver"));            // no phone, no surname
 });

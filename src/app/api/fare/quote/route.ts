@@ -57,7 +57,7 @@ export async function POST(request: Request) {
     const seat = seatExtra(settings.seats, trip.childSeats, Boolean(trip.returnLeg), trip.passengers);
     if (!seat.ok) return json({ error: seat.error }, 422);
     const vehicles = buildVehicleOptions(fleet, trip, routes, discount, rtCtx);
-    const tierRows = await db.from("vehicle_tiers").select("id,name,fixed_price_cents,meet_greet_fee_cents,sort_order").eq("is_active", true).order("sort_order");
+    const tierRows = await db.from("vehicle_tiers").select("id,name,description,fixed_price_cents,meet_greet_fee_cents,sort_order").eq("is_active", true).order("sort_order");
     const regionKey = classifyTrip([trip.pickup.text, ...trip.stops.map((s) => s.text), trip.dropoff.text, ...(trip.returnLeg ? [trip.returnLeg.pickup.text, trip.returnLeg.dropoff.text] : [])]);
     const routeOptions = (Object.keys(routes) as RouteKey[]).map((key) => {
       const r = routes[key]!;
@@ -77,7 +77,7 @@ export async function POST(request: Request) {
       pricingAvailable: vehicles.some((v) => v.quotable),
       seatFeeCents: seat.line?.cents ?? 0,
       meetGreetEnabled: settings.meetGreetEnabled,
-      tiers: (tierRows.data ?? []).map((t: Record<string, any>) => ({ id: t.id, name: t.name, fixedPriceCents: t.fixed_price_cents ?? null, meetGreetFeeCents: t.meet_greet_fee_cents ?? null })), // eslint-disable-line @typescript-eslint/no-explicit-any
+      tiers: (tierRows.data ?? []).map((t: Record<string, any>) => ({ id: t.id, name: t.name, fixedPriceCents: t.fixed_price_cents ?? null, meetGreetFeeCents: t.meet_greet_fee_cents ?? null, description: typeof t.description === "string" && t.description.trim() ? t.description.trim() : null })), // eslint-disable-line @typescript-eslint/no-explicit-any
       seatInfo: { oneWayCents: settings.seats.oneWayCents, roundTripCents: settings.seats.roundTripCents, max: settings.seats.max },
       region: { key: regionKey, label: REGION_LABEL[regionKey], manualReview: fulfilmentFor(regionKey).requiresManualReview },
     });

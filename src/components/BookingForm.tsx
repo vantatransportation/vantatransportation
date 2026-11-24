@@ -69,7 +69,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
           name: g("name"), email: g("email"), phone: g("phone"), notes: g("notes"), website: g("website"),
           bookingFor, passenger: bookingFor === "other" ? { name: g("p.name"), phone: g("p.phone"), email: g("p.email") } : null,
           luggageCount: g("luggage"), assistanceNotes: g("assistance"), pickupInstructions: g("pickupInstructions"), contacts,
-          airport: airport ? { airport: g("a.airport"), airline: g("a.airline"), flightNumber: g("a.flightNumber"), direction: g("a.direction"), flightDate: g("a.flightDate"), flightTime: g("a.flightTime"), terminal: g("a.terminal"), passengerName: g("a.passengerName"), pickupInstructions: g("a.instructions"), meetGreet } : null,
+          airport: airport ? { airport: g("a.airport"), flightNumber: g("a.flightNumber"), direction: g("a.direction"), flightDate: g("a.flightDate"), passengerName: g("a.passengerName"), pickupInstructions: g("a.instructions"), meetGreet } : null,
           policiesAcknowledged: fd.get("ack") === "on",
         }),
       });
@@ -168,10 +168,6 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
                 <summary style={{ cursor: "pointer", fontWeight: 600, minHeight: 44, display: "flex", alignItems: "center" }}>Additional information (optional)</summary>
                 <div className="form-grid" style={{ marginTop: ".75rem" }}>
                   <div className="field full"><label htmlFor="a-inst">Special instructions</label><textarea id="a-inst" name="a.instructions" style={{ minHeight: 80 }} /></div>
-                  {/* Flight details are not looked up automatically (no flight-data provider is configured), so they stay available here if the passenger knows them. */}
-                  <div className="field"><label htmlFor="a-airline">Airline</label><input id="a-airline" name="a.airline" /></div>
-                  <div className="field"><label htmlFor="a-ftime">Flight time</label><input id="a-ftime" name="a.flightTime" type="time" />{fe("airport.flightTime")}</div>
-                  <div className="field"><label htmlFor="a-term">Terminal</label><input id="a-term" name="a.terminal" /></div>
                 </div>
               </details>
             </div>

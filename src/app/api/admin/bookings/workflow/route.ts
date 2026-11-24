@@ -1,4 +1,4 @@
-import { driverDisplayName } from "@/lib/driver/profile";
+import { driverEmailFields } from "@/lib/driver/email";
 import { json, readJson } from "@/lib/http";
 import { guard } from "@/lib/admin/guard";
 import { notify } from "@/lib/notify";
@@ -8,7 +8,6 @@ import { AWAITING_PAYMENT_MESSAGE, AWAITING_REVIEW, DRIVER_FLOW, canApprove, can
 import { formatMoney } from "@/lib/pricing/engine";
 import { availableProviders } from "@/lib/payment-providers";
 import { loadBookingSettings } from "@/lib/policies";
-import { firstName } from "@/lib/tracking";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
@@ -89,13 +88,15 @@ export async function POST(request: Request) {
         const settings = await loadBookingSettings(g.db);
         const payable = availableProviders(settings).length > 0 && b.online_amount_cents != null && b.payment_token && site;
         await notify(g.db, "booking.approved", { type: "booking", id }, {
-          ...common, Driver: driverDisplayName(driver) ?? firstName(driver.full_name) ?? undefined, // preferred or first name; the driver's phone is never emailed to customers
+          ...common, // driver details are emailed only once the booking is confirmed by verified payment (see booking.confirmed)
           "Booking page": site && b.tracking_code ? `${site}/track#id=${b.tracking_code}` : undefined, _trackingId: b.tracking_code ?? undefined, "Amount due online": b.online_amount_cents != null ? formatMoney(b.online_amount_cents, b.currency ?? "USD") : undefined,
           _customerEmail: cust.email, _customerName: cust.name, _payUrl: payable ? `${site}/pay/${b.payment_token}` : undefined,
         }, { dedupeSuffix: assignment.data.id });
       }
-      if (!isApprove && cust?.email) {
-        await notify(g.db, "booking.reassigned", { type: "booking", id }, { ...common, Driver: driverDisplayName(driver) ?? firstName(driver.full_name) ?? undefined, _customerEmail: cust.email, _customerName: cust.name }, { dedupeSuffix: assignment.data.id });
+      // A reassignment is told to the customer only when the booking is already confirmed and paid (the customer has seen driver details).
+      // Before that no driver details were shared, so there is nothing to correct, and the confirmation email will carry the current driver.
+      if (!isApprove && cust?.email && b.confirmed_at) {
+        await notify(g.db, "booking.reassigned", { type: "booking", id }, { ...common, ...(await driverEmailFields(g.db, driverId)), _customerEmail: cust.email, _customerName: cust.name }, { dedupeSuffix: assignment.data.id });
       }
       if (!isApprove && previous) {
         const old = await driverOf(previous);

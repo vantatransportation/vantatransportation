@@ -4,6 +4,7 @@ import { driverInitials } from "@/lib/driver/profile";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import ChatPanel from "@/components/chat/ChatPanel";
+import StarRatingForm from "@/components/StarRatingForm";
 import { formatMoney } from "@/lib/pricing/engine";
 import type { TripView } from "@/lib/trip";
 
@@ -121,6 +122,9 @@ export default function TripStatus({ credential, initial, tz }: { credential: Cl
       </section>
 
       {trip.driver && !trip.chatAvailable && !trip.ended && <p className="muted" style={{ marginTop: "1rem" }}>Messaging with your driver opens once they start your ride or are on the way. For anything urgent, use Call Vanta Support.</p>}
+      {trip.rating.canRate && (trip.rating.rated
+        ? <p className="muted" style={{ marginTop: "1rem" }}>Thank you. You have rated this ride.</p>
+        : <StarRatingForm title="How was your driver?" help="Your rating and comments go to Vanta and help us look after our drivers and customers." endpoint={credential.kind === "token" ? `/api/trip/${credential.token}/rating` : "/api/track/rating"} headers={chatHeaders} />)}
       {trip.chatAvailable && <ChatPanel role="customer" endpoint={chatEndpoint} headers={chatHeaders} title="Message your driver" />}
     </>
   );

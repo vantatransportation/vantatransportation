@@ -77,5 +77,6 @@ test("airport form keeps the essentials visible and moves the rest into a collap
   const details = f.slice(f.lastIndexOf("<details", start), f.indexOf("</details>", start));
   for (const id of ["a-airport", "a-dir", "a-flight", "a-fdate", "a-pname"]) assert.ok(f.includes(`id="${id}"`) && !details.includes(`id="${id}"`), id);
   assert.match(details, /Additional information/);
-  for (const id of ["a-inst", "a-airline", "a-ftime", "a-term"]) assert.ok(details.includes(`id="${id}"`), id);
+  assert.ok(details.includes('id="a-inst"'));
+  for (const id of ["a-airline", "a-ftime", "a-term"]) assert.ok(!f.includes(`id="${id}"`), `${id} must not be on the customer form`); // airline, flight time and terminal were removed
 });

@@ -26,7 +26,7 @@ export interface QuoteDto {
   totalCents: number; currency: string; lineItems: LineItemDto[]; tollStatus: "included" | "unavailable" | "avoided"; minimumApplied: boolean;
   roundTrip?: { discountCents: number; twoOneWayCents: number; ruleLabel: string | null; legs: { label: string; totalCents: number }[] };
 }
-export interface TierOptionDto { id: string; name: string; fixedPriceCents: number | null; meetGreetFeeCents: number | null }
+export interface TierOptionDto { id: string; name: string; fixedPriceCents: number | null; meetGreetFeeCents: number | null; /** Admin-written tier description (shown on tier cards, which never show prices). */ description?: string | null }
 export interface VehicleOptionDto {
   id: string; name: string; category: string; passengers: number; image: string | null; similarModels: string;
   description: string; capacityLabel: string;

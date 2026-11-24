@@ -292,6 +292,7 @@ export const resources: Record<string, Resource> = {
       { name: "waiting_increment_minutes", label: "Waiting charge increment (minutes)", type: "number", required: true },
       { name: "waiting_rate_cents", label: "Waiting rate per increment ($)", type: "money", help: "Leave blank until a rate is approved." },
       { name: "waiting_rate_approved", label: "Waiting rate is approved", type: "bool" },
+      { name: "driver_dispatch_window_minutes", label: "Leave for Pickup opens (minutes before pickup)", type: "number", help: "Default 240 (4 hours). A driver cannot tap Leave for Pickup earlier than this. Start Ride is always exactly 120 minutes before pickup, so values below 120 are raised to 120." },
       { name: "child_seat_one_way_cents", label: "Child car seat price, one way ($ per seat)", type: "money", help: "Initial value from the client: $10. Applied per seat." },
       { name: "child_seat_round_trip_cents", label: "Child car seat price, round trip ($ per seat)", type: "money", help: "Initial value from the client: $15. Charged once per seat for the whole round trip, not per leg." },
       { name: "child_seat_max", label: "Maximum child seats per booking", type: "number" },

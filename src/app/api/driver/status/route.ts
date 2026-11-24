@@ -1,8 +1,9 @@
 import { json, readJson, sameOrigin } from "@/lib/http";
 import { getDriverForApi } from "@/lib/driver/auth";
 import { getAdminClient } from "@/lib/supabase/admin";
-import { AWAITING_PAYMENT_MESSAGE, START_RIDE_STATUS, canTransition, DRIVER_FLOW, rideMayProgress, startRideWindow, type BookingStatus } from "@/lib/booking-status";
+import { AWAITING_PAYMENT_MESSAGE, START_RIDE_STATUS, LEAVE_FOR_PICKUP_STATUS, leaveForPickupWindow, canTransition, DRIVER_FLOW, rideMayProgress, startRideWindow, type BookingStatus } from "@/lib/booking-status";
 import { notify } from "@/lib/notify";
+import { loadBookingSettings } from "@/lib/policies";
 import { BUSINESS_TZ } from "@/lib/config";
 
 export const runtime = "nodejs";
@@ -38,6 +39,16 @@ export async function POST(request: Request) {
     if (!w.allowed) {
       const at = w.opensAt ? new Date(w.opensAt).toLocaleString("en-US", { timeZone: BUSINESS_TZ, dateStyle: "medium", timeStyle: "short" }) : null;
       return json({ error: at ? `You can start this ride from ${at}, two hours before pickup.` : "This ride has no valid pickup time.", code: "too_early", opensAt: w.opensAt }, 409);
+    }
+  }
+
+  // Leave for Pickup opens at the configured dispatch window (default 4 hours before pickup): not days early. Same server-clock rule.
+  if (to === LEAVE_FOR_PICKUP_STATUS) {
+    const settings = await loadBookingSettings(db);
+    const w = leaveForPickupWindow(b.pickup_at, Date.now(), settings.dispatchWindowMinutes);
+    if (!w.allowed) {
+      const at = w.opensAt ? new Date(w.opensAt).toLocaleString("en-US", { timeZone: BUSINESS_TZ, dateStyle: "medium", timeStyle: "short" }) : null;
+      return json({ error: at ? `You can leave for this pickup from ${at}.` : "This ride has no valid pickup time.", code: "too_early", opensAt: w.opensAt }, 409);
     }
   }
 

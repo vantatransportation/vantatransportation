@@ -2,6 +2,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ExtraLine, RoundTripRule } from "@/lib/pricing/roundtrip";
 import { DEFAULT_PAYMENT, type PaymentMode, type PaymentSettings } from "@/lib/payments";
+import { clampDispatchMinutes, DEFAULT_DISPATCH_MINUTES } from "@/lib/booking-status";
 import { childSeatFee, childSeatSummary, DEFAULT_SEAT_SETTINGS, seatCount, type ChildSeats, type SeatSettings } from "@/lib/child-seats";
 
 export interface BookingSettings {
@@ -14,13 +15,15 @@ export interface BookingSettings {
   waitingIncrementMinutes: number;
   /** Only set when an admin has approved the rate. */
   waitingRateCents: number | null;
+  /** Minutes before pickup when a driver may tap Leave for Pickup. */
+  dispatchWindowMinutes: number;
   seats: SeatSettings;
   payment: PaymentSettings;
 }
 
 export type { PaymentMode, PaymentSettings } from "@/lib/payments";
 
-export const DEFAULT_SETTINGS: BookingSettings = { meetGreetEnabled: true, stripeEnabled: true, paypalEnabled: true, waitingIncludedMinutes: 15, waitingIncrementMinutes: 15, waitingRateCents: null, seats: DEFAULT_SEAT_SETTINGS, payment: DEFAULT_PAYMENT };
+export const DEFAULT_SETTINGS: BookingSettings = { meetGreetEnabled: true, stripeEnabled: true, paypalEnabled: true, waitingIncludedMinutes: 15, waitingIncrementMinutes: 15, waitingRateCents: null, dispatchWindowMinutes: DEFAULT_DISPATCH_MINUTES, seats: DEFAULT_SEAT_SETTINGS, payment: DEFAULT_PAYMENT };
 
 export async function loadBookingSettings(db: SupabaseClient): Promise<BookingSettings> {
   try {
@@ -33,6 +36,7 @@ export async function loadBookingSettings(db: SupabaseClient): Promise<BookingSe
       waitingIncludedMinutes: Number(data.waiting_included_minutes ?? 15),
       waitingIncrementMinutes: Number(data.waiting_increment_minutes ?? 15) || 15,
       waitingRateCents: data.waiting_rate_approved && data.waiting_rate_cents != null ? Number(data.waiting_rate_cents) : null,
+      dispatchWindowMinutes: clampDispatchMinutes(data.driver_dispatch_window_minutes),
       seats: {
         oneWayCents: Number(data.child_seat_one_way_cents ?? DEFAULT_SEAT_SETTINGS.oneWayCents),
         roundTripCents: Number(data.child_seat_round_trip_cents ?? DEFAULT_SEAT_SETTINGS.roundTripCents),

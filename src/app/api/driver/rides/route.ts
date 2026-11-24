@@ -1,6 +1,6 @@
 import { json } from "@/lib/http";
 import { getDriverForApi } from "@/lib/driver/auth";
-import { loadDriverRides } from "@/lib/driver/rides";
+import { loadDriverProfile, loadDriverRides } from "@/lib/driver/rides";
 import { getAdminClient } from "@/lib/supabase/admin";
 
 export const runtime = "nodejs";
@@ -12,5 +12,5 @@ export async function GET() {
   if (!driver) return json({ error: "Please sign in again." }, 401);
   const db = getAdminClient();
   if (!db) return json({ error: "Database is not configured." }, 503);
-  return json({ rides: await loadDriverRides(db, driver.id), plate: driver.plate, serverNow: new Date().toISOString() });
+  return json({ rides: await loadDriverRides(db, driver.id), plate: driver.plate, profile: await loadDriverProfile(db, driver.id), serverNow: new Date().toISOString() });
 }

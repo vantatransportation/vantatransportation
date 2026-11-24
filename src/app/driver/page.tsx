@@ -1,5 +1,5 @@
 import { requireDriver } from "@/lib/driver/auth";
-import { loadDriverRides } from "@/lib/driver/rides";
+import { loadDriverProfile, loadDriverRides } from "@/lib/driver/rides";
 import { getAdminClient } from "@/lib/supabase/admin";
 import DriverDashboard from "@/components/driver/DriverDashboard";
 import { BUSINESS_TZ } from "@/lib/config";
@@ -12,6 +12,7 @@ export default async function Page() {
   const driver = await requireDriver();
   const db = getAdminClient();
   const rides = db ? await loadDriverRides(db, driver.id) : [];
+  const profile = db ? await loadDriverProfile(db, driver.id) : null;
   const helpline = db ? await getHelpline(db) : null;
-  return <DriverDashboard name={driver.name} plate={driver.plate} initial={rides} tz={BUSINESS_TZ} helpline={helpline} serverNow={new Date().toISOString()} />;
+  return <DriverDashboard profile={profile} name={driver.displayName} plate={driver.plate} initial={rides} tz={BUSINESS_TZ} helpline={helpline} serverNow={new Date().toISOString()} />;
 }

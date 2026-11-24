@@ -1,3 +1,4 @@
+import { driverEmailFields } from "@/lib/driver/email";
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadBookingSettings } from "@/lib/policies";
@@ -182,6 +183,7 @@ async function recordPaid(db: SupabaseClient, p: Row, txnId: string | null) {
     const veh = b.vehicles as { name?: string } | null;
     const remaining = b.online_amount_cents != null ? Math.max(0, b.online_amount_cents - (b.amount_paid_cents ?? 0)) : 0; // amount_paid_cents was just re-derived from the verified payments
     await notify(db, "booking.confirmed", { type: "booking", id: b.id }, {
+      ...(await driverEmailFields(db, b.driver_id)),
       Reference: b.reference, Pickup: String(b.pickup_address ?? ""), Stops: (stops.data ?? []).map((s: Row) => String(s.address)).join(" | ") || undefined, Destination: b.dropoff_address ?? undefined,
       When: b.pickup_at ? formatPickup(b.pickup_at, BUSINESS_TZ) : undefined, Vehicle: [veh?.name, b.tier_name].filter(Boolean).join(" · ") || undefined,
       "Amount paid": formatMoney(p.amount_cents, p.currency), "Payment status": status === "paid" ? "Paid in full" : "Deposit received",

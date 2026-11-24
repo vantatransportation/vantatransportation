@@ -290,11 +290,13 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
                 {tierChoices.length > 1 && (
                   <fieldset className="opts" aria-describedby="tier-help">
                     <legend>Service tier</legend>
-                    <p id="tier-help" className="muted" style={{ marginBottom: ".5rem" }}>Choose a tier to see the vehicles offered in it. Some vehicles are offered in more than one tier; each tier has its own fixed price.</p>
+                    <p id="tier-help" className="muted" style={{ marginBottom: ".5rem" }}>Choose a service tier to see the vehicles offered in it. Some vehicles are offered in more than one tier. You will see the total price for each vehicle in the next step.</p>
                     {tierChoices.map((t) => {
-                      const n = vehiclesInTier(result.vehicles, t.id).length;
+                      const inT = vehiclesInTier(result.vehicles, t.id);
+                      const n = inT.length;
+                      const img = inT.find((v) => v.image)?.image ?? null;
                       return (
-                        <label key={t.id} className={`opt${tierId === t.id ? " is-on" : ""}`}>
+                        <label key={t.id} className={`opt tier-card${tierId === t.id ? " is-on" : ""}`}>
                           <input type="radio" name="tier" checked={tierId === t.id} onChange={() => {
                             setTierId(t.id);
                             // Keep the chosen vehicle if this tier also offers it; otherwise pick the tier's first bookable vehicle.
@@ -302,8 +304,9 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
                             if (!inTier.some((v) => v.id === vehicleId)) setVehicleId((inTier.find((v) => v.quotable) ?? inTier[0])?.id ?? "");
                             setPanel("summary");
                           }} />
-                          <span><strong>{t.name}</strong><br /><small>{n} {n === 1 ? "vehicle" : "vehicles"}</small></span>
-                          <span className="opt__price">{t.fixedPriceCents != null ? formatMoney(t.fixedPriceCents) : <small>Price to be confirmed</small>}</span>
+                          {img && <VehiclePhoto src={img} name={`${t.name} service`} width={320} height={200} sizes="(max-width: 860px) 100vw, 220px" />}
+                          <span><strong>{t.name}</strong>{t.description && <><br /><small className="tier-card__desc">{t.description}</small></>}<br /><small className="muted">{n} {n === 1 ? "vehicle" : "vehicles"} available for this trip</small></span>
+                          <span className="vcard__select">{tierId === t.id ? "✓ Selected" : "Choose"}</span>
                         </label>
                       );
                     })}
@@ -314,10 +317,12 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
                   {result.vehicles.length === 0 && <p className="muted">No vehicle fits {payload.passengers} passengers online. Please contact us for a larger option.</p>}
                   <ul>
                     {tierVehicles.map((v) => {
-                      const q = v.quotes[route?.key ?? "fastest"];
                       const on = vehicleId === v.id;
                       const vt = v.tiers.find((t) => t.id === tierId) ?? null;
                       const otherTiers = v.tiers.filter((t) => t.id !== tierId).map((t) => t.name);
+                      // The FINAL total for this vehicle in the chosen tier, computed from the same fixed price, Meet & Greet fee and seat fee the server charges.
+                      const mgBlocked = meetGreet && vt?.meetGreetFeeCents == null;
+                      const cardTotal = vt?.fixedPriceCents != null && !mgBlocked ? vt.fixedPriceCents + (meetGreet ? vt.meetGreetFeeCents ?? 0 : 0) + seatFee : null;
                       return (
                         <li key={v.id}>
                           <label className={`vcard${on ? " is-on" : ""}`}>
@@ -330,9 +335,8 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
                               {(v.description || v.similarModels) && <span className="vcard__desc">{v.description || v.similarModels}</span>}
                               <span className="vcard__foot">
                                 <span className="vcard__prices">
-                                  <span className="vcard__price">{vt?.fixedPriceCents != null ? formatMoney(vt.fixedPriceCents) : <small>Fixed price to be confirmed</small>}</span>
-                                  <small className="vcard__sub">{vt ? `Fixed ${vt.name} price, charged online` : "Price on request"}</small>
-                                  {q && <small className="vcard__sub">Estimated trip fare {formatMoney(q.totalCents, q.currency)} (information only)</small>}
+                                  <span className="vcard__price">{cardTotal != null ? formatMoney(cardTotal) : mgBlocked ? <small>Meet &amp; Greet not offered in this tier</small> : <small>Price to be confirmed</small>}</span>
+                                  <small className="vcard__sub">{cardTotal != null ? "Total trip price" : "We will confirm the price with you"}</small>
                                 </span>
                                 <span className="vcard__select">{on ? "✓ Selected" : "Select"}</span>
                               </span>
@@ -362,7 +366,7 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
                 <h4 className="summary__h">Charged online</h4>
                 {tp?.fixedPriceCents != null ? (
                   <table className="lines" aria-label="Amount charged online"><tbody>
-                    <tr><td>Fixed {tp.name} price</td><td>{formatMoney(tp.fixedPriceCents)}</td></tr>
+                    <tr><td>Trip fare</td><td>{formatMoney(tp.fixedPriceCents)}</td></tr>
                     {meetGreet && tp.meetGreetFeeCents != null && <tr><td>Airport Meet &amp; Greet<span className="tag">requested</span></td><td>{formatMoney(tp.meetGreetFeeCents)}</td></tr>}
                     {seatFee > 0 && <tr><td>Child car seats</td><td>{formatMoney(seatFee)}</td></tr>}
                     {onlineTotal != null && <tr className="total"><td>Total due online</td><td>{formatMoney(onlineTotal)}</td></tr>}

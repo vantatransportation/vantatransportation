@@ -1,6 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { STATUS_LABEL, isOpenForDriver, type BookingStatus } from "@/lib/booking-status";
+import { STATUS_LABEL, isOpenForDriver, rideMayProgress, type BookingStatus } from "@/lib/booking-status";
 import { UUID_RE, chatOpen } from "@/lib/chat-server";
 import { buildTimeline, firstName, normalizeTrackingCode, type TimelineStep } from "@/lib/tracking";
 import { getHelpline, type Helpline } from "@/lib/helpline";
@@ -18,6 +18,8 @@ export interface TripView {
   pickupAt: string; pickup: string; dropoff: string | null; stops: string[]; passengers: number;
   vehicle: string | null; vehicleCategory: string | null; tier: string | null;
   driver: { name: string; photoUrl: string | null; vehicle: string | null; plate: string | null } | null;
+  /** After the ride: whether the customer can rate the driver, and whether they already have. */
+  rating: { canRate: boolean; rated: boolean };
   confirmed: boolean; paymentStatus: string; awaitingPayment: boolean;
   chatOpen: boolean; chatAvailable: boolean; terminalNote: string | null;
   helpline: Helpline | null;
@@ -48,11 +50,15 @@ export async function loadTrip(db: SupabaseClient, cred: Credential | string): P
   const open = isOpenForDriver(status);
   let driver: TripView["driver"] = null;
   // Only a first name and the vehicle description, and only while a driver is assigned and the ride is still to be done.
-  if (b.driver_id && open) {
+  // Shown only when all three hold, from authoritative server state: a driver is assigned, the booking is confirmed, and verified payment
+  // has reached a successful state (rideMayProgress needs confirmed_at AND a paid-type payment_status, which only verified payments set).
+  if (b.driver_id && open && rideMayProgress({ status, confirmed_at: b.confirmed_at ?? null, payment_status: b.payment_status ?? null })) {
     const { data: d } = await db.from("drivers").select("full_name,first_name,preferred_name,vehicle_description,vehicle_plate,image_url").eq("id", b.driver_id).maybeSingle();
     const nm = d ? driverDisplayName(d) ?? firstName(d.full_name) : null;
     if (nm) driver = { name: nm, photoUrl: d?.image_url ?? null, vehicle: d?.vehicle_description ?? null, plate: d?.vehicle_plate ?? null };
   }
+  const canRate = status === "completed" && Boolean(b.driver_id);
+  const rated = canRate ? Boolean((await db.from("driver_ratings").select("id").eq("booking_id", b.id).maybeSingle()).data) : false;
   const stops = await db.from("booking_stops").select("position,address").eq("booking_id", b.id).order("position");
   const released = Boolean(b.payment_released_at && b.driver_id);
   const paid = PAID.includes(String(b.payment_status));
@@ -67,7 +73,7 @@ export async function loadTrip(db: SupabaseClient, cred: Credential | string): P
       reference: b.reference, status, statusLabel: STATUS_LABEL[status] ?? status, headline: tl.headline, steps: tl.steps, ended: tl.ended,
       pickupAt: b.pickup_at, pickup: b.pickup_address, dropoff: b.dropoff_address ?? null,
       stops: (stops.data ?? []).map((s: Record<string, unknown>) => String(s.address)), passengers: b.passengers,
-      vehicle: veh?.name ?? null, vehicleCategory: veh?.vehicle_categories?.name ?? null, tier: b.tier_name ?? null, driver,
+      vehicle: veh?.name ?? null, vehicleCategory: veh?.vehicle_categories?.name ?? null, tier: b.tier_name ?? null, driver, rating: { canRate, rated },
       confirmed, paymentStatus: String(b.payment_status), awaitingPayment: released && open && !settled && !confirmed,
       chatOpen: chatOpen(b), chatAvailable: chatOpen(b),
       terminalNote: status === "rejected" ? (b.rejection_reason ?? "We were unable to accept this request.") : status === "cancelled" ? (b.cancellation_reason ?? "This booking was cancelled.") : null,

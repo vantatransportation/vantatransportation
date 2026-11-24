@@ -2,26 +2,33 @@
 
 import { useEffect, useState } from "react";
 import { STATUS_LABEL } from "@/lib/booking-status";
-import type { DriverRide } from "@/lib/driver/rides";
+import type { DriverProfileCard, DriverRide } from "@/lib/driver/rides";
+import { driverInitials } from "@/lib/driver/profile";
+import { splitRides } from "@/lib/driver/dashboard";
 import ChatPanel from "@/components/chat/ChatPanel";
+import StarRatingForm from "@/components/StarRatingForm";
 
 const ACTION_LABEL: Record<string, string> = { getting_ready: "Start ride", on_the_way: "Leave for pickup", arrived: "Arrived at pickup", picked_up: "Passenger picked up", completed: "Complete ride" };
 const fmt = (iso: string, tz: string) => new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(iso));
 
-export default function DriverDashboard({ name, plate, initial, tz, helpline, serverNow }: { name: string; plate: string | null; initial: DriverRide[]; tz: string; helpline: { display: string; tel: string } | null; serverNow: string }) {
+export default function DriverDashboard({ profile: initialProfile, name, plate, initial, tz, helpline, serverNow }: { profile: DriverProfileCard | null; name: string; plate: string | null; initial: DriverRide[]; tz: string; helpline: { display: string; tel: string } | null; serverNow: string }) {
   const [rides, setRides] = useState(initial);
-  // Display only: the offset between the server clock and this device lets the button unlock on time even if the phone clock is wrong.
-  // The server re-checks the window on every Start Ride request, so this can never grant access by itself.
+  const [profile, setProfile] = useState(initialProfile);
+  // Display only: the offset between the server clock and this device lets buttons unlock on time even if the phone clock is wrong.
+  // The server re-checks every time window on each request, so this can never grant access by itself.
   const [offset, setOffset] = useState(() => new Date(serverNow).getTime() - Date.now());
-  const [tick, setTick] = useState(0);
-  useEffect(() => { const t = setInterval(() => setTick((n) => n + 1), 30_000); return () => clearInterval(t); }, []);
-  const nowMs = () => Date.now() + offset + tick * 0;
+  const [nowMs, setNowMs] = useState(() => new Date(serverNow).getTime());
+  useEffect(() => { const t = setInterval(() => setNowMs(Date.now() + offset), 15_000); return () => clearInterval(t); }, [offset]);
   const [busy, setBusy] = useState(""); const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
 
   async function reload() {
     const res = await fetch("/api/driver/rides", { cache: "no-store" });
     if (res.status === 401) return window.location.assign("/driver/login");
-    if (res.ok) { const d = (await res.json()) as { rides: DriverRide[]; serverNow?: string }; setRides(d.rides); if (d.serverNow) setOffset(new Date(d.serverNow).getTime() - Date.now()); }
+    if (res.ok) {
+      const d = (await res.json()) as { rides: DriverRide[]; profile?: DriverProfileCard | null; serverNow?: string };
+      setRides(d.rides); if (d.profile !== undefined) setProfile(d.profile);
+      if (d.serverNow) setOffset(new Date(d.serverNow).getTime() - Date.now());
+    }
   }
   async function advance(r: DriverRide, status: string) {
     if (busy) return;
@@ -38,26 +45,55 @@ export default function DriverDashboard({ name, plate, initial, tz, helpline, se
   }
   async function signOut() { await fetch("/api/driver/logout", { method: "POST" }); window.location.assign("/driver/login"); }
 
-  const active = rides.filter((r) => ["getting_ready", "on_the_way", "arrived", "picked_up", "in_progress"].includes(r.status));
-  const upcoming = rides.filter((r) => ["assigned", "confirmed"].includes(r.status));
-  const past = rides.filter((r) => !r.open).sort((a, b) => b.pickupAt.localeCompare(a.pickupAt)).slice(0, 20);
-  const section = (title: string, list: DriverRide[], empty: string) => (
-    <section aria-label={title} style={{ marginTop: "1.5rem" }}>
-      <h2 style={{ fontSize: "1.25rem" }}>{title} <span className="muted">({list.length})</span></h2>
-      {list.length === 0 ? <p className="muted">{empty}</p> : list.map((r) => <RideCard key={r.id} r={r} tz={tz} busy={busy} onAdvance={advance} nowMs={nowMs()} />)}
-    </section>
-  );
+  const { active, next, later, lastCompleted } = splitRides(rides);
+  const card = (r: DriverRide, featured = false) => <RideCard key={r.id} r={r} tz={tz} busy={busy} onAdvance={advance} nowMs={nowMs} featured={featured} />;
+  const shown = profile?.displayName ?? name;
+
   return (
     <>
-      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: ".5rem" }}>
-        <div><h1 style={{ fontSize: "1.6rem" }}>My rides</h1><p className="muted">{name}{plate ? ` · ${plate}` : ""}</p></div>
+      <header className="panel" style={{ display: "flex", gap: "1rem", alignItems: "center", flexWrap: "wrap" }} aria-label="Your profile">
+        {profile?.imageUrl
+          ? (
+            <>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={profile.imageUrl} alt="" width={72} height={72} style={{ borderRadius: "50%", objectFit: "cover", flex: "none" }} />
+            </>
+          )
+          : <span aria-hidden="true" style={{ width: 72, height: 72, borderRadius: "50%", display: "grid", placeItems: "center", background: "var(--surface-2, #1c1c1c)", fontWeight: 700, fontSize: "1.4rem", flex: "none" }}>{driverInitials(shown)}</span>}
+        <div style={{ flex: "1 1 14rem", minWidth: 0 }}>
+          <h1 style={{ fontSize: "1.5rem" }}>{shown}</h1>
+          <p className="muted">{profile?.vehicle ?? "Vehicle not set"}{(profile?.plate ?? plate) ? ` · ${profile?.plate ?? plate}` : ""}</p>
+          {(profile?.location || profile?.preferredArea) && <p className="muted">{[profile?.location, profile?.preferredArea && `Preferred area: ${profile.preferredArea}`].filter(Boolean).join(" · ")}</p>}
+        </div>
+        {(profile?.rating || profile?.points != null) && (
+          <dl style={{ display: "flex", gap: "1.25rem", margin: 0 }} aria-label="Your performance">
+            {profile?.rating && <div><dt className="muted" style={{ fontSize: ".8rem" }}>Customer rating</dt><dd style={{ fontWeight: 700, fontSize: "1.25rem" }}>{profile.rating.avg != null ? `★ ${profile.rating.avg.toFixed(1)}` : "No ratings yet"}{profile.rating.count > 0 && <span className="muted" style={{ fontSize: ".85rem", fontWeight: 400 }}> ({profile.rating.count})</span>}</dd></div>}
+            {profile?.points != null && <div><dt className="muted" style={{ fontSize: ".8rem" }}>Performance points</dt><dd style={{ fontWeight: 700, fontSize: "1.25rem" }}>{profile.points}<span className="muted" style={{ fontSize: ".85rem", fontWeight: 400 }}> / 100</span></dd></div>}
+          </dl>
+        )}
         <button type="button" className="btn btn--ghost" onClick={signOut}>Sign out</button>
       </header>
+
       <div role="status" aria-live="polite">{msg && <div className={`notice ${msg.kind === "error" ? "notice--error" : ""}`}>{msg.text}</div>}</div>
-      <p><button type="button" className="linkbtn" onClick={reload}>Refresh</button></p>
-      {section("In progress", active, "No ride in progress.")}
-      {section("Upcoming", upcoming, "No upcoming rides assigned to you.")}
-      {section("Recent", past, "Nothing yet.")}
+      <p style={{ display: "flex", gap: "1rem", alignItems: "center", flexWrap: "wrap" }}>
+        <span className="pill">{active.length} in progress</span><span className="pill">{next ? 1 + later.length : 0} upcoming</span>
+        <button type="button" className="linkbtn" onClick={reload}>Refresh</button>
+      </p>
+
+      {active.length > 0 && <section aria-label="Rides in progress" style={{ marginTop: "1rem" }}><h2 style={{ fontSize: "1.25rem" }}>In progress</h2>{active.map((r) => card(r, true))}</section>}
+
+      <section aria-label="Next ride" style={{ marginTop: "1.25rem" }}>
+        <h2 style={{ fontSize: "1.25rem" }}>Next ride</h2>
+        {next ? card(next, active.length === 0) : <p className="muted">No upcoming rides assigned to you.</p>}
+      </section>
+
+      {later.length > 0 && <section aria-label="Later rides" style={{ marginTop: "1.25rem" }}><h2 style={{ fontSize: "1.25rem" }}>Later <span className="muted">({later.length})</span></h2>{later.map((r) => card(r))}</section>}
+
+      <section aria-label="Last completed ride" style={{ marginTop: "1.25rem" }}>
+        <h2 style={{ fontSize: "1.25rem" }}>Last completed ride</h2>
+        {lastCompleted ? <CompletedCard r={lastCompleted} tz={tz} onRated={reload} /> : <p className="muted">Nothing completed yet.</p>}
+      </section>
+
       <section className="panel" style={{ marginTop: "2rem" }} aria-label="Support">
         <h2 style={{ fontSize: "1.1rem" }}>Need help with a ride?</h2>
         <p className="muted">Customer phone numbers are not shared. Message the customer from the ride, or call Vanta support and we will help.</p>
@@ -67,12 +103,31 @@ export default function DriverDashboard({ name, plate, initial, tz, helpline, se
   );
 }
 
-function RideCard({ r, tz, busy, onAdvance, nowMs }: { r: DriverRide; tz: string; busy: string; onAdvance: (r: DriverRide, s: string) => void; nowMs: number }) {
+function CompletedCard({ r, tz, onRated }: { r: DriverRide; tz: string; onRated: () => void }) {
+  return (
+    <article className="panel" style={{ marginTop: ".5rem" }}>
+      <p style={{ display: "flex", justifyContent: "space-between", gap: ".5rem", flexWrap: "wrap" }}><strong>{fmt(r.pickupAt, tz)}</strong><span className="pill">{STATUS_LABEL[r.status]}</span></p>
+      <p className="muted">{r.reference} · {r.pickup}{r.dropoff ? ` → ${r.dropoff}` : ""}</p>
+      {r.customerRated
+        ? <p className="muted">You rated this customer. Thank you.</p>
+        : <StarRatingForm title="Rate this customer" help="Private feedback for Vanta staff only. The customer never sees it." endpoint="/api/driver/rate-customer" extra={{ bookingId: r.id }} onDone={onRated} />}
+    </article>
+  );
+}
+
+function RideCard({ r, tz, busy, onAdvance, nowMs, featured }: { r: DriverRide; tz: string; busy: string; onAdvance: (r: DriverRide, s: string) => void; nowMs: number; featured: boolean }) {
   const [chat, setChat] = useState(false);
   const bags = r.checkedBags != null || r.carryOnBags != null ? `${r.checkedBags ?? 0} checked · ${r.carryOnBags ?? 0} carry-on` : null;
+  const lockFor = (s: string): { locked: boolean; text: string } => {
+    const at = s === "getting_ready" ? r.startOpensAt : s === "on_the_way" ? r.leaveOpensAt : null;
+    if (s !== "getting_ready" && s !== "on_the_way") return { locked: false, text: "" };
+    if (!at) return { locked: true, text: "This ride has no valid pickup time." };
+    const locked = nowMs < new Date(at).getTime();
+    return { locked, text: locked ? (s === "getting_ready" ? `You can start this ride from ${fmt(at, tz)} (two hours before pickup).` : `You can leave for this pickup from ${fmt(at, tz)}.`) : "" };
+  };
   return (
-    <article className="panel" style={{ marginTop: ".75rem" }}>
-      <p style={{ display: "flex", justifyContent: "space-between", gap: ".5rem", flexWrap: "wrap" }}><strong>{fmt(r.pickupAt, tz)}</strong><span className="pill">{STATUS_LABEL[r.status]}</span></p>
+    <article className="panel" style={{ marginTop: ".75rem", ...(featured ? { borderLeft: "4px solid var(--accent, #c9a24a)" } : {}) }}>
+      <p style={{ display: "flex", justifyContent: "space-between", gap: ".5rem", flexWrap: "wrap", fontSize: featured ? "1.15rem" : undefined }}><strong>{fmt(r.pickupAt, tz)}</strong><span className="pill">{STATUS_LABEL[r.status]}</span></p>
       <p className="muted">{r.reference}</p>
       <dl className="kv" style={{ marginTop: ".5rem" }}>
         <dt>Pickup</dt><dd>{r.pickup}</dd>
@@ -93,11 +148,11 @@ function RideCard({ r, tz, busy, onAdvance, nowMs }: { r: DriverRide; tz: string
       {r.nextStatuses.length > 0 && (
         <div style={{ display: "grid", gap: ".5rem", marginTop: ".75rem" }}>
           {r.nextStatuses.map((s, i) => {
-            const locked = s === "getting_ready" && (!r.startOpensAt || nowMs < new Date(r.startOpensAt).getTime());
+            const { locked, text } = lockFor(s);
             return (
               <div key={s}>
-                <button type="button" className={`btn ${i === r.nextStatuses.length - 1 ? "btn--primary" : "btn--ghost"}`} style={{ minHeight: 52, width: "100%" }} disabled={!!busy || locked} aria-describedby={locked ? `lock-${r.id}` : undefined} onClick={() => onAdvance(r, s)}>{busy === r.id + s ? "Updating…" : ACTION_LABEL[s]}</button>
-                {locked && <p id={`lock-${r.id}`} className="muted" style={{ marginTop: ".3rem" }}>{r.startOpensAt ? `You can start this ride from ${fmt(r.startOpensAt, tz)} (two hours before pickup).` : "This ride has no valid pickup time."}</p>}
+                <button type="button" className={`btn ${i === r.nextStatuses.length - 1 ? "btn--primary" : "btn--ghost"}`} style={{ minHeight: 52, width: "100%" }} disabled={!!busy || locked} aria-describedby={locked ? `lock-${r.id}-${s}` : undefined} onClick={() => onAdvance(r, s)}>{busy === r.id + s ? "Updating…" : ACTION_LABEL[s]}</button>
+                {locked && <p id={`lock-${r.id}-${s}`} className="muted" style={{ marginTop: ".3rem" }}>{text}</p>}
               </div>
             );
           })}
