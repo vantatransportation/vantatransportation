@@ -8,7 +8,7 @@ import { splitRides } from "@/lib/driver/dashboard";
 import ChatPanel from "@/components/chat/ChatPanel";
 import StarRatingForm from "@/components/StarRatingForm";
 
-const ACTION_LABEL: Record<string, string> = { getting_ready: "Start ride", on_the_way: "Leave for pickup", arrived: "Arrived at pickup", picked_up: "Passenger picked up", completed: "Complete ride" };
+const ACTION_LABEL: Record<string, string> = { getting_ready: "Getting Ready", on_the_way: "Leave for pickup", arrived: "Arrived at pickup", picked_up: "Passenger picked up", completed: "Complete ride" };
 const fmt = (iso: string, tz: string) => new Intl.DateTimeFormat("en-US", { timeZone: tz, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(iso));
 
 export default function DriverDashboard({ profile: initialProfile, name, plate, initial, tz, helpline, serverNow }: { profile: DriverProfileCard | null; name: string; plate: string | null; initial: DriverRide[]; tz: string; helpline: { display: string; tel: string } | null; serverNow: string }) {
@@ -119,11 +119,11 @@ function RideCard({ r, tz, busy, onAdvance, nowMs, featured }: { r: DriverRide; 
   const [chat, setChat] = useState(false);
   const bags = r.checkedBags != null || r.carryOnBags != null ? `${r.checkedBags ?? 0} checked · ${r.carryOnBags ?? 0} carry-on` : null;
   const lockFor = (s: string): { locked: boolean; text: string } => {
-    const at = s === "getting_ready" ? r.startOpensAt : s === "on_the_way" ? r.leaveOpensAt : null;
-    if (s !== "getting_ready" && s !== "on_the_way") return { locked: false, text: "" };
+    const at = s === "on_the_way" ? r.leaveOpensAt : null;
+    if (s !== "on_the_way") return { locked: false, text: "" };
     if (!at) return { locked: true, text: "This ride has no valid pickup time." };
     const locked = nowMs < new Date(at).getTime();
-    return { locked, text: locked ? (s === "getting_ready" ? `You can start this ride from ${fmt(at, tz)} (two hours before pickup).` : `You can leave for this pickup from ${fmt(at, tz)}.`) : "" };
+    return { locked, text: locked ? `You can leave for this pickup from ${fmt(at, tz)}.` : "" };
   };
   return (
     <article className="panel" style={{ marginTop: ".75rem", ...(featured ? { borderLeft: "4px solid var(--accent, #c9a24a)" } : {}) }}>
@@ -142,9 +142,10 @@ function RideCard({ r, tz, busy, onAdvance, nowMs, featured }: { r: DriverRide; 
         {r.notes && <><dt>Customer notes</dt><dd>{r.notes}</dd></>}
       </dl>
       {r.open && r.chatOpen && <p><button type="button" className="btn btn--ghost" style={{ minHeight: 48, width: "100%" }} aria-expanded={chat} onClick={() => setChat((v) => !v)}>{chat ? "Hide chat" : "Chat with customer"}</button></p>}
-      {r.open && !r.chatOpen && <p className="muted">Chat with the customer opens once you start the ride or leave for pickup.</p>}
+      {r.open && !r.chatOpen && <p className="muted">{r.awaitingPayment ? "Chat opens once the booking is confirmed." : r.chatOpensAt ? `Chat with the customer opens ${fmt(r.chatOpensAt, tz)} (24 hours before pickup).` : "Chat is not available for this ride."}</p>}
       {chat && r.open && r.chatOpen && <ChatPanel role="driver" endpoint="/api/driver/messages" bookingId={r.id} title="Chat with customer" />}
       {r.awaitingPayment && <p className="notice" role="status">Waiting for payment to be confirmed. The ride cannot start until it is.</p>}
+      {(r.status === "assigned" || r.status === "confirmed") && !r.awaitingPayment && <p className="muted" style={{ marginTop: ".75rem" }}>Tap Getting Ready to confirm you have seen this ride and are responsible for it.</p>}
       {r.nextStatuses.length > 0 && (
         <div style={{ display: "grid", gap: ".5rem", marginTop: ".75rem" }}>
           {r.nextStatuses.map((s, i) => {

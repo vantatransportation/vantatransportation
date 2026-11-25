@@ -12,7 +12,7 @@ export type Actor = "admin" | "driver" | "customer";
 export const DRIVER_FLOW: BookingStatus[] = ["assigned", "getting_ready", "on_the_way", "arrived", "picked_up", "completed"];
 
 export const STATUS_LABEL: Record<BookingStatus, string> = {
-  new_request: "Awaiting review", pending_confirmation: "Awaiting review", confirmed: "Confirmed", assigned: "Driver assigned", getting_ready: "Driver getting ready",
+  new_request: "Awaiting review", pending_confirmation: "Awaiting review", confirmed: "Confirmed", assigned: "Driver assigned", getting_ready: "Driver has acknowledged your ride",
   on_the_way: "Driver on the way", arrived: "Driver arrived", picked_up: "Passenger picked up", in_progress: "In progress", completed: "Completed",
   cancelled: "Cancelled", rejected: "Declined", no_show: "No show",
 };
@@ -66,33 +66,30 @@ export function rideMayProgress(b: { confirmed_at?: string | null; payment_statu
 export const AWAITING_PAYMENT_MESSAGE = "This ride cannot start yet: the customer's payment has not been confirmed. You will be able to continue as soon as it is.";
 
 /**
- * "Start Ride" is the driver's first progress step on a ride (status getting_ready). It opens exactly two hours before the
- * scheduled pickup. Leaving for pickup (on_the_way) is a separate step and is NOT time-restricted here.
- * Both the driver API (authoritative, uses the SERVER clock) and the dashboard (display only) use this one function.
+ * Driver actions (client rules, Nov 2026):
+ *  - Getting Ready (status getting_ready) is the driver ACKNOWLEDGING an assigned ride. It is not the start of the journey and has no time restriction.
+ *  - Leave for Pickup (on_the_way) is a separate step that must not happen days early. It opens `dispatchMinutes` before pickup (admin setting,
+ *    default 240). A travel-time-based rule is proposed in docs/PROPOSALS.md and is NOT implemented until approved; this fixed window is the interim safeguard.
+ *  - Start Ride is a separate status action whose position in the flow is awaiting approval (see docs/PROPOSALS.md). It is not implemented yet.
  */
-export const START_RIDE_STATUS: BookingStatus = "getting_ready";
-export const START_WINDOW_MS = 2 * 60 * 60 * 1000;
-export function startRideWindow(pickupAt: string | Date | null | undefined, nowMs: number): { allowed: boolean; opensAt: string | null } {
+export const ACKNOWLEDGE_STATUS: BookingStatus = "getting_ready";
+
+/** Chat opens 24 hours before the (current) scheduled pickup, stays open during the ride, and closes when the ride ends. */
+export const CHAT_OPENS_BEFORE_MS = 24 * 60 * 60 * 1000;
+export function chatOpensAt(pickupAt: string | Date | null | undefined): string | null {
   const t = pickupAt ? new Date(pickupAt).getTime() : NaN;
-  if (!Number.isFinite(t)) return { allowed: false, opensAt: null };
-  const opens = t - START_WINDOW_MS;
-  return { allowed: nowMs >= opens, opensAt: new Date(opens).toISOString() };
+  return Number.isFinite(t) ? new Date(t - CHAT_OPENS_BEFORE_MS).toISOString() : null;
 }
+export const chatWindowOpen = (pickupAt: string | Date | null | undefined, nowMs: number): boolean => {
+  const at = chatOpensAt(pickupAt);
+  return at !== null && nowMs >= new Date(at).getTime();
+};
 
-/** Chat between customer and driver opens once the driver has started the ride or is on the way, and closes with the ride. */
-export const CHAT_STATES: BookingStatus[] = ["getting_ready", "on_the_way", "arrived", "picked_up", "in_progress"];
-export const chatAllowedForStatus = (s: string) => (CHAT_STATES as string[]).includes(s);
-
-/**
- * Leave for Pickup (on_the_way) is a separate step from Start Ride. A driver may leave before the two-hour Start Ride window,
- * but not days early: it opens `dispatchMinutes` before pickup (admin setting, default 240 = 4 hours, never below the Start Ride window).
- * Start Ride is optional and, if used, comes first; leaving for pickup moves the ride past it.
- */
 export const LEAVE_FOR_PICKUP_STATUS: BookingStatus = "on_the_way";
 export const DEFAULT_DISPATCH_MINUTES = 240;
 export const clampDispatchMinutes = (v: unknown): number => {
   const n = Math.round(Number(v));
-  return Number.isFinite(n) ? Math.min(Math.max(n, START_WINDOW_MS / 60000), 2880) : DEFAULT_DISPATCH_MINUTES;
+  return Number.isFinite(n) ? Math.min(Math.max(n, 15), 2880) : DEFAULT_DISPATCH_MINUTES;
 };
 export function leaveForPickupWindow(pickupAt: string | Date | null | undefined, nowMs: number, dispatchMinutes: unknown = DEFAULT_DISPATCH_MINUTES): { allowed: boolean; opensAt: string | null } {
   const t = pickupAt ? new Date(pickupAt).getTime() : NaN;

@@ -136,6 +136,28 @@ export async function POST(request: Request) {
       const paid = ["paid", "deposit_paid", "partially_refunded"].includes(String(b.payment_status));
       return json({ ok: true, status: "cancelled", refundReviewNeeded: paid });
     }
+    case "reschedule": {
+      // The ONLY way the official pickup time changes (a chat message never does). Admin-only, recorded, customer notified.
+      if (["picked_up", "in_progress", "completed", "cancelled", "rejected", "no_show"].includes(status)) return json({ error: "The pickup time can no longer be changed for this booking." }, 409);
+      const next = typeof body.pickupAt === "string" ? new Date(body.pickupAt) : null;
+      if (!next || Number.isNaN(next.getTime())) return json({ error: "Enter a valid new pickup date and time." }, 422);
+      if (next.getTime() <= Date.now()) return json({ error: "The new pickup time must be in the future." }, 422);
+      if (b.pickup_at && next.getTime() === new Date(b.pickup_at).getTime()) return json({ error: "That is already the pickup time." }, 422);
+      const reason = clean(body.reason, 300);
+      const fmtT = (x: string | Date) => new Date(x).toLocaleString("en-US", { timeZone: BUSINESS_TZ, dateStyle: "medium", timeStyle: "short" });
+      const previousIso = b.pickup_at as string | null;
+      // Conditional update: if another admin changed the time or status meanwhile, nothing is written.
+      const upd = await g.db.from("bookings").update({ pickup_at: next.toISOString() }).eq("id", id).eq("status", status).eq("pickup_at", previousIso).select("id");
+      if (upd.error || !upd.data?.length) return json({ error: "This booking was just changed by someone else. Reload and try again." }, 409);
+      const was = previousIso ? fmtT(previousIso) : "not set"; const now2 = fmtT(next);
+      await history(status, status, `Pickup time changed from ${was} to ${now2}${reason ? `: ${reason}` : ""}`);
+      await log("booking.rescheduled", { previous: previousIso, next: next.toISOString(), reason: reason || null });
+      const cust = await customer();
+      const drv = b.driver_id ? await driverOf(b.driver_id as string) : null;
+      const data = { Reference: String(b.reference), "Previous pickup time": was, "New pickup time": now2, Pickup: String(b.pickup_address ?? ""), Destination: String(b.dropoff_address ?? "") || undefined, "Tracking ID": b.tracking_code ? String(b.tracking_code) : undefined };
+      if (cust?.email || drv?.email) await notify(g.db, "booking.rescheduled", { type: "booking", id }, { ...data, _customerEmail: cust?.email ?? undefined, _customerName: cust?.name ?? undefined, _driverEmail: drv?.email ?? undefined, _driverName: drv?.full_name ?? undefined }, { dedupeSuffix: next.toISOString() });
+      return json({ ok: true, pickupAt: next.toISOString() });
+    }
     case "advance": {
       // Admin may move a ride through the same driver steps (for example to complete a ride a driver could not). Never to
       // assigned / confirmed (those come from approval and verified payment), and never out of a terminal state.

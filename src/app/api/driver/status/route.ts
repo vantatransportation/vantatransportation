@@ -1,7 +1,7 @@
 import { json, readJson, sameOrigin } from "@/lib/http";
 import { getDriverForApi } from "@/lib/driver/auth";
 import { getAdminClient } from "@/lib/supabase/admin";
-import { AWAITING_PAYMENT_MESSAGE, START_RIDE_STATUS, LEAVE_FOR_PICKUP_STATUS, leaveForPickupWindow, canTransition, DRIVER_FLOW, rideMayProgress, startRideWindow, type BookingStatus } from "@/lib/booking-status";
+import { AWAITING_PAYMENT_MESSAGE, LEAVE_FOR_PICKUP_STATUS, leaveForPickupWindow, canTransition, DRIVER_FLOW, rideMayProgress, type BookingStatus } from "@/lib/booking-status";
 import { notify } from "@/lib/notify";
 import { loadBookingSettings } from "@/lib/policies";
 import { BUSINESS_TZ } from "@/lib/config";
@@ -33,14 +33,7 @@ export async function POST(request: Request) {
   // Server-side payment gate: an assigned driver cannot start or progress a ride until a verified payment confirmed the booking.
   if (!rideMayProgress(b)) return json({ error: AWAITING_PAYMENT_MESSAGE, code: "awaiting_payment" }, 409);
 
-  // Start Ride opens exactly two hours before pickup. The SERVER clock decides; the browser's clock is never consulted.
-  if (to === START_RIDE_STATUS) {
-    const w = startRideWindow(b.pickup_at, Date.now());
-    if (!w.allowed) {
-      const at = w.opensAt ? new Date(w.opensAt).toLocaleString("en-US", { timeZone: BUSINESS_TZ, dateStyle: "medium", timeStyle: "short" }) : null;
-      return json({ error: at ? `You can start this ride from ${at}, two hours before pickup.` : "This ride has no valid pickup time.", code: "too_early", opensAt: w.opensAt }, 409);
-    }
-  }
+  // Getting Ready is an acknowledgement and is deliberately not time-restricted. Leave for Pickup (below) is the time-gated step.
 
   // Leave for Pickup opens at the configured dispatch window (default 4 hours before pickup): not days early. Same server-clock rule.
   if (to === LEAVE_FOR_PICKUP_STATUS) {

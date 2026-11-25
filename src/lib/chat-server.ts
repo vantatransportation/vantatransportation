@@ -1,14 +1,18 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { validateMessage, type ChatMessage, type ChatRole } from "@/lib/chat";
-import { chatAllowedForStatus, isOpenForDriver, type BookingStatus } from "@/lib/booking-status";
+import { chatWindowOpen, isOpenForDriver, rideMayProgress, type BookingStatus } from "@/lib/booking-status";
 
 type Row = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const CLIENT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 
-/** Chat is open only while a driver is assigned AND has started the ride or is on the way (until the ride ends). Enforced for every read-for-send and send, for both roles. */
-export const chatOpen = (b: { status: string; driver_id: string | null }) => Boolean(b.driver_id) && chatAllowedForStatus(b.status) && isOpenForDriver(b.status as BookingStatus);
+/**
+ * Chat is open only while ALL hold, computed on the server from the booking row: a driver is assigned; the booking is confirmed by verified payment
+ * and still standing (rideMayProgress); the ride is not over; and now is within 24 hours before the CURRENT pickup time (a pickup change moves it).
+ */
+export const chatOpen = (b: { status: string; driver_id: string | null; pickup_at?: string | null; confirmed_at?: string | null; payment_status?: string | null }, nowMs: number = Date.now()) =>
+  Boolean(b.driver_id) && rideMayProgress({ status: b.status, confirmed_at: b.confirmed_at ?? null, payment_status: b.payment_status ?? null }) && isOpenForDriver(b.status as BookingStatus) && chatWindowOpen(b.pickup_at ?? null, nowMs);
 
 export type Scope = { role: "customer" } | { role: "driver"; driverId: string };
 
@@ -27,8 +31,12 @@ export async function listMessages(db: SupabaseClient, bookingId: string, scope:
 export type SendResult = { ok: true; message: ChatMessage; duplicate: boolean } | { ok: false; status: number; error: string };
 
 /** Caller has ALREADY authorised the sender for this booking. Re-checks that chat is open and stores the message exactly once. */
-export async function sendMessage(db: SupabaseClient, booking: { id: string; status: string; driver_id: string | null }, role: ChatRole, text: unknown, clientId: unknown): Promise<SendResult> {
-  if (!chatOpen(booking)) return { ok: false, status: 409, error: "Chat opens once your driver has started the ride or is on the way, and closes when the ride ends." };
+export async function sendMessage(db: SupabaseClient, passed: { id: string; status: string; driver_id: string | null }, role: ChatRole, text: unknown, clientId: unknown): Promise<SendResult> {
+  // Never trust the caller's copy of the booking: re-read the authoritative row so status, payment, driver and pickup time are current.
+  const { data: fresh } = await db.from("bookings").select("id,status,driver_id,pickup_at,confirmed_at,payment_status").eq("id", passed.id).maybeSingle();
+  if (!fresh || (role === "driver" && fresh.driver_id !== passed.driver_id)) return { ok: false, status: 404, error: "Not found." };
+  const booking = { id: fresh.id as string, status: fresh.status as string, driver_id: (fresh.driver_id ?? null) as string | null };
+  if (!chatOpen(fresh)) return { ok: false, status: 409, error: "Chat opens 24 hours before pickup and closes when the ride ends." };
   const v = validateMessage(text, role);
   if (!v.ok) return { ok: false, status: 422, error: v.error };
   if (typeof clientId !== "string" || !CLIENT_ID_RE.test(clientId)) return { ok: false, status: 400, error: "Invalid request." };

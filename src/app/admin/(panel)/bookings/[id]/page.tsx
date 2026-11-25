@@ -76,7 +76,7 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
       </div>
       {!helpline && <div className="banner">The Vanta support phone number is not set. Customers and drivers cannot see a Call Vanta Support button until you add it in Website content (contact.phone). <Link href="/admin/content" style={{ textDecoration: "underline" }}>Website content</Link></div>}
       <BookingWorkflow id={id} status={b.status} driverId={b.driver_id ?? null} driverName={driverRows.find((d) => d.id === b.driver_id)?.full_name ?? null} paymentReleased={Boolean(b.payment_released_at && b.driver_id)}
-        nextSteps={DRIVER_FLOW.filter((to) => to !== "assigned" && canTransition("admin", b.status as BookingStatus, to))} confirmedAt={b.confirmed_at ?? null}
+        pickupAt={b.pickup_at} tz={BUSINESS_TZ} nextSteps={DRIVER_FLOW.filter((to) => to !== "assigned" && canTransition("admin", b.status as BookingStatus, to))} confirmedAt={b.confirmed_at ?? null}
         drivers={driverRows.map((d) => ({ id: d.id, name: d.full_name, plate: d.vehicle_plate, active: d.is_active }))}
         history={((histQ.data ?? []) as { to_status: string; note: string | null; created_at: string; actor_type: string }[]).map((h) => ({ to: h.to_status, at: h.created_at, note: h.note, actor: h.actor_type }))} />
       <div className="twocol">

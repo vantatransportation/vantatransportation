@@ -18,6 +18,11 @@ export default async function Pricing() {
   return (
     <>
       <h1>Pricing management</h1>
+      <p className="adm-sub">
+        Each vehicle has its own pricing. Customers only receive online quotes for vehicles with an <strong>active</strong> configuration. The seeded values are
+        unconfirmed draft research; review them, edit as needed, then set the status to Active to publish. Activating a configuration archives the vehicle&apos;s previous active one.
+        Past bookings keep the price snapshot they were quoted with.
+      </p>
       {unpriced.length > 0 && <div className="banner">No active pricing (customers cannot get an online quote): {unpriced.map((v) => v.name).join(", ")}</div>}
       <ResourceManager resource={toClient(resources.pricing)} rows={configs} refOptions={cfgRefs} tz={BUSINESS_TZ} createLabel="Add pricing configuration" />
       <h2>Surcharges</h2>

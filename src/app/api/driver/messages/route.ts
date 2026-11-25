@@ -12,8 +12,8 @@ async function ownRide(bookingId: unknown, driverId: string) {
   if (typeof bookingId !== "string" || !UUID_RE.test(bookingId)) return null;
   const db = getAdminClient();
   if (!db) return null;
-  const { data } = await db.from("bookings").select("id,status,driver_id").eq("id", bookingId).eq("driver_id", driverId).maybeSingle();
-  return data ? { db, ride: data as { id: string; status: string; driver_id: string } } : null;
+  const { data } = await db.from("bookings").select("id,status,driver_id,pickup_at,confirmed_at,payment_status").eq("id", bookingId).eq("driver_id", driverId).maybeSingle();
+  return data ? { db, ride: data as { id: string; status: string; driver_id: string; pickup_at: string | null; confirmed_at: string | null; payment_status: string | null } } : null;
 }
 
 export async function GET(request: Request) {

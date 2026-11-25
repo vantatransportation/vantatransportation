@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { startRideWindow, START_WINDOW_MS, chatAllowedForStatus, CHAT_STATES } from "../src/lib/booking-status.ts";
+import { chatOpensAt, chatWindowOpen, CHAT_OPENS_BEFORE_MS } from "../src/lib/booking-status.ts";
 import { deriveDriverColumns, driverProfileProblem, driverDisplayName, driverInitials } from "../src/lib/driver/profile.ts";
 import { resources } from "../src/lib/admin/resources.ts";
 import { chatOpen } from "../src/lib/chat-server.ts";
@@ -10,25 +10,25 @@ import { DRIVERS_FOLDER, folderForPurpose, parsePurpose } from "../src/lib/hero.
 
 const NOW = Date.parse("2026-12-01T12:00:00Z");
 
-test("Start Ride opens exactly two hours before pickup and not a second earlier", () => {
-  const pickup = new Date(NOW + START_WINDOW_MS).toISOString();                 // pickup is exactly 2h away
-  assert.equal(startRideWindow(pickup, NOW).allowed, true);                      // exactly 2h: open
-  assert.equal(startRideWindow(pickup, NOW - 1).allowed, false);                 // 1 ms earlier: locked
-  assert.equal(startRideWindow(pickup, NOW - 1).opensAt, new Date(NOW).toISOString());
-  assert.equal(startRideWindow(new Date(NOW + 5 * 86400_000), NOW).allowed, false); // days ahead: locked
-  assert.equal(startRideWindow(new Date(NOW - 3600_000), NOW).allowed, true);    // pickup time already passed: still allowed
-  assert.deepEqual(startRideWindow("not a date", NOW), { allowed: false, opensAt: null });
-  assert.deepEqual(startRideWindow(null, NOW), { allowed: false, opensAt: null });
+test("chat window opens exactly 24 hours before pickup, and only then (pure rule)", () => {
+  const pickup = new Date(NOW + CHAT_OPENS_BEFORE_MS).toISOString();
+  assert.equal(chatWindowOpen(pickup, NOW), true);                 // exactly 24h before
+  assert.equal(chatWindowOpen(pickup, NOW - 1), false);            // one millisecond earlier
+  assert.equal(chatOpensAt(pickup), new Date(NOW).toISOString());
+  assert.equal(chatWindowOpen(new Date(NOW + 5 * 86400_000), NOW), false);
+  assert.equal(chatWindowOpen(new Date(NOW - 3600_000), NOW), true); // pickup time already passed: still inside the window (the ride state decides when it closes)
+  assert.equal(chatWindowOpen("not a date", NOW), false); assert.equal(chatWindowOpen(null, NOW), false);
 });
 
-test("chat opens only once the driver started the ride or is on the way, and only with an assigned driver", () => {
-  for (const s of ["pending", "approved", "assigned", "confirmed", "completed", "cancelled", "rejected"]) assert.equal(chatAllowedForStatus(s), false, s);
-  for (const s of CHAT_STATES) assert.equal(chatAllowedForStatus(s), true, s);
-  assert.equal(chatOpen({ status: "assigned", driver_id: "d" }), false);
-  assert.equal(chatOpen({ status: "on_the_way", driver_id: "d" }), true);
-  assert.equal(chatOpen({ status: "getting_ready", driver_id: "d" }), true);
-  assert.equal(chatOpen({ status: "on_the_way", driver_id: null }), false);
-  assert.equal(chatOpen({ status: "completed", driver_id: "d" }), false);       // closes with the ride
+test("chat is open only for an assigned driver, a confirmed and paid booking, an unfinished ride, inside the 24-hour window", () => {
+  const base = { status: "assigned", driver_id: "d", confirmed_at: "2026-12-01T00:00:00Z", payment_status: "paid", pickup_at: new Date(NOW + 3600_000).toISOString() };
+  assert.equal(chatOpen(base, NOW), true);
+  for (const s of ["getting_ready", "on_the_way", "arrived", "picked_up", "in_progress"]) assert.equal(chatOpen({ ...base, status: s }, NOW), true, s);
+  for (const s of ["completed", "cancelled", "rejected", "no_show", "pending_confirmation"]) assert.equal(chatOpen({ ...base, status: s }, NOW), false, s);
+  assert.equal(chatOpen({ ...base, driver_id: null }, NOW), false);
+  assert.equal(chatOpen({ ...base, confirmed_at: null }, NOW), false);       // not confirmed
+  assert.equal(chatOpen({ ...base, payment_status: "unpaid" }, NOW), false); // payment not verified
+  assert.equal(chatOpen({ ...base, pickup_at: new Date(NOW + 25 * 3600_000).toISOString() }, NOW), false); // 25h away
 });
 
 test("driver profile: required fields, derived legacy columns, display name", () => {
@@ -44,14 +44,15 @@ test("driver profile: required fields, derived legacy columns, display name", ()
   assert.equal(driverInitials("Dana Marie"), "DM"); assert.equal(driverInitials(null), "V");
 });
 
-test("admin driver form uses only the approved fields and no phone number", () => {
+test("admin driver form has the approved fields, including the restored company-only phone", () => {
   const names = resources.drivers.fields.map((f) => f.name);
-  assert.deepEqual(names.filter((n) => !["notes", "is_active", "email", "image_public_id"].includes(n)), ["first_name", "last_name", "preferred_name", "vehicle_year", "vehicle_make", "vehicle_model", "vehicle_plate", "location", "preferred_area", "image_url"]);
-  assert.ok(!names.includes("phone"));
+  assert.deepEqual(names.filter((n) => !["notes", "is_active", "email", "image_public_id", "phone"].includes(n)), ["first_name", "last_name", "preferred_name", "vehicle_year", "vehicle_make", "vehicle_model", "vehicle_plate", "location", "preferred_area", "image_url"]);
+  assert.ok(names.includes("phone"));                                             // restored: company and admin use only
+  assert.notEqual(resources.drivers.fields.find((f) => f.name === "phone")?.required, true); // optional, so existing drivers are not blocked
   const req = (n: string) => resources.drivers.fields.find((f) => f.name === n)?.required;
   for (const n of ["first_name", "last_name", "vehicle_year", "vehicle_make", "vehicle_model", "vehicle_plate", "location"]) assert.equal(req(n), true, n);
   for (const n of ["preferred_name", "preferred_area", "image_url"]) assert.ok(!req(n), n);
-  assert.ok(!resources.drivers.select.split(",").includes("phone"));
+  assert.ok(resources.drivers.select.split(",").includes("phone"));
 });
 
 test("driver pictures use the existing Cloudinary uploader in their own folder", () => {
@@ -79,4 +80,24 @@ test("airport form keeps the essentials visible and moves the rest into a collap
   assert.match(details, /Additional information/);
   assert.ok(details.includes('id="a-inst"'));
   for (const id of ["a-airline", "a-ftime", "a-term"]) assert.ok(!f.includes(`id="${id}"`), `${id} must not be on the customer form`); // airline, flight time and terminal were removed
+});
+
+test("Getting Ready is the acknowledgement button with the exact label, no time lock; Leave for Pickup stays the gated step", () => {
+  const dash = readFileSync("src/components/driver/DriverDashboard.tsx", "utf8");
+  assert.match(dash, /getting_ready: "Getting Ready"/);
+  assert.match(dash, /on_the_way: "Leave for pickup"/);
+  assert.ok(!/s === "getting_ready" &&[^\n]*locked|startOpensAt/.test(dash), "Getting Ready must not be time-locked in the UI");
+  const route = readFileSync("src/app/api/driver/status/route.ts", "utf8");
+  assert.ok(!/startRideWindow|START_RIDE_STATUS/.test(route), "the server must not time-gate Getting Ready");
+  assert.match(route, /LEAVE_FOR_PICKUP_STATUS/); assert.match(route, /too_early/);
+});
+
+test("the proposals document exists and the unapproved features are not implemented", () => {
+  const doc = readFileSync("docs/PROPOSALS.md", "utf8");
+  for (const h of ["Time zones and rescheduled bookings", "sedan booked, SUV required", "authorize now, capture on approval", "Flight tracking: out of scope"]) assert.ok(doc.includes(h), h);
+  assert.ok(!/AeroAPI|FlightAware|Aviationstack/i.test(doc), "flight-provider research is out of scope");
+  const all = readdirSync("src/app/api", { recursive: true }).map(String);
+  assert.ok(!all.filter((f) => !/paypal/i.test(f)).some((f) => /flight|capture|vehicle-change|pickup-change/i.test(f)), // the existing PayPal capture route is unrelated and stays
+     "no flight, capture, SUV-upgrade or pickup-change endpoints may exist before approval");
+  assert.ok(!readFileSync("src/lib/payments-server.ts", "utf8").includes("capture_method"));
 });

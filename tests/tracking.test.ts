@@ -108,8 +108,8 @@ test("no direct calling of customers or drivers; only the configured helpline; T
   const files = [...walk("src/components"), ...walk("src/app"), ...walk("src/lib")].filter((f) => /\.(tsx?|ts)$/.test(f));
   const telUses = files.filter((f) => /tel:/.test(read(f)));
   // Allowed: the business phone in footer/contact (site content), the helpline button, and docs inside helpline.ts.
-  // (the admin leads page keeps its staff-only phone link: internal contact details stay inside the protected dashboard)
-  assert.deepEqual(telUses.sort(), ["src/app/(site)/contact/page.tsx", "src/app/admin/(panel)/leads/[id]/page.tsx", "src/components/SiteFooter.tsx", "src/components/TripStatus.tsx", "src/components/driver/DriverDashboard.tsx", "src/lib/helpline.ts"].sort());
+  // (the admin leads page and the admin overview's driver-acknowledgement follow-up list keep staff-only phone links: internal contact details stay inside the protected dashboard)
+  assert.deepEqual(telUses.sort(), ["src/app/(site)/contact/page.tsx", "src/app/admin/(panel)/leads/[id]/page.tsx", "src/app/admin/(panel)/page.tsx", "src/components/SiteFooter.tsx", "src/components/TripStatus.tsx", "src/components/driver/DriverDashboard.tsx", "src/lib/helpline.ts"].sort());
   for (const f of ["src/components/TripStatus.tsx", "src/components/driver/DriverDashboard.tsx"]) assert.ok(read(f).includes("helpline.tel"), f);
   assert.ok(!/passengerPhone|contactPhone|driver\.phone|Driver phone/.test([...walk("src/components"), "src/lib/trip.ts", "src/lib/driver/rides.ts", "src/lib/notify/templates.ts"].map(read).join("\n")));
   const nav = read("src/components/SiteHeader.tsx");

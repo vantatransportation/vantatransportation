@@ -4,7 +4,7 @@
  */
 export type NotifyEvent =
   | "booking.created" | "lead.created" | "quote.created" | "quote.responded" | "quote.revised_sent" | "booking.status_changed" | "payment.paid"
-  | "booking.approved" | "booking.confirmed" | "booking.reassigned" | "booking.rejected" | "driver.assigned" | "driver.unassigned";
+  | "booking.approved" | "booking.confirmed" | "booking.reassigned" | "booking.rescheduled" | "booking.rejected" | "driver.assigned" | "driver.unassigned";
 
 export interface EmailMessage {
   audience: "business" | "customer";
@@ -132,6 +132,25 @@ export function buildNotification(event: NotifyEvent, d: Data): BuiltNotificatio
           fields: pick(d, ["Reference", "When", "Pickup", "Destination", "Reason"]),
         }] : [],
       };
+    case "booking.rescheduled": {
+      const fields = pick(d, ["Reference", "Previous pickup time", "New pickup time", "Pickup", "Destination"]);
+      return {
+        admin: null,
+        emails: [
+          ...(d._customerEmail ? [{
+            audience: "customer" as const, to: customerTo(d), subject: `Your pickup time has changed (${v(d, "Reference")})`, heading: "Your pickup time has changed",
+            intro: "Your pickup time was changed and approved by our team. Your new pickup time is below.",
+            fields: pick(withTracking(d), ["Reference", "Tracking ID", "Previous pickup time", "New pickup time", "Pickup", "Destination"]),
+          }] : []),
+          ...(d._driverEmail ? [{
+            audience: "customer" as const, to: driverTo(d), subject: `Pickup time changed (${v(d, "Reference")})`, heading: "A pickup time was changed",
+            intro: "An administrator approved a new pickup time for a trip assigned to you.",
+            fields,
+            ...(d._driverUrl ? { ctaLabel: "Open driver page", ctaUrl: d._driverUrl } : {}),
+          }] : []),
+        ],
+      };
+    }
     case "driver.assigned":
       return {
         admin: null,

@@ -1,6 +1,6 @@
 -- 0013: Phase 2 (dispatch window, ratings, performance points). Additive and backward compatible; safe to run more than once. Run AFTER 0012.
 
--- 1. Leave-for-pickup dispatch window (minutes before pickup). Server-enforced; never below the 120-minute Start Ride window.
+-- 1. Leave-for-pickup dispatch window (minutes before pickup), a temporary admin-editable rule (default 240). Stored on the existing booking_settings row so it can be changed without a redeploy.
 alter table public.booking_settings add column if not exists driver_dispatch_window_minutes integer not null default 240;
 
 -- 2. Per-driver performance fields. Points are separate from star ratings (never derived from them).

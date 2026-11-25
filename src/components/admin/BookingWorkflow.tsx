@@ -2,12 +2,12 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { postJson } from "./util";
+import { isoToLocalInput, localInputToIso, postJson } from "./util";
 
 export interface DriverOption { id: string; name: string; plate: string | null; active: boolean }
 interface Props {
   id: string; status: string; driverId: string | null; driverName: string | null; paymentReleased: boolean;
-  nextSteps: string[]; confirmedAt: string | null; drivers: DriverOption[]; history: { to: string; at: string; note: string | null; actor: string }[];
+  pickupAt: string; tz: string; nextSteps: string[]; confirmedAt: string | null; drivers: DriverOption[]; history: { to: string; at: string; note: string | null; actor: string }[];
 }
 const AWAITING = ["new_request", "pending_confirmation"];
 const REASSIGNABLE = ["confirmed", "assigned", "getting_ready"];
@@ -21,6 +21,8 @@ export default function BookingWorkflow(p: Props) {
   const awaiting = AWAITING.includes(p.status);
   const canReassign = REASSIGNABLE.includes(p.status) && Boolean(p.driverId);
   const canCancel = !["completed", "cancelled", "rejected", "no_show", "picked_up"].includes(p.status);
+  const canReschedule = !["picked_up", "in_progress", "completed", "cancelled", "rejected", "no_show"].includes(p.status);
+  const [newTime, setNewTime] = useState(isoToLocalInput(p.pickupAt, p.tz));
   const active = p.drivers.filter((d) => d.active && d.id !== p.driverId);
 
   async function run(action: string, extra: Record<string, unknown>, confirmText: string) {
@@ -72,6 +74,14 @@ export default function BookingWorkflow(p: Props) {
         <details style={{ marginTop: "1rem" }}><summary>Status history</summary>
           <table className="lines"><tbody>{p.history.map((h, i) => <tr key={i}><td>{new Date(h.at).toLocaleString()}</td><td>{h.to.replace(/_/g, " ")}{h.note ? ` · ${h.note}` : ""} <small className="muted">({h.actor})</small></td></tr>)}</tbody></table>
         </details>
+      )}
+      {canReschedule && (
+        <div style={{ marginTop: "1rem" }}>
+          <h4>Reschedule pickup</h4>
+          <p className="muted">Times are in {p.tz}. Use this after a customer asks for a change in chat: the chat message alone never changes the booking. The customer and driver are emailed, and the 24-hour chat opening moves with the new time.</p>
+          <div className="field"><label htmlFor="rs-time">New pickup time</label><input id="rs-time" type="datetime-local" value={newTime} onChange={(e) => setNewTime(e.target.value)} /></div>
+          <p><button type="button" className="btn btn--ghost" disabled={!!busy || !newTime} onClick={() => { const r = reason("Reason or note (optional, shown in the booking history)") ; void run("reschedule", { pickupAt: localInputToIso(newTime, p.tz), reason: r }, "Change the official pickup time and email the customer and driver?"); }}>Apply new pickup time</button></p>
+        </div>
       )}
     </div>
   );

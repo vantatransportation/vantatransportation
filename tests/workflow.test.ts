@@ -1163,7 +1163,11 @@ test("chat: only the booking's customer (tracking ID) and its CURRENTLY assigned
     // Assigned but the driver has not started the ride or left for pickup: chat is closed for BOTH sides, enforced by the API (not just the UI).
     assert.equal((await trackChat("POST", a.row.tracking_code, { body: "hello early", clientId: "client-0000-early" }, "10.7.0.9")).status, 409);
     assert.equal(db.t("booking_messages").filter((m: any) => m.booking_id === a.row.id).length, 0);
-    for (const x of [a, other]) { x.row.status = "getting_ready"; x.row.confirmed_at = new Date().toISOString(); x.row.payment_status = "paid"; } // paid and confirmed, and the driver has started the ride: chat opens
+    for (const x of [a, other]) { x.row.status = "getting_ready"; x.row.confirmed_at = new Date().toISOString(); x.row.payment_status = "paid"; x.row.pickup_at = new Date(Date.now() + 23 * 3600_000).toISOString(); } // paid and confirmed, pickup 23 hours away: chat is open
+    a.row.pickup_at = new Date(Date.now() + 25 * 3600_000).toISOString();           // 25 hours away: closed for both sides (24-hour rule, server-side)
+    assert.equal((await trackChat("POST", a.row.tracking_code, { body: "too early", clientId: "client-0000-24h1" }, "10.7.0.10")).status, 409);
+    assert.equal((await trackChat("GET", a.row.tracking_code, undefined, "10.7.0.11")).status === 200, true);
+    a.row.pickup_at = new Date(Date.now() + 23 * 3600_000).toISOString();
     assert.equal((await trackChat("GET", a.row.tracking_code, undefined, "10.7.0.8")).status, 200);
 
     const drvPost = (token: string, bookingId: string, body: unknown, clientId: string) => asDriver(token, () => routes.driverMessages.POST(post("/api/driver/messages", { bookingId, body, clientId })));
@@ -1191,9 +1195,9 @@ test("chat: only the booking's customer (tracking ID) and its CURRENTLY assigned
     assert.equal((await (await drvGet("drv1", a.row.id)).json()).messages.length, 1);
     assert.equal((await drvGet("drv2", a.row.id)).status, 404);
     assert.equal((await drvPost("drv2", a.row.id, "sneaky", "client-0005-aaaa")).status, 404);
-    a.row.status = "assigned"; // pushed back (for example by an admin): chat closes again at once
+    a.row.pickup_at = new Date(Date.now() + 2 * 24 * 3600_000).toISOString(); // pickup moved to later: the window moves with it and chat closes again at once
     assert.equal((await drvPost("drv1", a.row.id, "too early", "client-0006-early")).status, 409);
-    a.row.status = "getting_ready";
+    a.row.pickup_at = new Date(Date.now() + 3600_000).toISOString();
     assert.equal((await drvPost("drv1", a.row.id, "Be there in 3 minutes", "client-0006-aaaa")).status, 200);
     assert.equal((await drvPost("nobody", a.row.id, "hello", "client-0007-aaaa")).status, 401);
 
@@ -1271,20 +1275,20 @@ test("payment gate: a driver cannot progress a ride until a verified payment set
     await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p2, {}, "evt_gate_ok")));
     assert.ok(b.row.confirmed_at); assert.equal(b.row.status, "confirmed");
     assert.equal((await step("drv2", b.row.id, "completed")).status, 409);   // cannot skip steps
-    // Start Ride opens exactly two hours before pickup, decided by the server clock. A direct API call before that is refused.
+    // Getting Ready is an ACKNOWLEDGEMENT: allowed any time once confirmed and paid. Leave for Pickup is the server-gated step (never days early).
     const HOUR = 3600_000;
-    b.row.pickup_at = new Date(Date.now() + 2 * HOUR + 120_000).toISOString();   // 2h 02m away: still locked
-    const early = await step("drv2", b.row.id, "getting_ready");
-    assert.equal(early.status, 409); assert.equal((await early.json()).code, "too_early"); assert.equal(b.row.status, "confirmed");
-    assert.equal((await mine(b.row.id)) === undefined, true); // (this driver is drv2, so the ride belongs to d2, not d1)
-    b.row.pickup_at = new Date(Date.now() + 2 * HOUR - 60_000).toISOString();    // 1h 59m away: open
-    for (const to of ["getting_ready", "on_the_way", "arrived", "picked_up", "completed"]) assert.equal((await step("drv2", b.row.id, to)).status, 200, to);
+    b.row.pickup_at = new Date(Date.now() + 3 * 24 * HOUR).toISOString();          // days away
+    assert.equal((await step("drv2", b.row.id, "getting_ready")).status, 200); assert.equal(b.row.status, "getting_ready");
+    const early = await step("drv2", b.row.id, "on_the_way");
+    assert.equal(early.status, 409); assert.equal((await early.json()).code, "too_early"); assert.equal(b.row.status, "getting_ready");
+    b.row.pickup_at = new Date(Date.now() + 3 * HOUR).toISOString();               // inside the default 4-hour dispatch window
+    for (const to of ["on_the_way", "arrived", "picked_up", "completed"]) assert.equal((await step("drv2", b.row.id, to)).status, 200, to);
     assert.equal(b.row.status, "completed");
 
     // 7. Refunded after confirmation: progress stops until an admin resolves it; cancelled and declined never progress.
     const r = await flow(); await approve(r, d2.id); await pay(r.row.payment_token);
     await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", db.t("payments").find((x: any) => x.booking_id === r.row.id), {}, "evt_gate_r")));
-    r.row.pickup_at = new Date(Date.now() + 3600_000).toISOString(); // inside the two-hour start window
+    r.row.pickup_at = new Date(Date.now() + 3600_000).toISOString(); // inside the dispatch window
     assert.equal((await step("drv2", r.row.id, "getting_ready")).status, 200);
     r.row.payment_status = "refunded";
     assert.equal((await step("drv2", r.row.id, "on_the_way")).status, 409);
@@ -1327,27 +1331,27 @@ const rate = (code: string | null, body: unknown, ip: string) => {
 };
 const HOUR_MS = 3600_000;
 
-test("Leave for Pickup is server-gated by the dispatch window and separate from Start Ride", async () => {
+test("Leave for Pickup is server-gated by the dispatch window and separate from the Getting Ready acknowledgement", async () => {
   await withAuth(async () => {
     const d1 = aDriver(); d1.user_id = "u-d1";
     const step = (id: string, status: string) => asDriver("drv1", () => routes.driverStatusRoute.POST(post("/api/driver/status", { id, status })));
     const b = await flow(); await approve(b, d1.id); await confirmPaid(b);
-    b.row.pickup_at = new Date(Date.now() + 3 * 24 * HOUR_MS).toISOString();      // days away: neither step is allowed
-    for (const to of ["on_the_way", "getting_ready"]) { const r = await step(b.row.id, to); assert.equal(r.status, 409, to); assert.equal((await r.json()).code, "too_early"); }
-    assert.notEqual(b.row.status, "on_the_way");
+    b.row.pickup_at = new Date(Date.now() + 3 * 24 * HOUR_MS).toISOString();      // days away
+    const direct = await step(b.row.id, "on_the_way");                              // cannot skip straight to leaving, days early
+    assert.equal(direct.status, 409); assert.equal((await direct.json()).code, "too_early"); assert.notEqual(b.row.status, "on_the_way");
+    assert.equal((await step(b.row.id, "getting_ready")).status, 200);              // acknowledging is allowed at any time
+    assert.equal((await step(b.row.id, "on_the_way")).status, 409);
     b.row.pickup_at = new Date(Date.now() + 4 * HOUR_MS + 120_000).toISOString();  // 4h02m: default 4-hour dispatch window not open yet
     assert.equal((await step(b.row.id, "on_the_way")).status, 409);
-    b.row.pickup_at = new Date(Date.now() + 3 * HOUR_MS).toISOString();            // 3h: may leave for pickup, but Start Ride (2h) is still locked
-    assert.equal((await step(b.row.id, "getting_ready")).status, 409);
-    assert.equal((await step(b.row.id, "on_the_way")).status, 200);
-    assert.equal(b.row.status, "on_the_way");
+    b.row.pickup_at = new Date(Date.now() + 3 * HOUR_MS).toISOString();            // 3h: inside the window
+    assert.equal((await step(b.row.id, "on_the_way")).status, 200); assert.equal(b.row.status, "on_the_way");
   });
 });
 
 test("dispatch window rule is pure, clamped and never below the Start Ride window", async () => {
   const { leaveForPickupWindow, clampDispatchMinutes, DEFAULT_DISPATCH_MINUTES } = await import("../src/lib/booking-status.ts");
   assert.equal(DEFAULT_DISPATCH_MINUTES, 240);
-  assert.equal(clampDispatchMinutes(30), 120); assert.equal(clampDispatchMinutes("abc"), 240); assert.equal(clampDispatchMinutes(99999), 2880);
+  assert.equal(clampDispatchMinutes(5), 15); assert.equal(clampDispatchMinutes("abc"), 240); assert.equal(clampDispatchMinutes(99999), 2880);
   const now = Date.parse("2026-12-01T12:00:00Z"), pickup = new Date(now + 4 * HOUR_MS).toISOString();
   assert.equal(leaveForPickupWindow(pickup, now).allowed, true); assert.equal(leaveForPickupWindow(pickup, now - 1).allowed, false);
   assert.equal(leaveForPickupWindow(pickup, now, 360).allowed, true);               // admin widened it to 6 hours
@@ -1461,4 +1465,64 @@ test("emails: driver details only after verified payment confirms the booking, f
   const html = JSON.stringify(confirmed[0].body);
   for (const must of ["Dana", "Black Escalade", "VT-123", "Stop Cafe", b.row.tracking_code]) assert.ok(html.includes(must), must);
   assert.ok(!html.includes("4105550999") && !html.includes("Dana Driver"));            // no phone, no surname
+});
+
+test("admin follow-up list: only confirmed and paid, assigned, not-yet-acknowledged upcoming rides, earliest first", async () => {
+  const { loadUnacknowledgedRides } = await import("../src/lib/admin/acknowledgement.ts");
+  const d1 = aDriver();
+  const mk = async (hoursAway: number, ack: boolean, paid = true) => {
+    const b = await flow(); await approve(b, d1.id); if (paid) await confirmPaid(b);
+    b.row.pickup_at = new Date(Date.now() + hoursAway * HOUR_MS).toISOString(); if (ack) b.row.status = "getting_ready";
+    return b;
+  };
+  const late = await mk(30, false), soon = await mk(5, false), acked = await mk(6, true), unpaid = await mk(7, false, false);
+  const rows = await loadUnacknowledgedRides(db);
+  const ids = rows.map((r) => r.id);
+  assert.ok(ids.includes(late.row.id) && ids.includes(soon.row.id));
+  assert.ok(!ids.includes(acked.row.id));      // already tapped Getting Ready
+  assert.ok(!ids.includes(unpaid.row.id));     // not confirmed by verified payment
+  assert.ok(ids.indexOf(soon.row.id) < ids.indexOf(late.row.id)); // earliest pickup first
+});
+
+test("pickup-time change: only an admin applies it, it is recorded and emailed, a chat message never changes it, and the chat window moves with it", async () => {
+  await withAuth(async () => {
+    const d1 = aDriver();
+    const b = await flow(); await approve(b, d1.id); await confirmPaid(b);
+    const original = new Date(Date.now() + 10 * HOUR_MS).toISOString(); b.row.pickup_at = original;
+    const chatOpenNow = async () => (await (await trackChat("GET", b.row.tracking_code, undefined, `10.40.${++ev}.1`)).json()).open;
+    assert.equal(await chatOpenNow(), true);                                                     // 10h before pickup: inside the 24-hour window
+    // A customer chat message that asks for a change does not touch the official time.
+    b.row.status = "getting_ready";
+    await trackChat("POST", b.row.tracking_code, { body: "Can we move pickup 30 minutes later?", clientId: "client-0040-aaaa" }, "10.40.0.9");
+    assert.equal(b.row.pickup_at, original);
+    // The generic editor cannot change it either, and neither can a driver or a signed-out caller.
+    await adminAs(() => routes.crud.POST(post("/api/admin/crud", { resource: "bookings", action: "update", id: b.row.id, values: { pickup_at: new Date(Date.now() + 5 * HOUR_MS).toISOString() } })));
+    assert.equal(b.row.pickup_at, original);
+    const prev = (globalThis as any).__cookies; (globalThis as any).__cookies = {};
+    assert.equal((await routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "reschedule", pickupAt: new Date(Date.now() + 3 * HOUR_MS).toISOString() }))).status, 401);
+    (globalThis as any).__cookies = { vt_at: "drv1" };
+    assert.equal((await routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "reschedule", pickupAt: new Date(Date.now() + 3 * HOUR_MS).toISOString() }))).status, 401);
+    (globalThis as any).__cookies = prev;
+    assert.equal(b.row.pickup_at, original);
+    // Validation.
+    for (const bad of [undefined, "nonsense", new Date(Date.now() - HOUR_MS).toISOString(), original]) assert.equal((await wf(b.row.id, { action: "reschedule", pickupAt: bad })).status, 422, String(bad));
+    // Approved by an admin: applied, old and new times recorded, customer emailed.
+    net.calls.length = 0;
+    const later = new Date(Date.now() + 3 * 24 * HOUR_MS).toISOString();
+    const r = await wf(b.row.id, { action: "reschedule", pickupAt: later, reason: "Customer asked in chat" });
+    assert.equal(r.status, 200); assert.equal(b.row.pickup_at, later);
+    const h = db.t("booking_status_history").filter((x: any) => x.booking_id === b.row.id && /Pickup time changed/.test(x.note ?? ""));
+    assert.equal(h.length, 1); assert.match(h[0].note, /Customer asked in chat/);
+    const lg = db.t("activity_logs").filter((x: any) => x.action === "booking.rescheduled" && x.entity_id === b.row.id);
+    assert.equal(lg.length, 1); assert.deepEqual([lg[0].meta.previous, lg[0].meta.next], [original, later]);
+    const mails = brevoTo("ann@example.com").filter((c) => String(c.body?.subject ?? "").includes("pickup time has changed"));
+    assert.equal(mails.length, 1); assert.ok(JSON.stringify(mails[0].body).includes(b.row.reference));
+    assert.ok(!JSON.stringify(mails[0].body).includes("4105550999"));                            // no driver phone
+    // The 24-hour chat window is recalculated from the NEW time: 3 days away is closed again.
+    assert.equal(await chatOpenNow(), false);
+    // The same request repeated does not send a second email; and a finished ride cannot be rescheduled.
+    assert.equal((await wf(b.row.id, { action: "reschedule", pickupAt: later })).status, 422);
+    b.row.status = "completed";
+    assert.equal((await wf(b.row.id, { action: "reschedule", pickupAt: new Date(Date.now() + 9 * 24 * HOUR_MS).toISOString() })).status, 409);
+  });
 });

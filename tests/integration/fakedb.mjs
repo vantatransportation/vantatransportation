@@ -57,6 +57,9 @@ class Query {
   ilike(c, v) { this.f.push((r) => String(r[c] ?? "").toLowerCase() === String(v).toLowerCase()); return this; }
   is(c, v) { this.f.push((r) => (v === null ? r[c] == null : r[c] === v)); return this; }
   lt(c, v) { this.f.push((r) => r[c] < v); return this; }
+  lte(c, v) { this.f.push((r) => r[c] <= v); return this; }
+  gt(c, v) { this.f.push((r) => r[c] > v); return this; }
+  gte(c, v) { this.f.push((r) => r[c] >= v); return this; }
   not(c, op, v) { this.f.push((r) => !(op === "is" && v === null ? r[c] == null : r[c] === v)); return this; }
   order(c, o = {}) { this.ord = [c, o.ascending !== false]; return this; }
   limit(n) { this.lim = n; return this; }

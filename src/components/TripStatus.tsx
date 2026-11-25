@@ -121,7 +121,7 @@ export default function TripStatus({ credential, initial, tz }: { credential: Cl
         <HelplineButton helpline={trip.helpline} />
       </section>
 
-      {trip.driver && !trip.chatAvailable && !trip.ended && <p className="muted" style={{ marginTop: "1rem" }}>Messaging with your driver opens once they start your ride or are on the way. For anything urgent, use Call Vanta Support.</p>}
+      {trip.driver && !trip.chatAvailable && !trip.ended && <p className="muted" style={{ marginTop: "1rem" }}>Messaging with your driver opens 24 hours before pickup. For anything urgent, use Call Vanta Support.</p>}
       {trip.rating.canRate && (trip.rating.rated
         ? <p className="muted" style={{ marginTop: "1rem" }}>Thank you. You have rated this ride.</p>
         : <StarRatingForm title="How was your driver?" help="Your rating and comments go to Vanta and help us look after our drivers and customers." endpoint={credential.kind === "token" ? `/api/trip/${credential.token}/rating` : "/api/track/rating"} headers={chatHeaders} />)}
