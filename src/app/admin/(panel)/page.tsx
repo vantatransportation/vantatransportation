@@ -5,6 +5,7 @@ import { BUSINESS_TZ } from "@/lib/config";
 import { getHelpline } from "@/lib/helpline";
 import { fmtDate, fmtMoney } from "@/components/admin/util";
 import { loadUnacknowledgedRides } from "@/lib/admin/acknowledgement";
+import { loadAuthorizations } from "@/lib/admin/authorizations";
 
 export const metadata = { title: "Overview" };
 
@@ -32,6 +33,7 @@ export default async function Overview() {
   ]);
   const totalValue = ((value.data ?? []) as { estimated_fare_cents: number }[]).reduce((s, r) => s + r.estimated_fare_cents, 0);
   const unacknowledged = await loadUnacknowledgedRides(db);
+  const authorizations = await loadAuthorizations(db);
   const warnings = configWarnings();
   if (!(await getHelpline(db))) warnings.push({ channel: "email", message: "The Vanta support (helpline) phone number is not set. Customers and drivers see no Call Vanta Support button until you add it under Website content (contact.phone)." });
 
@@ -49,6 +51,26 @@ export default async function Overview() {
       <div className="cards">
         {stats.map(([l, v, warn]) => <div key={l} className={`stat${warn ? " stat--warn" : ""}`}><b>{v}</b><span>{l}</span></div>)}
       </div>
+      {authorizations.length > 0 && (
+        <div className="panel" aria-label="Card authorizations">
+          <h3>Card authorizations</h3>
+          <p className="muted">Holds are not charges. Approving a booking captures its hold. Holds can lapse, so the soonest expiry is first. A lapsed hold or failed capture never cancels the booking: it needs payment, and you follow up.</p>
+          <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Booking</th><th>State</th><th>Amount</th><th>Card</th><th>Hold expires</th><th>Customer</th></tr></thead><tbody>
+            {authorizations.map((a) => {
+              const urgent = a.status !== "authorized" || a.level === "expired" || a.level === "within_24h";
+              return (
+                <tr key={a.paymentId}>
+                  <td><Link href={`/admin/bookings/${a.bookingId}`}>{a.reference || "Open"}</Link></td>
+                  <td><strong style={urgent ? { color: "#e5484d" } : undefined}>{a.status === "authorized" ? (a.level === "expired" ? "hold expired?" : a.level === "within_24h" ? "expires within 24 h" : a.level === "within_48h" ? "expires within 48 h" : "authorized") : "needs payment"}</strong>{a.error ? <><br /><small className="muted">{a.error}</small></> : null}</td>
+                  <td>{fmtMoney(a.amountCents)}</td><td>{a.card ?? "—"}</td>
+                  <td style={{ whiteSpace: "nowrap" }}>{a.captureBefore ? fmtDate(a.captureBefore, BUSINESS_TZ) : "not reported"}</td>
+                  <td>{a.customerName ?? "—"}{a.customerEmail ? <><br /><a href={`mailto:${a.customerEmail}`}>{a.customerEmail}</a></> : null}{a.customerPhone ? <><br />{a.customerPhone}</> : null}</td>
+                </tr>
+              );
+            })}
+          </tbody></table></div>
+        </div>
+      )}
       <div className="panel" aria-label="Rides awaiting driver acknowledgement">
         <h3>Upcoming rides the driver has not acknowledged</h3>
         <p className="muted">Confirmed and paid rides where the driver has not tapped Getting Ready yet. Earliest pickup first.</p>

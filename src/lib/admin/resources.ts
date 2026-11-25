@@ -299,6 +299,7 @@ export const resources: Record<string, Resource> = {
       { name: "child_seat_max", label: "Maximum child seats per booking", type: "number" },
       { name: "payment_mode", label: "Online payment", type: "select", options: ["disabled", "full", "deposit_fixed", "deposit_percent"], help: "disabled = booking requests only. full = the online amount (fixed tier price + Meet & Greet + child seats). Deposits are a fixed amount or a percent of that online amount." },
       { name: "stripe_enabled", label: "Offer card payment (Stripe)", type: "bool", help: "Also needs the Stripe keys on the server." },
+      { name: "stripe_authorize_at_booking", label: "Authorize the card at booking, capture on approval", type: "bool", help: "OFF by default. Turn on only after you have tested in Stripe test mode. The customer holds their card at booking; nothing is charged until you approve the booking." },
       { name: "paypal_enabled", label: "Offer PayPal", type: "bool", help: "Also needs the PayPal credentials on the server." },
       { name: "deposit_fixed_cents", label: "Deposit: fixed amount ($)", type: "money", help: "Used when Online payment is deposit_fixed. Leave blank until approved." },
       { name: "deposit_percent", label: "Deposit: percent of the total", type: "number", step: 0.01, help: "Used when Online payment is deposit_percent (1 to 100)." },

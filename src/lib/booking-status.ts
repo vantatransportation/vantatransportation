@@ -74,6 +74,19 @@ export const AWAITING_PAYMENT_MESSAGE = "This ride cannot start yet: the custome
  */
 export const ACKNOWLEDGE_STATUS: BookingStatus = "getting_ready";
 
+/**
+ * Start Ride = the existing "Passenger picked up" step (picked_up); it keeps its name and its place in the flow. It opens exactly two hours
+ * before the scheduled pickup, decided by the SERVER clock (the dashboard only mirrors it). Getting Ready is NOT subject to this rule.
+ */
+export const START_RIDE_STATUS: BookingStatus = "picked_up";
+export const START_WINDOW_MS = 2 * 60 * 60 * 1000;
+export function startRideWindow(pickupAt: string | Date | null | undefined, nowMs: number): { allowed: boolean; opensAt: string | null } {
+  const t = pickupAt ? new Date(pickupAt).getTime() : NaN;
+  if (!Number.isFinite(t)) return { allowed: false, opensAt: null };
+  const opens = t - START_WINDOW_MS;
+  return { allowed: nowMs >= opens, opensAt: new Date(opens).toISOString() };
+}
+
 /** Chat opens 24 hours before the (current) scheduled pickup, stays open during the ride, and closes when the ride ends. */
 export const CHAT_OPENS_BEFORE_MS = 24 * 60 * 60 * 1000;
 export function chatOpensAt(pickupAt: string | Date | null | undefined): string | null {

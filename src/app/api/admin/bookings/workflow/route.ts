@@ -8,6 +8,7 @@ import { AWAITING_PAYMENT_MESSAGE, AWAITING_REVIEW, DRIVER_FLOW, canApprove, can
 import { formatMoney } from "@/lib/pricing/engine";
 import { availableProviders } from "@/lib/payment-providers";
 import { loadBookingSettings } from "@/lib/policies";
+import { captureAuthorization, releaseAuthorization, type CaptureResult } from "@/lib/payments-server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 export const runtime = "nodejs";
@@ -79,12 +80,21 @@ export async function POST(request: Request) {
       await history(status, isApprove ? "assigned" : status, isApprove ? `Approved and assigned to ${driver.full_name}` : `Reassigned to ${driver.full_name}`);
       await log(isApprove ? "booking.approved" : "booking.reassigned", { driverId, previous });
 
+      // Approve & Capture Payment: if the customer authorized a card at booking, capture it now (server-side, validated against the booking).
+      // A capture that fails or finds an expired hold leaves the booking approved and UNPAID ("needs payment"); the customer gets the payment link below.
+      let capture: CaptureResult | null = null;
+      if (isApprove) {
+        capture = await captureAuthorization(g.db, id);
+        if (!capture.ok && capture.code === "no_authorization") capture = null;
+        if (capture) await log(capture.ok ? "payment.captured" : "payment.capture_failed", capture.ok ? {} : { code: capture.code });
+      }
+
       // Emails only after the change is saved. Keys include the assignment id so a retry never duplicates and a later reassignment still notifies.
       const cust = await customer();
       const ref = String(b.reference);
       const common = { Reference: ref, When: when, Pickup: String(b.pickup_address ?? ""), Destination: b.dropoff_address ?? undefined };
       const site = (process.env.NEXT_PUBLIC_SITE_URL || "").replace(/\/$/, "");
-      if (isApprove && cust?.email) {
+      if (isApprove && cust?.email && !capture?.ok) { // when the capture succeeded the customer gets the booking CONFIRMATION email instead
         const settings = await loadBookingSettings(g.db);
         const payable = availableProviders(settings).length > 0 && b.online_amount_cents != null && b.payment_token && site;
         await notify(g.db, "booking.approved", { type: "booking", id }, {
@@ -103,7 +113,15 @@ export async function POST(request: Request) {
         if (old?.email) await notify(g.db, "driver.unassigned", { type: "booking", id }, { Reference: ref, When: when, _driverEmail: old.email, _driverName: old.full_name }, { dedupeSuffix: assignment.data.id });
       }
       await notify(g.db, "driver.assigned", { type: "booking", id }, { ...common, Passengers: String(b.passengers), Luggage: luggage, _driverEmail: driver.email, _driverName: driver.full_name, _driverUrl: site ? `${site}/driver` : undefined }, { dedupeSuffix: assignment.data.id });
-      return json({ ok: true, status: isApprove ? "assigned" : status, driver: driver.full_name });
+      return json({ ok: true, status: isApprove ? "assigned" : status, driver: driver.full_name, ...(capture ? { payment: capture.ok ? { outcome: "captured" } : { outcome: "needs_payment", code: capture.code, message: capture.error } } : {}) });
+    }
+
+    case "capture_payment": {
+      // Retry for an approved booking whose capture did not complete. Admin-only (guard above); the same validation as approval applies.
+      if (!b.driver_id || !b.payment_released_at || !["assigned", "confirmed", "getting_ready", "on_the_way", "arrived"].includes(status)) return json({ error: "Approve the booking before capturing its payment." }, 409);
+      const r = await captureAuthorization(g.db, id);
+      await log(r.ok ? "payment.captured" : "payment.capture_failed", r.ok ? { retry: true } : { retry: true, code: r.code });
+      return r.ok ? json({ ok: true, payment: { outcome: "captured" } }) : json({ error: r.error, code: r.code }, r.code === "in_progress" ? 409 : 422);
     }
 
     case "reject": {
@@ -114,6 +132,7 @@ export async function POST(request: Request) {
       const upd = await g.db.from("bookings").update({ status: "rejected", rejected_at: now, rejection_reason: reason, payment_released_at: null }).eq("id", id).in("status", AWAITING_REVIEW).select("id");
       if (upd.error || !upd.data?.length) return json({ error: "This booking was already reviewed." }, 409);
       await history(status, "rejected", reason); await log("booking.rejected", { reason });
+      await releaseAuthorization(g.db, id); // frees the customer's card hold (nothing was charged)
       const cust = await customer();
       if (cust?.email) await notify(g.db, "booking.rejected", { type: "booking", id }, { Reference: String(b.reference), When: when, Pickup: String(b.pickup_address ?? ""), Destination: b.dropoff_address ?? undefined, Reason: reason, _customerEmail: cust.email, _customerName: cust.name });
       return json({ ok: true, status: "rejected" });
@@ -129,6 +148,7 @@ export async function POST(request: Request) {
       const prev = b.driver_id as string | null;
       await g.db.from("booking_assignments").update({ unassigned_at: now, unassigned_reason: "booking cancelled" }).eq("booking_id", id).is("unassigned_at", null);
       await history(status, "cancelled", reason); await log("booking.cancelled", { reason });
+      await releaseAuthorization(g.db, id); // releases an UNCAPTURED hold only; captured money follows the existing refund process
       const cust = await customer();
       if (cust?.email) await notify(g.db, "booking.status_changed", { type: "booking", id }, { Reference: String(b.reference), Status: "cancelled", Pickup: String(b.pickup_address ?? ""), Destination: b.dropoff_address ?? undefined, When: when, _status: "cancelled", _customerEmail: cust.email, _customerName: cust.name }, { dedupeSuffix: "cancelled" });
       if (prev) { const d = await driverOf(prev); if (d?.email) await notify(g.db, "driver.unassigned", { type: "booking", id }, { Reference: String(b.reference), When: when, _driverEmail: d.email, _driverName: d.full_name }, { dedupeSuffix: "cancelled" }); }

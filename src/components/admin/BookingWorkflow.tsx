@@ -7,6 +7,8 @@ import { isoToLocalInput, localInputToIso, postJson } from "./util";
 export interface DriverOption { id: string; name: string; plate: string | null; active: boolean }
 interface Props {
   id: string; status: string; driverId: string | null; driverName: string | null; paymentReleased: boolean;
+  /** The latest card authorization (authorize-now / capture-on-approval), if the customer made one. */
+  authorization: { status: string; amount: string; card: string | null; captureBefore: string | null; error: string | null } | null;
   pickupAt: string; tz: string; nextSteps: string[]; confirmedAt: string | null; drivers: DriverOption[]; history: { to: string; at: string; note: string | null; actor: string }[];
 }
 const AWAITING = ["new_request", "pending_confirmation"];
@@ -31,6 +33,9 @@ export default function BookingWorkflow(p: Props) {
     const { ok, data } = await postJson("/api/admin/bookings/workflow", { id: p.id, action, ...extra });
     setBusy("");
     if (!ok) return setMsg({ kind: "error", text: (data as { error?: string }).error ?? "That did not work. Please try again." });
+    const pay = (data as { payment?: { outcome: string; message?: string } }).payment;
+    if (pay?.outcome === "needs_payment") { router.refresh(); return setMsg({ kind: "error", text: `Approved and the driver is assigned, but the payment was NOT captured and the booking is NOT paid. ${pay.message ?? ""} The customer was emailed a secure payment link.` }); }
+    if (pay?.outcome === "captured") { router.refresh(); return setMsg({ kind: "ok", text: "Approved. The card payment was captured and Stripe confirmed it; the booking is confirmed." }); }
     const refund = (data as { refundReviewNeeded?: boolean }).refundReviewNeeded;
     setMsg({ kind: "ok", text: refund ? "Cancelled. A payment was received: review whether a refund applies and issue it in Stripe or PayPal yourself. Nothing was refunded automatically." : "Done." });
     router.refresh();
@@ -54,8 +59,17 @@ export default function BookingWorkflow(p: Props) {
             </select>
             {active.length === 0 && <span className="help muted">No active drivers. Add one under Drivers first.</span>}
           </div>
+          {p.authorization && (
+            <p className={`notice ${["capture_failed", "authorization_expired"].includes(p.authorization.status) ? "notice--error" : ""}`} role="status">
+              Card authorization: <strong>{p.authorization.status.replace(/_/g, " ")}</strong> · {p.authorization.amount}{p.authorization.card ? ` · ${p.authorization.card}` : ""}
+              {p.authorization.status === "authorized" && p.authorization.captureBefore ? ` · hold expires ${new Date(p.authorization.captureBefore).toLocaleString("en-US", { timeZone: p.tz, dateStyle: "medium", timeStyle: "short" })}` : ""}
+              {p.authorization.error ? ` · ${p.authorization.error}` : ""}
+              {["capture_failed", "authorization_expired"].includes(p.authorization.status) ? " · Needs payment: the booking stays active and unpaid. Contact the customer or have them use their payment link." : ""}
+            </p>
+          )}
           <div className="full" style={{ display: "flex", gap: ".75rem", flexWrap: "wrap" }}>
-            {awaiting && <button type="button" className="btn btn--primary" disabled={!driver || !!busy} onClick={() => run("approve_assign", { driverId: driver }, "Approve this booking, assign the driver and email the customer their payment link?")}>{busy === "approve_assign" ? "Approving…" : "Approve & assign driver"}</button>}
+            {awaiting && <button type="button" className="btn btn--primary" disabled={!driver || !!busy} onClick={() => run("approve_assign", { driverId: driver }, p.authorization?.status === "authorized" ? `Approve this booking, assign the driver and CAPTURE the customer's authorized card payment of ${p.authorization.amount}? It is marked paid only when Stripe confirms the capture.` : "Approve this booking, assign the driver and email the customer their payment link?")}>{busy === "approve_assign" ? "Approving…" : p.authorization?.status === "authorized" ? "Approve & Capture Payment" : "Approve & assign driver"}</button>}
+            {!awaiting && p.authorization && ["authorized", "capture_failed"].includes(p.authorization.status) && p.driverId && <button type="button" className="btn btn--primary" disabled={!!busy} onClick={() => run("capture_payment", {}, `Capture the authorized card payment of ${p.authorization!.amount} now?`)}>{busy === "capture_payment" ? "Capturing…" : "Retry capture payment"}</button>}
             {canReassign && <button type="button" className="btn btn--primary" disabled={!driver || !!busy} onClick={() => run("reassign", { driverId: driver }, "Reassign this ride? The current driver loses access immediately and everyone is notified.")}>{busy === "reassign" ? "Reassigning…" : "Reassign driver"}</button>}
             {awaiting && <button type="button" className="btn btn--ghost" disabled={!!busy} onClick={() => { const r = reason("Reason for declining (sent to the customer):"); if (r) run("reject", { reason: r }, "Decline this request and email the customer?"); }}>Decline request</button>}
           </div>

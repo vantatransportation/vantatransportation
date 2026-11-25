@@ -11,6 +11,7 @@ import { formatMoney } from "@/lib/pricing/engine";
 import { validateBookingDetails } from "@/lib/booking-details";
 import { REGION_LABEL } from "@/lib/coverage";
 import { childSeatSummary, NO_SEATS } from "@/lib/child-seats";
+import { startAuthorization } from "@/lib/payments-server";
 
 export const runtime = "nodejs";
 
@@ -74,7 +75,14 @@ export async function POST(request: Request) {
         _customerEmail: email, _customerName: name, _trackingId: result.trackingCode ?? undefined, _trackUrl: trackUrl,
       });
     }
-    return json({ ok: true, reference: result.reference, totalCents: result.totalCents, onlineAmountCents: result.online?.totalCents ?? null, currency: result.currency, trackingId: result.trackingCode, payUrl: null });
+    // Authorize now, capture later: the customer is sent to Stripe's hosted page to hold their card (nothing is charged). If Stripe is not
+    // available or anything fails here, the booking is already saved and simply continues with the normal pay-after-approval link.
+    let authorizeUrl: string | null = null;
+    if (!result.duplicate && result.online) {
+      const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "").replace(/\/$/, "");
+      if (siteUrl) { const a = await startAuthorization(db, result.id, siteUrl).catch(() => null); if (a?.ok) authorizeUrl = a.url; }
+    }
+    return json({ ok: true, reference: result.reference, totalCents: result.totalCents, onlineAmountCents: result.online?.totalCents ?? null, currency: result.currency, trackingId: result.trackingCode, payUrl: null, authorizeUrl });
   } catch (e) {
     console.error("[bookings] unexpected error", e);
     return json({ error: "We could not save your booking. Please try again." }, 500);

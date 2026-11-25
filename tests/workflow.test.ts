@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { FakeDb } from "./integration/fakedb.mjs";
 import { signStripePayload } from "../src/lib/stripe-signature.ts";
 import { createHash } from "node:crypto";
+import { readFileSync, readdirSync } from "node:fs";
 
 const db: any = new FakeDb();
 (globalThis as any).__fakeDb = db;
@@ -18,6 +19,8 @@ Object.assign(process.env, {
 });
 
 // ---- network mocks -------------------------------------------------------------------------
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const stripeMock = { pis: new Map<string, any>(), captureCalls: 0, cancelCalls: 0, captureError: null as null | { code: string; message: string } };
 const net = { tollMode: "unknown" as "unknown" | "known", emailOk: false, calls: [] as { url: string; body: any; headers: any }[], sid: 0, pp: { seq: 0, orders: new Map<string, any>(), capStatus: "COMPLETED", capAmount: null as string | null, verify: true } };
 const reply = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 globalThis.fetch = (async (url: any, init: any) => {
@@ -30,6 +33,19 @@ globalThis.fetch = (async (url: any, init: any) => {
       : reply({ routes: [{ distanceMeters: 32187, duration: "1800s", polyline: { encodedPolyline: "xyz" }, travelAdvisory: { tollInfo: net.tollMode === "known" ? { estimatedPrice: [{ currencyCode: "USD", units: "4", nanos: 500000000 }] } : {} } }] }); // ~20 mi
   }
   if (u === "https://api.brevo.com/v3/smtp/email") return net.emailOk ? reply({ messageId: "<m1@brevo>" }, 201) : reply({ code: "unauthorized", message: "Key not found" }, 401);
+  const piM = u.match(/^https:\/\/api\.stripe\.com\/v1\/payment_intents\/([^/?]+)(\/capture|\/cancel)?(\?.*)?$/);
+  if (piM) {
+    const pi = stripeMock.pis.get(piM[1]);
+    if (!pi) return reply({ error: { message: "No such payment_intent", code: "resource_missing" } }, 404);
+    if (!piM[2]) return reply(pi);
+    if (piM[2] === "/cancel") { stripeMock.cancelCalls++; if (pi.status === "requires_capture") { pi.status = "canceled"; pi.cancellation_reason = "requested_by_customer"; } return reply(pi); }
+    stripeMock.captureCalls++;
+    if (stripeMock.captureError) return reply({ error: stripeMock.captureError }, 402);
+    if (pi.status !== "requires_capture") return reply({ error: { code: "payment_intent_unexpected_state", message: `This PaymentIntent could not be captured because it has a status of ${pi.status}.` } }, 400);
+    const amt = Number((init.body as URLSearchParams).get("amount_to_capture"));
+    pi.status = "succeeded"; pi.amount_received = amt; pi.amount_capturable = 0;
+    return reply(pi);
+  }
   if (u === "https://api.stripe.com/v1/checkout/sessions") { const id = `cs_test_${++net.sid}`; return reply({ id, url: `https://checkout.stripe.com/c/pay/${id}` }); }
   if (u.startsWith("https://api.stripe.com/v1/checkout/sessions/") && u.endsWith("/expire")) return reply({});
   if (u === "https://api.cloudinary.com/v1_1/democloud/image/destroy") return reply({ result: "ok" });
@@ -1282,7 +1298,14 @@ test("payment gate: a driver cannot progress a ride until a verified payment set
     const early = await step("drv2", b.row.id, "on_the_way");
     assert.equal(early.status, 409); assert.equal((await early.json()).code, "too_early"); assert.equal(b.row.status, "getting_ready");
     b.row.pickup_at = new Date(Date.now() + 3 * HOUR).toISOString();               // inside the default 4-hour dispatch window
-    for (const to of ["on_the_way", "arrived", "picked_up", "completed"]) assert.equal((await step("drv2", b.row.id, to)).status, 200, to);
+    for (const to of ["on_the_way", "arrived"]) assert.equal((await step("drv2", b.row.id, to)).status, 200, to);
+    // Start Ride (Passenger picked up) opens exactly two hours before pickup, by the server clock.
+    const tooEarly = await step("drv2", b.row.id, "picked_up");                      // pickup is 3h away
+    assert.equal(tooEarly.status, 409); assert.equal((await tooEarly.json()).code, "too_early"); assert.equal(b.row.status, "arrived");
+    b.row.pickup_at = new Date(Date.now() + 2 * HOUR + 120_000).toISOString();        // 2h02m: still locked
+    assert.equal((await step("drv2", b.row.id, "picked_up")).status, 409);
+    b.row.pickup_at = new Date(Date.now() + 2 * HOUR - 60_000).toISOString();         // 1h59m: open
+    for (const to of ["picked_up", "completed"]) assert.equal((await step("drv2", b.row.id, to)).status, 200, to);
     assert.equal(b.row.status, "completed");
 
     // 7. Refunded after confirmation: progress stops until an admin resolves it; cancelled and declined never progress.
@@ -1525,4 +1548,198 @@ test("pickup-time change: only an admin applies it, it is recorded and emailed, 
     b.row.status = "completed";
     assert.equal((await wf(b.row.id, { action: "reschedule", pickupAt: new Date(Date.now() + 9 * 24 * HOUR_MS).toISOString() })).status, 409);
   });
+});
+
+
+// ===== Phase 3: Stripe authorize now, capture on admin approval =====
+const authOn = () => { setPay("full"); setFixed(10000, 15000, 22000); Object.assign(db.t("booking_settings")[0], { stripe_authorize_at_booking: true, stripe_enabled: true }); stripeMock.captureError = null; };
+const mkPI = (p: any, over: Record<string, unknown> = {}) => {
+  const id = `pi_auth_${p.id.slice(0, 8)}`;
+  stripeMock.pis.set(id, { id, object: "payment_intent", status: "requires_capture", amount: p.amount_cents, amount_capturable: p.amount_cents, amount_received: 0, currency: "usd", metadata: { booking_id: p.booking_id, payment_id: p.id }, latest_charge: { payment_method_details: { card: { brand: "visa", last4: "4242", capture_before: Math.floor(Date.now() / 1000) + 6 * 86400 } } }, ...over });
+  return id;
+};
+const piEvent = (type: string, pi: any, over: Record<string, unknown> = {}) => ({ id: `evt_pi_${++ev}`, type, data: { object: { ...pi, ...over } } });
+const sessionUnpaid = (p: any, piId: string) => sessionEvent("checkout.session.completed", p, { payment_status: "unpaid", payment_intent: piId });
+const authorized = async () => {
+  authOn();
+  const b = await makeBooking();
+  const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
+  const piId = mkPI(p);
+  assert.equal((await routes.webhook.POST(hook(sessionUnpaid(p, piId)))).status, 200);
+  assert.equal((await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", stripeMock.pis.get(piId))))).status, 200);
+  return { b, p, piId };
+};
+
+test("authorize at booking: hosted manual-capture session for the server-computed amount; a hold is not a payment", async () => {
+  authOn();
+  const from = net.calls.length;
+  const b = await makeBooking({ totalCents: 1, amountCents: 1 });
+  assert.match(b.data.authorizeUrl, /^https:\/\/checkout\.stripe\.com\//);
+  const form = new URLSearchParams(String(net.calls.slice(from).find((c) => c.url === "https://api.stripe.com/v1/checkout/sessions")!.body));
+  assert.equal(form.get("payment_intent_data[capture_method]"), "manual");
+  assert.equal(form.get("line_items[0][price_data][unit_amount]"), String(b.row.online_amount_cents)); // never the browser's number
+  assert.equal(form.get("metadata[booking_id]"), b.row.id);
+  assert.match(form.get("success_url")!, /\/book\/confirmation\?ref=VT-\d+&card=authorized$/);
+  const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
+  assert.equal(p.manual_capture, true); assert.equal(p.status, "pending"); assert.equal(p.amount_cents, b.row.online_amount_cents);
+  assert.equal(b.row.status, "new_request"); assert.equal(b.row.confirmed_at ?? null, null);
+  // The hosted page finishing is "unpaid" (held, not charged): it records the intent and marks NOTHING paid.
+  const piId = mkPI(p);
+  await routes.webhook.POST(hook(sessionUnpaid(p, piId)));
+  assert.equal(p.stripe_payment_intent_id, piId); assert.equal(p.paid_at ?? null, null); assert.equal(p.status, "pending");
+  // Hold confirmed by a signature-verified event, cross-checked with Stripe: authorized, expiry and card brand/last four stored, still not paid.
+  assert.equal((await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", stripeMock.pis.get(piId)), { secret: "whsec_wrong" }))).status, 400);
+  assert.equal(p.status, "pending");
+  await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", stripeMock.pis.get(piId))));
+  assert.equal(p.status, "authorized"); assert.equal(p.card_brand, "visa"); assert.equal(p.card_last4, "4242"); assert.ok(p.capture_before);
+  assert.equal(b.row.payment_status, "authorized"); assert.equal(b.row.confirmed_at ?? null, null); assert.equal(p.paid_at ?? null, null);
+  // A mismatching held amount is flagged, never trusted.
+  const b2 = await makeBooking(); const p2 = db.t("payments").find((x: any) => x.booking_id === b2.row.id); const pi2 = mkPI(p2, { amount_capturable: 1, amount: 1 });
+  await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", stripeMock.pis.get(pi2))));
+  assert.equal(p2.status, "review"); assert.notEqual(p2.status, "authorized");
+});
+
+test("Approve & Capture: captures the validated amount once, only Stripe's confirmation marks it paid, confirmation email once", async () => {
+  net.calls.length = 0; stripeMock.captureCalls = 0;
+  const { b, p } = await authorized();
+  const [r1, r2] = await Promise.all([approve(b), approve(b)]);                         // a double click
+  assert.deepEqual([r1.status, r2.status].sort(), [200, 409]);
+  const out = await (r1.status === 200 ? r1 : r2).json();
+  assert.equal(out.payment.outcome, "captured");
+  assert.equal(stripeMock.captureCalls, 1);                                               // exactly one capture
+  const cap = net.calls.find((c) => /\/capture$/.test(c.url))!;
+  assert.equal((cap.body as URLSearchParams).get("amount_to_capture"), String(p.amount_cents));
+  assert.match(String(cap.headers["Idempotency-Key"]), /^capture-/);
+  assert.equal(p.status, "paid"); assert.equal(p.captured_amount_cents, p.amount_cents); assert.ok(p.paid_at);
+  assert.equal(b.row.payment_status, "paid"); assert.ok(b.row.confirmed_at); assert.equal(b.row.status, "confirmed");
+  const mail = (subj: string) => brevoTo("ann@example.com").filter((c) => String(c.body?.subject ?? "").includes(subj) && JSON.stringify(c.body).includes(b.row.reference));
+  assert.equal(mail("is confirmed").length, 1);
+  assert.ok(JSON.stringify(mail("is confirmed")[0].body).includes("VT-123"));          // real driver plate, after verified capture
+  assert.equal(mail("approved").length, 0);                                               // no "please pay" email when it was already captured
+  // Webhook retries and the capture's own webhook change nothing.
+  const pi = stripeMock.pis.get(p.stripe_payment_intent_id);
+  for (let i = 0; i < 2; i++) await routes.webhook.POST(hook(piEvent("payment_intent.succeeded", pi)));
+  assert.equal(mail("is confirmed").length, 1); assert.equal(stripeMock.captureCalls, 1);
+  // Nothing left to capture.
+  const again = await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "capture_payment" })));
+  assert.equal(again.status, 422); assert.equal((await again.json()).code, "no_authorization");
+});
+
+test("capture is admin-only and never uses a browser-supplied amount", async () => {
+  const { b, p } = await authorized();
+  b.row.status = "assigned"; b.row.driver_id = aDriver().id; b.row.payment_released_at = new Date().toISOString();
+  const prev = (globalThis as any).__cookies; (globalThis as any).__cookies = {};
+  assert.equal((await routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "capture_payment", amountCents: 1 }))).status, 401);
+  (globalThis as any).__cookies = { vt_at: "drv1" };
+  assert.equal((await routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "capture_payment" }))).status, 401);
+  (globalThis as any).__cookies = prev;
+  assert.equal(p.status, "authorized"); assert.equal(p.paid_at ?? null, null);
+  // The amount must equal what the server says is due: a tampered stored amount is refused, nothing is captured.
+  const before = stripeMock.captureCalls; const saved = p.amount_cents; p.amount_cents = saved - 100;
+  const bad = await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "capture_payment", amountCents: 1 })));
+  assert.equal(bad.status, 422); assert.equal((await bad.json()).code, "mismatch"); assert.equal(stripeMock.captureCalls, before);
+  p.amount_cents = saved; assert.equal(p.status, "authorized");
+});
+
+test("capture failure: booking stays approved and UNPAID as needs payment, admin alerted, customer gets the payment link, retry works", async () => {
+  net.calls.length = 0;
+  const { b, p } = await authorized();
+  stripeMock.captureError = { code: "card_declined", message: "Your card was declined." };
+  const r = await approve(b); const out = await r.json();
+  assert.equal(r.status, 200); assert.equal(out.payment.outcome, "needs_payment");
+  assert.equal(p.status, "capture_failed"); assert.equal(p.paid_at ?? null, null); assert.match(p.last_error, /declined/);
+  assert.equal(b.row.payment_status, "needs_payment"); assert.equal(b.row.status, "assigned"); assert.equal(b.row.confirmed_at ?? null, null);
+  assert.ok(db.t("admin_notifications").some((n: any) => n.entity_id === b.row.id && n.event === "payment.needs_payment"));
+  assert.ok(brevoTo("ann@example.com").some((c) => String(c.body?.subject ?? "").includes("approved") && JSON.stringify(c.body).includes("/pay/")));
+  const unpaidMail = brevoTo("ann@example.com").filter((c) => /payment (has been )?(received|confirmed)|is confirmed/i.test(String(c.body?.subject ?? "")) && JSON.stringify(c.body).includes(b.row.reference));
+  assert.equal(unpaidMail.length, 0);                                                      // no success wording for a failed capture
+  stripeMock.captureError = null;                                                          // e.g. the customer fixed it with their bank
+  const retry = await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "capture_payment" })));
+  assert.equal(retry.status, 200); assert.equal(p.status, "paid"); assert.equal(b.row.payment_status, "paid"); assert.ok(b.row.confirmed_at);
+});
+
+test("expired authorization: booking is NOT cancelled, confirmed or declined; it shows needs payment; late events cannot revive it", async () => {
+  const { b, p, piId } = await authorized();
+  const pi = stripeMock.pis.get(piId);
+  // Stripe lets the hold lapse.
+  pi.status = "canceled"; pi.cancellation_reason = "automatic";
+  await routes.webhook.POST(hook(piEvent("payment_intent.canceled", pi)));
+  assert.equal(p.status, "authorization_expired"); assert.equal(b.row.payment_status, "needs_payment");
+  assert.equal(b.row.status, "new_request"); assert.equal(b.row.confirmed_at ?? null, null);      // booking untouched
+  assert.ok(db.t("admin_notifications").some((n: any) => n.entity_id === b.row.id && n.event === "payment.needs_payment"));
+  await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", { ...pi, status: "requires_capture" })));   // a delayed older event
+  assert.equal(p.status, "authorization_expired");
+  // Approval still works; the capture cannot happen; the customer gets the normal payment link and the booking stays active.
+  const r = await approve(b); const out = await r.json();
+  assert.equal(r.status, 200); assert.equal(b.row.status, "assigned"); assert.equal(b.row.payment_status, "needs_payment"); assert.equal(p.paid_at ?? null, null);
+  assert.equal(out.payment, undefined);                                                    // nothing was left to capture
+  // Customer pays again with a fresh payment (automatic capture); only the verified event marks it paid.
+  const r2 = await routes.checkout.POST(post("/api/payments/checkout", { token: b.row.payment_token, provider: "stripe" }));
+  assert.equal(r2.status, 200);
+  const np = db.t("payments").filter((x: any) => x.booking_id === b.row.id && x.status === "pending").pop();
+  assert.equal(np.manual_capture === true, false);
+  await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", np)));
+  assert.equal(np.status, "paid"); assert.equal(b.row.payment_status, "paid"); assert.ok(b.row.confirmed_at);
+});
+
+test("expired hold found at approval: Stripe says canceled, so nothing is captured and the booking stays active as needs payment", async () => {
+  const { b, p, piId } = await authorized();
+  const pi = stripeMock.pis.get(piId); pi.status = "canceled"; pi.cancellation_reason = "automatic";   // no webhook arrived yet
+  stripeMock.captureCalls = 0;
+  const r = await approve(b); const out = await r.json();
+  assert.equal(r.status, 200); assert.equal(out.payment.outcome, "needs_payment"); assert.equal(out.payment.code, "expired");
+  assert.equal(stripeMock.captureCalls, 0); assert.equal(p.status, "authorization_expired"); assert.equal(b.row.payment_status, "needs_payment");
+  assert.equal(b.row.status, "assigned"); assert.equal(p.paid_at ?? null, null);
+});
+
+test("declining or cancelling releases an uncaptured hold; captured money is never touched", async () => {
+  const one = await authorized(); stripeMock.cancelCalls = 0;
+  const rej = await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: one.b.row.id, action: "reject", reason: "No availability" })));
+  assert.equal(rej.status, 200); assert.equal(stripeMock.cancelCalls, 1); assert.equal(one.p.status, "canceled"); assert.equal(stripeMock.pis.get(one.piId).status, "canceled");
+  assert.notEqual(one.b.row.payment_status, "paid");
+  const two = await authorized();
+  await approve(two.b); assert.equal(two.p.status, "paid");                                // captured at approval
+  stripeMock.cancelCalls = 0;
+  await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: two.b.row.id, action: "cancel", reason: "Customer cancelled" })));
+  assert.equal(stripeMock.cancelCalls, 0); assert.equal(two.p.status, "paid");              // existing refund process, unchanged
+});
+
+test("authorize at booking is OFF until the owner turns it on, and Stripe failure never blocks a booking", async () => {
+  authOn(); db.t("booking_settings")[0].stripe_authorize_at_booking = false;
+  const off = await makeBooking();
+  assert.equal(off.data.authorizeUrl, null); assert.equal(db.t("payments").filter((x: any) => x.booking_id === off.row.id).length, 0);   // old flow exactly
+  db.t("booking_settings")[0].stripe_authorize_at_booking = true;
+  const saved = process.env.STRIPE_SECRET_KEY; delete process.env.STRIPE_SECRET_KEY;
+  const noStripe = await makeBooking();
+  process.env.STRIPE_SECRET_KEY = saved;
+  assert.equal(noStripe.res.status, 200); assert.equal(noStripe.data.authorizeUrl, null);
+});
+
+test("migration 0014 is additive, keeps old payment values, and never stores card numbers", () => {
+  const f = readdirSync("supabase/migrations").filter((x) => x.startsWith("0014"));
+  assert.equal(f.length, 1);
+  const sql = readFileSync(`supabase/migrations/${f[0]}`, "utf8").toLowerCase();
+  assert.ok(!/drop\s+(table|column)|truncate|delete\s+from/.test(sql));
+  for (const v of ["'pending'", "'paid'", "'refunded'", "'authorized'", "'capture_failed'", "'authorization_expired'", "'needs_payment'"]) assert.ok(sql.includes(v), v);
+  assert.ok(!/card_number|cvv|cvc|pan\b/.test(sql)); assert.ok(sql.includes("card_last4"));
+});
+
+test("admin authorization alerts: expiry levels, needs-payment rows first, soonest expiry next", async () => {
+  const { expiryLevel } = await import("../src/lib/authorization-alerts.ts");
+  const { loadAuthorizations } = await import("../src/lib/admin/authorizations.ts");
+  const now = Date.parse("2026-12-01T12:00:00Z"), H = 3600_000;
+  assert.equal(expiryLevel(new Date(now - 1).toISOString(), now), "expired");
+  assert.equal(expiryLevel(new Date(now + 24 * H).toISOString(), now), "within_24h");
+  assert.equal(expiryLevel(new Date(now + 24 * H + 1).toISOString(), now), "within_48h");
+  assert.equal(expiryLevel(new Date(now + 48 * H + 1).toISOString(), now), "ok");
+  assert.equal(expiryLevel(null, now), "unknown"); assert.equal(expiryLevel("bad", now), "unknown");
+  const soon = await authorized(); const later = await authorized(); const failed = await authorized();
+  soon.p.capture_before = new Date(Date.now() + 20 * H).toISOString(); later.p.capture_before = new Date(Date.now() + 5 * 24 * H).toISOString();
+  failed.p.status = "capture_failed"; failed.p.last_error = "Capture failed: card declined";
+  const rows = await loadAuthorizations(db);
+  const ids = rows.map((r) => r.paymentId);
+  assert.ok(ids.indexOf(failed.p.id) < ids.indexOf(soon.p.id) && ids.indexOf(soon.p.id) < ids.indexOf(later.p.id));
+  assert.equal(rows.find((r) => r.paymentId === soon.p.id)!.level, "within_24h");
+  assert.equal(rows.find((r) => r.paymentId === failed.p.id)!.level, "expired");
+  assert.ok(!JSON.stringify(rows).includes("4242424242424242"));                          // only brand + last four, never a card number
 });

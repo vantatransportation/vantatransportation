@@ -119,11 +119,11 @@ function RideCard({ r, tz, busy, onAdvance, nowMs, featured }: { r: DriverRide; 
   const [chat, setChat] = useState(false);
   const bags = r.checkedBags != null || r.carryOnBags != null ? `${r.checkedBags ?? 0} checked · ${r.carryOnBags ?? 0} carry-on` : null;
   const lockFor = (s: string): { locked: boolean; text: string } => {
-    const at = s === "on_the_way" ? r.leaveOpensAt : null;
-    if (s !== "on_the_way") return { locked: false, text: "" };
+    const at = s === "on_the_way" ? r.leaveOpensAt : s === "picked_up" ? r.startOpensAt : null;
+    if (s !== "on_the_way" && s !== "picked_up") return { locked: false, text: "" };
     if (!at) return { locked: true, text: "This ride has no valid pickup time." };
     const locked = nowMs < new Date(at).getTime();
-    return { locked, text: locked ? `You can leave for this pickup from ${fmt(at, tz)}.` : "" };
+    return { locked, text: locked ? (s === "picked_up" ? `You can start this ride from ${fmt(at, tz)} (two hours before pickup).` : `You can leave for this pickup from ${fmt(at, tz)}.`) : "" };
   };
   return (
     <article className="panel" style={{ marginTop: ".75rem", ...(featured ? { borderLeft: "4px solid var(--accent, #c9a24a)" } : {}) }}>

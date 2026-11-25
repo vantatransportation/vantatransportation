@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { chatOpensAt, chatWindowOpen, CHAT_OPENS_BEFORE_MS } from "../src/lib/booking-status.ts";
+import { chatOpensAt, chatWindowOpen, CHAT_OPENS_BEFORE_MS, startRideWindow, START_WINDOW_MS, START_RIDE_STATUS } from "../src/lib/booking-status.ts";
 import { deriveDriverColumns, driverProfileProblem, driverDisplayName, driverInitials } from "../src/lib/driver/profile.ts";
 import { resources } from "../src/lib/admin/resources.ts";
 import { chatOpen } from "../src/lib/chat-server.ts";
@@ -86,18 +86,29 @@ test("Getting Ready is the acknowledgement button with the exact label, no time 
   const dash = readFileSync("src/components/driver/DriverDashboard.tsx", "utf8");
   assert.match(dash, /getting_ready: "Getting Ready"/);
   assert.match(dash, /on_the_way: "Leave for pickup"/);
-  assert.ok(!/s === "getting_ready" &&[^\n]*locked|startOpensAt/.test(dash), "Getting Ready must not be time-locked in the UI");
+  assert.ok(!/getting_ready"? ?\?[^\n]*(leaveOpensAt|startOpensAt)|s === "getting_ready"[^\n]*(leaveOpensAt|startOpensAt)/.test(dash), "Getting Ready must not be time-locked in the UI");
+  assert.match(dash, /picked_up: "Passenger picked up"/);                                   // not renamed
   const route = readFileSync("src/app/api/driver/status/route.ts", "utf8");
-  assert.ok(!/startRideWindow|START_RIDE_STATUS/.test(route), "the server must not time-gate Getting Ready");
+  assert.ok(!/to === "getting_ready"|to === ACKNOWLEDGE_STATUS/.test(route), "the server must not time-gate Getting Ready");
+  assert.match(route, /to === START_RIDE_STATUS/);                                         // Start Ride (Passenger picked up) is gated at exactly two hours
   assert.match(route, /LEAVE_FOR_PICKUP_STATUS/); assert.match(route, /too_early/);
 });
 
-test("the proposals document exists and the unapproved features are not implemented", () => {
+test("the status document exists and the unapproved features (flight tracking, SUV upgrades) are not implemented", () => {
   const doc = readFileSync("docs/PROPOSALS.md", "utf8");
-  for (const h of ["Time zones and rescheduled bookings", "sedan booked, SUV required", "authorize now, capture on approval", "Flight tracking: out of scope"]) assert.ok(doc.includes(h), h);
+  for (const h of ["Time zones and rescheduled bookings", "sedan booked, SUV required", "authorize now, capture on admin approval", "Flight tracking: out of scope", "Phase 4: admin analytics", "Deployment checklist"]) assert.ok(doc.includes(h), h);
   assert.ok(!/AeroAPI|FlightAware|Aviationstack/i.test(doc), "flight-provider research is out of scope");
   const all = readdirSync("src/app/api", { recursive: true }).map(String);
-  assert.ok(!all.filter((f) => !/paypal/i.test(f)).some((f) => /flight|capture|vehicle-change|pickup-change/i.test(f)), // the existing PayPal capture route is unrelated and stays
-     "no flight, capture, SUV-upgrade or pickup-change endpoints may exist before approval");
-  assert.ok(!readFileSync("src/lib/payments-server.ts", "utf8").includes("capture_method"));
+  assert.ok(!all.some((f) => /flight|vehicle-change|pickup-change/i.test(f)), "no flight-tracking or SUV-upgrade endpoints exist before approval");
+});
+
+test("Start Ride (Passenger picked up) opens exactly two hours before pickup and not a millisecond earlier", () => {
+  assert.equal(START_RIDE_STATUS, "picked_up");
+  const pickup = new Date(NOW + START_WINDOW_MS).toISOString();
+  assert.equal(startRideWindow(pickup, NOW).allowed, true);
+  assert.equal(startRideWindow(pickup, NOW - 1).allowed, false);
+  assert.equal(startRideWindow(pickup, NOW - 1).opensAt, new Date(NOW).toISOString());
+  assert.equal(startRideWindow(new Date(NOW + 5 * 86400_000), NOW).allowed, false);
+  assert.equal(startRideWindow(new Date(NOW - 3600_000), NOW).allowed, true);
+  assert.deepEqual(startRideWindow("bad", NOW), { allowed: false, opensAt: null });
 });

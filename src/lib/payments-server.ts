@@ -3,7 +3,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadBookingSettings } from "@/lib/policies";
 import { decimalToCents, paymentPlan, statusAfterPayment } from "@/lib/payments";
-import { createCheckoutSession, expireCheckoutSession } from "@/lib/stripe";
+import { cancelPaymentIntent, capturePaymentIntent, createCheckoutSession, expireCheckoutSession, retrievePaymentIntent, type StripePI } from "@/lib/stripe";
 import { captureOrder, createOrder } from "@/lib/paypal";
 import { verifyPayPalOrder } from "@/lib/paypal-verify";
 import { availableProviders, type Provider } from "@/lib/payment-providers";
@@ -79,6 +79,11 @@ export async function startCheckout(db: SupabaseClient, token: string, provider:
     await db.from("payments").update({ status: "expired" }).eq("id", p.id);
   }
 
+  // A customer paying again (for example after a failed capture or an expired hold) replaces any old hold: release it so they are never charged twice.
+  const { data: held } = await db.from("payments").select("id,status,stripe_payment_intent_id").eq("booking_id", b.id).eq("manual_capture", true).in("status", ["authorized", "capture_failed", "capture_pending"]);
+  if ((held ?? []).some((h: Row) => h.status === "capture_pending")) return { ok: false, status: 409, error: "Your payment is being processed. Please wait a moment and refresh this page." };
+  for (const h of held ?? []) { if (h.stripe_payment_intent_id) await cancelPaymentIntent(h.stripe_payment_intent_id); await db.from("payments").update({ status: "canceled" }).eq("id", h.id); }
+
   const currency = b.currency ?? "USD";
   const ins = await db.from("payments").insert({
     booking_id: b.id, provider, amount_cents: plan.amountCents, currency, kind: plan.kind, status: "pending",
@@ -125,10 +130,12 @@ async function syncBooking(db: SupabaseClient, bookingId: string) {
   const net = paid.reduce((n: number, r: Row) => n + r.amount_cents - r.refunded_cents, 0);
   const refunded = paid.reduce((n: number, r: Row) => n + r.refunded_cents, 0);
   const { data: b } = await db.from("bookings").select("online_amount_cents").eq("id", bookingId).maybeSingle();
-  const hasPending = (rows ?? []).some((r: Row) => r.status === "pending");
+  const hasPending = (rows ?? []).some((r: Row) => r.status === "pending" || r.status === "capture_pending");
+  const hasAuthorized = (rows ?? []).some((r: Row) => r.status === "authorized");
+  const needsPayment = (rows ?? []).some((r: Row) => r.status === "authorization_expired" || r.status === "capture_failed");
   let status = statusAfterPayment(b?.online_amount_cents ?? null, net) as string; // measured against the ONLINE amount, not the trip estimate
   if (refunded > 0) status = net <= 0 ? "refunded" : "partially_refunded";
-  else if (net <= 0) status = hasPending ? "pending" : (rows ?? []).some((r: Row) => r.status === "failed") ? "failed" : "unpaid";
+  else if (net <= 0) status = hasAuthorized ? "authorized" : hasPending ? "pending" : needsPayment ? "needs_payment" : (rows ?? []).some((r: Row) => r.status === "failed") ? "failed" : "unpaid";
   await db.from("bookings").update({ amount_paid_cents: Math.max(0, net), payment_status: status }).eq("id", bookingId);
   return { net, status };
 }
@@ -263,6 +270,12 @@ async function findStripePayment(db: SupabaseClient, o: Row) {
     if (o.metadata?.payment_id) return (await db.from("payments").select("*").eq("id", o.metadata.payment_id).maybeSingle()).data;
     return null;
   }
+  if (o.object === "payment_intent") {
+    const r = await db.from("payments").select("*").eq("stripe_payment_intent_id", o.id).maybeSingle();
+    if (r.data) return r.data;
+    if (o.metadata?.payment_id) return (await db.from("payments").select("*").eq("id", o.metadata.payment_id).maybeSingle()).data;
+    return null;
+  }
   if (o.payment_intent) return (await db.from("payments").select("*").eq("stripe_payment_intent_id", o.payment_intent).maybeSingle()).data;
   return null;
 }
@@ -273,6 +286,9 @@ async function applyStripe(db: SupabaseClient, ev: Evt) {
     case "checkout.session.completed":
     case "checkout.session.async_payment_succeeded": {
       const p = await findStripePayment(db, o);
+      // Authorize-now sessions finish as "unpaid" (the card is only held). Remember the PaymentIntent; the hold itself is recorded by
+      // payment_intent.amount_capturable_updated. This NEVER marks anything paid.
+      if (p && p.manual_capture && !p.paid_at && o.payment_intent && !p.stripe_payment_intent_id) { await db.from("payments").update({ stripe_payment_intent_id: String(o.payment_intent) }).eq("id", p.id); return; }
       if (!p || p.paid_at || o.payment_status !== "paid") return; // unpaid = delayed method still processing
       const consistent = Number(o.amount_total) === p.amount_cents && String(o.currency ?? "").toLowerCase() === String(p.currency).toLowerCase() && o.metadata?.booking_id === p.booking_id;
       if (!consistent) return flagForReview(db, p, "Amount, currency or booking did not match.", o.payment_intent ?? null);
@@ -292,6 +308,11 @@ async function applyStripe(db: SupabaseClient, ev: Evt) {
       await syncBooking(db, p.booking_id);
       return;
     }
+    case "payment_intent.amount_capturable_updated": return onAuthorized(db, o);
+    case "payment_intent.succeeded": return onCaptured(db, o);
+    case "payment_intent.canceled": return onAuthorizationEnded(db, o, o.cancellation_reason === "automatic" ? "expired" : "released");
+    case "charge.expired": return onAuthorizationEnded(db, o, "expired");
+    case "payment_intent.payment_failed": return onAuthorizationFailed(db, o);
     case "charge.refunded": {
       const p = await findStripePayment(db, o);
       if (!p) return;
@@ -344,3 +365,163 @@ async function applyPayPal(db: SupabaseClient, ev: Evt) {
 }
 /** Processes a VERIFIED PayPal webhook event exactly once. */
 export function processPayPalEvent(db: SupabaseClient, ev: Evt) { return once(db, "paypal_events", ev, () => applyPayPal(db, ev)); }
+
+// ================================================================ Stripe: authorize now, capture on admin approval
+// The customer authorizes the card on Stripe's hosted page at booking time (a HOLD, no charge). An administrator's approval captures it,
+// server-side. A payment becomes "paid" ONLY through recordPaid(), reached only from a Stripe-verified capture: Stripe's own API reply to
+// our capture call, or a signature-verified payment_intent.succeeded webhook. Never from a browser, a redirect or an admin click alone.
+// An expired or failed authorization NEVER cancels, confirms or declines the booking: it becomes "needs_payment" and an admin follows up.
+
+const adminAlert = (db: SupabaseClient, bookingId: string, event: string, title: string, body: string) =>
+  db.from("admin_notifications").insert({ event, entity_type: "booking", entity_id: bookingId, title, body });
+
+const capBefore = (pi: StripePI): { brand: string | null; last4: string | null; captureBefore: string | null } => {
+  const c = pi.latest_charge && typeof pi.latest_charge === "object" ? pi.latest_charge.payment_method_details?.card : undefined;
+  return { brand: c?.brand ?? null, last4: c?.last4 ?? null, captureBefore: c?.capture_before ? new Date(Number(c.capture_before) * 1000).toISOString() : null };
+};
+
+/** Creates the hosted authorization page for a freshly saved booking. Failure is harmless: the booking continues with the normal pay-after-approval link. */
+export async function startAuthorization(db: SupabaseClient, bookingId: string, siteUrl: string): Promise<{ ok: true; url: string } | { ok: false; reason: string }> {
+  const { data: b } = await db.from("bookings").select(BOOKING_COLUMNS).eq("id", bookingId).maybeSingle();
+  if (!b) return { ok: false, reason: "not_found" };
+  if (!["new_request", "pending_confirmation"].includes(String(b.status))) return { ok: false, reason: "not_awaiting_review" };
+  const settings = await loadBookingSettings(db);
+  if (!settings.authorizeAtBooking) return { ok: false, reason: "disabled" };
+  if (!availableProviders(settings).includes("stripe")) return { ok: false, reason: "stripe_unavailable" };
+  const c = await chargeForBooking(db, b);
+  if (!c.ok) return { ok: false, reason: "no_online_charge" };
+  const plan = paymentPlan(settings.payment, c.charge.totalCents, b.amount_paid_cents ?? 0);
+  if (!plan) return { ok: false, reason: "nothing_due" };
+  const { data: open } = await db.from("payments").select("id,provider_ref").eq("booking_id", b.id).eq("provider", "stripe").eq("status", "pending");
+  for (const p of open ?? []) { if (p.provider_ref) await expireCheckoutSession(p.provider_ref); await db.from("payments").update({ status: "expired" }).eq("id", p.id); }
+  const currency = b.currency ?? "USD";
+  const ins = await db.from("payments").insert({
+    booking_id: b.id, provider: "stripe", amount_cents: plan.amountCents, currency, kind: plan.kind, status: "pending", manual_capture: true,
+    tier_id: c.charge.tierId, tier_name: c.charge.tierName, fixed_price_cents: c.charge.fixedPriceCents, meet_greet_cents: c.charge.meetGreetCents,
+    other_addons_cents: c.charge.addonsCents, estimated_trip_fare_cents: b.estimated_fare_cents ?? null,
+  }).select("id").single();
+  if (ins.error) return { ok: false, reason: "db" };
+  const paymentId: string = ins.data.id;
+  const full = plan.amountCents === c.charge.totalCents;
+  const lines = full
+    ? [{ name: `Fixed ${c.charge.tierName} price (${b.reference})`, amountCents: c.charge.fixedPriceCents }, ...(c.charge.meetGreetCents > 0 ? [{ name: "Airport Meet & Greet", amountCents: c.charge.meetGreetCents }] : []), ...(c.charge.addonsCents > 0 ? [{ name: "Child car seats", amountCents: c.charge.addonsCents }] : [])]
+    : [{ name: `Deposit for booking ${b.reference}`, amountCents: plan.amountCents }];
+  const { data: cust } = await db.from("customers").select("email").eq("id", b.customer_id).maybeSingle();
+  const ref = encodeURIComponent(String(b.reference));
+  const s = await createCheckoutSession({ amountCents: plan.amountCents, currency, lines, successUrl: `${siteUrl}/book/confirmation?ref=${ref}&card=authorized`, cancelUrl: `${siteUrl}/book/confirmation?ref=${ref}&card=cancelled`, bookingId: b.id, paymentId, customerEmail: cust?.email ?? undefined, idempotencyKey: `auth-${paymentId}`, manualCapture: true });
+  if (!s.ok) { console.error("[payments] authorization session failed", s.error); await db.from("payments").update({ status: "failed", failure_reason: s.error.slice(0, 300) }).eq("id", paymentId); return { ok: false, reason: "stripe_error" }; }
+  await db.from("payments").update({ provider_ref: s.id, stripe_session_id: s.id, checkout_url: s.url }).eq("id", paymentId);
+  return { ok: true, url: s.url };
+}
+
+/** Verified: Stripe reports the card is held. Records the hold, its expiry and non-sensitive card details. Charges nothing. */
+async function onAuthorized(db: SupabaseClient, o: Row) {
+  const p = await findStripePayment(db, o);
+  if (!p || !p.manual_capture || p.paid_at || !["pending", "authorized"].includes(p.status)) return; // a late or duplicate event never revives an ended payment
+  const consistent = Number(o.amount_capturable) === p.amount_cents && String(o.currency ?? "").toLowerCase() === String(p.currency).toLowerCase() && o.metadata?.booking_id === p.booking_id;
+  if (!consistent) return flagForReview(db, p, "Authorized amount, currency or booking did not match.", o.id ?? null);
+  const live = await retrievePaymentIntent(String(o.id)); // the expiry time and card brand/last four live on Stripe's charge, not on the event
+  const d = live.ok ? capBefore(live.pi) : { brand: null, last4: null, captureBefore: null };
+  await db.from("payments").update({ status: "authorized", stripe_payment_intent_id: String(o.id), authorized_amount_cents: p.amount_cents, capture_before: d.captureBefore, card_brand: d.brand, card_last4: d.last4, last_error: null, failure_reason: null }).eq("id", p.id);
+  await syncBooking(db, p.booking_id);
+  await adminAlert(db, p.booking_id, "payment.authorized", "Card authorized", `A card hold of ${formatMoney(p.amount_cents, p.currency)} is in place. Approve the booking to capture it.`);
+}
+
+/** Verified capture (payment_intent.succeeded) for an authorize-now payment: the only webhook path that marks it paid. */
+async function onCaptured(db: SupabaseClient, o: Row) {
+  const p = await findStripePayment(db, o);
+  if (!p || !p.manual_capture || p.paid_at) return;
+  const consistent = Number(o.amount_received) === p.amount_cents && String(o.currency ?? "").toLowerCase() === String(p.currency).toLowerCase() && o.metadata?.booking_id === p.booking_id;
+  if (!consistent) return flagForReview(db, p, "Captured amount, currency or booking did not match.", o.id ?? null);
+  await db.from("payments").update({ captured_amount_cents: Number(o.amount_received) }).eq("id", p.id);
+  return recordPaid(db, p, String(o.id));
+}
+
+/** The hold ended without a capture. "expired" = Stripe let it lapse; "released" = we cancelled it. Neither changes the booking status. */
+async function onAuthorizationEnded(db: SupabaseClient, o: Row, kind: "expired" | "released") {
+  const p = await findStripePayment(db, o.object === "charge" ? { ...o, payment_intent: o.payment_intent } : o);
+  if (!p || !p.manual_capture || p.paid_at || !["pending", "authorized", "capture_pending", "capture_failed"].includes(p.status)) return;
+  if (kind === "released") { await db.from("payments").update({ status: "canceled" }).eq("id", p.id); await syncBooking(db, p.booking_id); return; }
+  await db.from("payments").update({ status: "authorization_expired", failure_reason: "The card authorization expired before it was captured.", last_error: "Authorization expired" }).eq("id", p.id);
+  await syncBooking(db, p.booking_id);
+  await adminAlert(db, p.booking_id, "payment.needs_payment", "Needs payment: authorization expired", "The card hold expired before capture. The booking is still active and unpaid. Contact the customer or send them a new payment link.");
+}
+
+async function onAuthorizationFailed(db: SupabaseClient, o: Row) {
+  const p = await findStripePayment(db, o);
+  if (!p || !p.manual_capture || p.paid_at || p.status !== "pending") return;
+  await db.from("payments").update({ status: "failed", failure_reason: String(o.last_payment_error?.message ?? "Card authorization failed").slice(0, 300) }).eq("id", p.id);
+  await syncBooking(db, p.booking_id);
+}
+
+export type CaptureResult =
+  | { ok: true; status: "paid" }
+  | { ok: false; code: "no_authorization" | "in_progress" | "mismatch" | "not_ready" | "expired" | "failed"; error: string };
+
+/**
+ * Admin approval's capture step. Validates everything against authoritative records before any money moves:
+ *  - the payment is this booking's, Stripe's own record agrees (booking, currency, state, held amount);
+ *  - the amount equals what the existing pricing/payment plan says is due (never a number supplied by a browser);
+ *  - a conditional status change claims the capture, so a double click or a retry cannot capture twice.
+ * Only Stripe's confirmation that the capture SUCCEEDED leads to recordPaid().
+ */
+export async function captureAuthorization(db: SupabaseClient, bookingId: string): Promise<CaptureResult> {
+  const { data: p } = await db.from("payments").select("*").eq("booking_id", bookingId).eq("provider", "stripe").eq("manual_capture", true).in("status", ["authorized", "capture_failed", "capture_pending"]).order("created_at", { ascending: false }).limit(1).maybeSingle();
+  if (!p) return { ok: false, code: "no_authorization", error: "There is no card authorization to capture for this booking." };
+  if (p.status === "capture_pending") return { ok: false, code: "in_progress", error: "A capture is already in progress for this booking." };
+  if (!p.stripe_payment_intent_id) return { ok: false, code: "not_ready", error: "Stripe has not confirmed the card hold yet. Try again in a moment." };
+  const { data: b } = await db.from("bookings").select(BOOKING_COLUMNS).eq("id", bookingId).maybeSingle();
+  if (!b) return { ok: false, code: "mismatch", error: "Booking not found." };
+  const settings = await loadBookingSettings(db);
+  const c = await chargeForBooking(db, b);
+  const plan = c.ok ? paymentPlan(settings.payment, c.charge.totalCents, b.amount_paid_cents ?? 0) : null;
+  if (!plan || plan.amountCents !== p.amount_cents) {
+    await db.from("payments").update({ last_error: "The authorized amount no longer matches the amount due." }).eq("id", p.id);
+    return { ok: false, code: "mismatch", error: "The authorized amount no longer matches the amount due for this booking. Nothing was charged." };
+  }
+  const attempt = (p.capture_attempts ?? 0) + 1;
+  const claim = await db.from("payments").update({ status: "capture_pending", capture_attempts: attempt }).eq("id", p.id).eq("status", p.status).select("id");
+  if (claim.error || !claim.data?.length) return { ok: false, code: "in_progress", error: "A capture is already in progress for this booking." };
+  const restore = (status: string, error: string) => db.from("payments").update({ status, last_error: error.slice(0, 300), failure_reason: error.slice(0, 300) }).eq("id", p.id);
+  const needs = async (status: "capture_failed" | "authorization_expired", error: string) => {
+    await restore(status, error); await syncBooking(db, bookingId);
+    await adminAlert(db, bookingId, "payment.needs_payment", "Needs payment: capture did not complete", error);
+  };
+  try {
+    const live = await retrievePaymentIntent(p.stripe_payment_intent_id);
+    if (!live.ok) { await restore(p.status, live.error); await syncBooking(db, bookingId); return { ok: false, code: "failed", error: "Could not reach Stripe to check the payment. Nothing was charged. Try again." }; }
+    const pi = live.pi;
+    if (pi.metadata?.booking_id !== bookingId || String(pi.currency).toLowerCase() !== String(p.currency).toLowerCase()) { await restore(p.status, "Stripe's record does not match this booking."); await flagForReview(db, p, "Stripe's payment record does not match this booking.", pi.id); return { ok: false, code: "mismatch", error: "Stripe's record does not match this booking. Nothing was charged." }; }
+    if (pi.status === "succeeded") { // already captured (for example the webhook was delayed): Stripe's own record is the proof
+      if (Number(pi.amount_received) !== p.amount_cents) { await flagForReview(db, p, "Captured amount did not match.", pi.id); return { ok: false, code: "mismatch", error: "The captured amount does not match. Flagged for review." }; }
+      await db.from("payments").update({ captured_amount_cents: pi.amount_received }).eq("id", p.id);
+      await recordPaid(db, { ...p, status: "capture_pending" }, pi.id);
+      return { ok: true, status: "paid" };
+    }
+    if (pi.status === "canceled") { await needs("authorization_expired", "The card authorization expired or was released before capture."); return { ok: false, code: "expired", error: "The card authorization has expired. The booking stays active and unpaid; ask the customer to pay again (the payment link was emailed)." }; }
+    if (pi.status !== "requires_capture" || Number(pi.amount_capturable) !== p.amount_cents) { await restore(p.status, `Unexpected Stripe state: ${pi.status}`); await syncBooking(db, bookingId); return { ok: false, code: "not_ready", error: `Stripe reports the payment as "${pi.status}", so it cannot be captured now.` }; }
+    const cap = await capturePaymentIntent(pi.id, p.amount_cents, `capture-${p.id}-${attempt}`);
+    if (!cap.ok) {
+      const gone = cap.code === "payment_intent_unexpected_state" || /expired|canceled|cancelled/i.test(cap.error);
+      await needs(gone ? "authorization_expired" : "capture_failed", `Capture failed: ${cap.error}`);
+      return { ok: false, code: gone ? "expired" : "failed", error: gone ? "The card authorization has expired. The booking stays active and unpaid." : `Stripe could not capture the payment: ${cap.error}` };
+    }
+    if (cap.pi.status !== "succeeded" || Number(cap.pi.amount_received) !== p.amount_cents) { await needs("capture_failed", `Capture did not complete (Stripe status: ${cap.pi.status}).`); return { ok: false, code: "failed", error: "Stripe did not confirm the capture. Nothing is marked paid." }; }
+    await db.from("payments").update({ captured_amount_cents: cap.pi.amount_received }).eq("id", p.id);
+    await recordPaid(db, { ...p, status: "capture_pending" }, cap.pi.id);
+    return { ok: true, status: "paid" };
+  } catch (e) {
+    await needs("capture_failed", `Capture error: ${e instanceof Error ? e.message : "unknown"}`);
+    return { ok: false, code: "failed", error: "The capture could not be completed. Nothing is marked paid." };
+  }
+}
+
+/** Releases any held (uncaptured) authorization, for example when a booking is declined or cancelled. Best effort; never touches captured money. */
+export async function releaseAuthorization(db: SupabaseClient, bookingId: string): Promise<void> {
+  const { data: rows } = await db.from("payments").select("id,stripe_payment_intent_id").eq("booking_id", bookingId).eq("manual_capture", true).in("status", ["pending", "authorized", "capture_failed"]);
+  for (const p of rows ?? []) {
+    if (p.stripe_payment_intent_id) await cancelPaymentIntent(p.stripe_payment_intent_id);
+    await db.from("payments").update({ status: "canceled" }).eq("id", p.id);
+  }
+  if (rows?.length) await syncBooking(db, bookingId);
+}

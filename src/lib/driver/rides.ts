@@ -1,6 +1,6 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { DRIVER_FLOW, canTransition, chatOpensAt, isOpenForDriver, rideMayProgress, leaveForPickupWindow, type BookingStatus } from "@/lib/booking-status";
+import { DRIVER_FLOW, canTransition, chatOpensAt, isOpenForDriver, rideMayProgress, leaveForPickupWindow, startRideWindow, type BookingStatus } from "@/lib/booking-status";
 import { chatOpen } from "@/lib/chat-server";
 import { loadBookingSettings } from "@/lib/policies";
 import { driverDisplayName } from "@/lib/driver/profile";
@@ -20,6 +20,8 @@ export interface DriverRide {
   chatOpen: boolean; chatOpensAt: string | null;
   /** ISO time Leave for Pickup unlocks (admin-configurable dispatch window before pickup). */
   leaveOpensAt: string | null;
+  /** ISO time Start Ride (Passenger picked up) unlocks: exactly two hours before pickup. */
+  startOpensAt: string | null;
   /** Completed rides only: whether this driver has already rated the customer. */
   customerRated: boolean;
 }
@@ -75,7 +77,7 @@ export async function loadDriverRides(db: SupabaseClient, driverId: string): Pro
       open, awaitingPayment: open && !mayProgress,
       nextStatuses: mayProgress ? DRIVER_FLOW.filter((to) => canTransition("driver", status, to)) : [],
       chatOpen: chatOpen({ ...b, status, driver_id: b.driver_id ?? null }), chatOpensAt: chatOpensAt(b.pickup_at),
-      leaveOpensAt: leaveForPickupWindow(b.pickup_at, Date.now(), settings.dispatchWindowMinutes).opensAt, customerRated: ratedSet.has(b.id),
+      leaveOpensAt: leaveForPickupWindow(b.pickup_at, Date.now(), settings.dispatchWindowMinutes).opensAt, startOpensAt: startRideWindow(b.pickup_at, Date.now()).opensAt, customerRated: ratedSet.has(b.id),
     } satisfies DriverRide;
   });
 }

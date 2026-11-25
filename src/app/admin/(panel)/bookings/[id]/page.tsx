@@ -24,7 +24,7 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
   const { data: b } = await db.from("bookings").select("*, customers(id,name,email,phone), vehicles(name), vehicle_tiers(name)").eq("id", id).maybeSingle();
   if (!b) notFound();
   const [payQ, legsQ, peopleQ, airportQ, settings] = await Promise.all([
-    db.from("payments").select("id,kind,provider,provider_ref,provider_txn_id,status,amount_cents,refunded_cents,currency,failure_reason,created_at,paid_at").eq("booking_id", id).order("created_at", { ascending: false }),
+    db.from("payments").select("id,kind,provider,provider_ref,provider_txn_id,status,amount_cents,refunded_cents,currency,failure_reason,created_at,paid_at,manual_capture,capture_before,card_brand,card_last4,last_error").eq("booking_id", id).order("created_at", { ascending: false }),
     db.from("booking_legs").select("leg_number,direction,pickup_address,dropoff_address,pickup_at,distance_miles,fare_cents").eq("booking_id", id).order("leg_number"),
     db.from("booking_people").select("role,full_name,phone,email,relationship").eq("booking_id", id).order("created_at"),
     db.from("booking_airport_details").select("*").eq("booking_id", id),
@@ -76,7 +76,7 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
       </div>
       {!helpline && <div className="banner">The Vanta support phone number is not set. Customers and drivers cannot see a Call Vanta Support button until you add it in Website content (contact.phone). <Link href="/admin/content" style={{ textDecoration: "underline" }}>Website content</Link></div>}
       <BookingWorkflow id={id} status={b.status} driverId={b.driver_id ?? null} driverName={driverRows.find((d) => d.id === b.driver_id)?.full_name ?? null} paymentReleased={Boolean(b.payment_released_at && b.driver_id)}
-        pickupAt={b.pickup_at} tz={BUSINESS_TZ} nextSteps={DRIVER_FLOW.filter((to) => to !== "assigned" && canTransition("admin", b.status as BookingStatus, to))} confirmedAt={b.confirmed_at ?? null}
+        authorization={(() => { const a = [...payments].reverse().find((x) => (x as { manual_capture?: boolean }).manual_capture && ["authorized", "capture_pending", "capture_failed", "authorization_expired"].includes(x.status)) as (typeof payments[number] & { capture_before?: string | null; card_brand?: string | null; card_last4?: string | null; last_error?: string | null }) | undefined; return a ? { status: a.status, amount: fmtMoney(a.amount_cents), card: a.card_last4 ? `${(a.card_brand ?? "card").toUpperCase()} ending ${a.card_last4}` : null, captureBefore: a.capture_before ?? null, error: a.last_error ?? null } : null; })()} pickupAt={b.pickup_at} tz={BUSINESS_TZ} nextSteps={DRIVER_FLOW.filter((to) => to !== "assigned" && canTransition("admin", b.status as BookingStatus, to))} confirmedAt={b.confirmed_at ?? null}
         drivers={driverRows.map((d) => ({ id: d.id, name: d.full_name, plate: d.vehicle_plate, active: d.is_active }))}
         history={((histQ.data ?? []) as { to_status: string; note: string | null; created_at: string; actor_type: string }[]).map((h) => ({ to: h.to_status, at: h.created_at, note: h.note, actor: h.actor_type }))} />
       <div className="twocol">

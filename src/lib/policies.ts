@@ -10,6 +10,8 @@ export interface BookingSettings {
   meetGreetEnabled: boolean;
   /** Provider switches; a provider is offered only if enabled here AND configured on the server. */
   stripeEnabled: boolean;
+  /** Authorize the card at booking and capture on admin approval (Stripe manual capture). Off until the owner turns it on. */
+  authorizeAtBooking: boolean;
   paypalEnabled: boolean;
   waitingIncludedMinutes: number;
   waitingIncrementMinutes: number;
@@ -23,7 +25,7 @@ export interface BookingSettings {
 
 export type { PaymentMode, PaymentSettings } from "@/lib/payments";
 
-export const DEFAULT_SETTINGS: BookingSettings = { meetGreetEnabled: true, stripeEnabled: true, paypalEnabled: true, waitingIncludedMinutes: 15, waitingIncrementMinutes: 15, waitingRateCents: null, dispatchWindowMinutes: DEFAULT_DISPATCH_MINUTES, seats: DEFAULT_SEAT_SETTINGS, payment: DEFAULT_PAYMENT };
+export const DEFAULT_SETTINGS: BookingSettings = { meetGreetEnabled: true, stripeEnabled: true, authorizeAtBooking: false, paypalEnabled: true, waitingIncludedMinutes: 15, waitingIncrementMinutes: 15, waitingRateCents: null, dispatchWindowMinutes: DEFAULT_DISPATCH_MINUTES, seats: DEFAULT_SEAT_SETTINGS, payment: DEFAULT_PAYMENT };
 
 export async function loadBookingSettings(db: SupabaseClient): Promise<BookingSettings> {
   try {
@@ -32,6 +34,7 @@ export async function loadBookingSettings(db: SupabaseClient): Promise<BookingSe
     return {
       meetGreetEnabled: data.meet_greet_enabled !== false,
       stripeEnabled: data.stripe_enabled !== false,
+      authorizeAtBooking: data.stripe_authorize_at_booking === true,
       paypalEnabled: data.paypal_enabled !== false,
       waitingIncludedMinutes: Number(data.waiting_included_minutes ?? 15),
       waitingIncrementMinutes: Number(data.waiting_increment_minutes ?? 15) || 15,
