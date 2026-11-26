@@ -1,12 +1,13 @@
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { calculateQuote, type DiscountInput, type LineItem, type PricingConfig, type QuoteResult } from "@/lib/pricing/engine";
+import { calculateQuote, type DiscountInput, type PricingConfig } from "@/lib/pricing/engine";
 import { calculateRoundTrip, withExtras, type ExtraLine } from "@/lib/pricing/roundtrip";
 import { pickRule, type RuleRow } from "@/lib/policies";
 import type { ParsedRoute } from "@/lib/geo/parse";
 import type { Trip } from "./trip";
 import { resolvePhotoSrc } from "@/lib/vehicle-photo";
 import { loadVehicleTiers, type TierRow } from "@/lib/vehicle-tiers";
+import { combinedTripFareCents } from "@/lib/tier-pricing";
 
 export type RouteKey = "fastest" | "no_tolls";
 
@@ -91,39 +92,36 @@ export function routeToInput(trip: Trip, route: ParsedRoute, key: RouteKey, disc
   } as const;
 }
 
-export interface PublicQuote {
-  totalCents: number;
-  currency: string;
-  lineItems: LineItem[];
-  tollStatus: "included" | "unavailable" | "avoided";
-  minimumApplied: boolean;
-  /** Present for round trips: both legs, any discount, and what two separate one-way trips would cost. */
-  roundTrip?: { discountCents: number; twoOneWayCents: number; ruleLabel: string | null; legs: { label: string; totalCents: number }[] };
+/**
+ * What a customer may receive about the fare for one vehicle in one tier on one route: ONE combined amount (tier fee + the
+ * server-calculated trip estimate). No line items, rates, per-mile details or tier fee are ever included.
+ */
+export interface TripFareOption {
+  cents: number; currency: string; tollStatus: "included" | "unavailable" | "avoided";
+  /** Round trips: the saving already reflected in `cents` (shown as a note only). */
+  roundTrip?: { savingsCents: number; ruleLabel: string | null };
 }
-
-export const toPublicQuote = (q: Extract<QuoteResult, { ok: true }>, extras: ExtraLine[] = []): PublicQuote => {
-  const e = withExtras(q, extras);
-  return { totalCents: e.totalCents, currency: q.currency, lineItems: e.lineItems, tollStatus: q.toll.status, minimumApplied: q.minimumApplied };
-};
 
 export interface VehicleOption {
   id: string; name: string; category: string; passengers: number; image: string | null; similarModels: string;
   description: string; capacityLabel: string;
-  /** The tiers this vehicle is offered in, each with its fixed price and Meet & Greet fee (display copy; the server recalculates). */
-  tiers: { id: string; name: string; fixedPriceCents: number | null; meetGreetFeeCents: number | null }[];
+  /** The tiers this vehicle is offered in. Each carries its combined trip fare per route and its Meet & Greet fee (a separately shown service). The server recalculates everything on booking. */
+  tiers: { id: string; name: string; meetGreetFeeCents: number | null; tripFare: Partial<Record<RouteKey, TripFareOption>> }[];
   quotable: boolean;
-  quotes: Partial<Record<RouteKey, PublicQuote>>;
 }
 
 /** Builds per-vehicle options for every available route. Only vehicles that fit the group are returned. */
 export interface RoundTripContext { returnRoutes: Partial<Record<RouteKey, ParsedRoute>>; rules: RuleRow[] }
+
+type InternalFare = { estimateCents: number; currency: string; tollStatus: TripFareOption["tollStatus"]; roundTrip?: TripFareOption["roundTrip"] };
 
 export function buildVehicleOptions(fleet: FleetVehicle[], trip: Trip, routes: Partial<Record<RouteKey, ParsedRoute>>, discount: DiscountInput | null, rt?: RoundTripContext, extras: ExtraLine[] = []): VehicleOption[] {
   const out: VehicleOption[] = [];
   for (const v of fleet) {
     if (v.passengers < trip.passengers) continue;
     if (v.tiers.length === 0) continue; // a vehicle offered in no tier is not offered online (the admin list flags it)
-    const quotes: VehicleOption["quotes"] = {};
+    // Internal trip estimates (distance/hourly fare, surcharges, tolls, discounts, round trip). They never leave this function on their own.
+    const estimates: Partial<Record<RouteKey, InternalFare>> = {};
     if (v.config) {
       for (const key of ["fastest", "no_tolls"] as RouteKey[]) {
         const route = routes[key];
@@ -133,20 +131,31 @@ export function buildVehicleOptions(fleet: FleetVehicle[], trip: Trip, routes: P
           const rule = pickRule(rt.rules, v.categoryId);
           const disc = rule ? null : discount; // promo codes are not combined with a round-trip discount
           const rq = calculateRoundTrip(v.config, routeToInput(trip, route, key, disc), routeToInput({ ...trip, tripType: "distance", hours: null }, retRoute, key, disc), rule, extras);
-          if (rq.ok) quotes[key] = {
-            totalCents: rq.totalCents, currency: rq.currency, lineItems: rq.lineItems, minimumApplied: false,
+          if (rq.ok) estimates[key] = {
+            estimateCents: rq.totalCents, currency: rq.currency,
             tollStatus: rq.legs.some((l) => l.lineItems.some((i) => i.code === "tolls")) ? "included" : key === "no_tolls" ? "avoided" : route.toll.status === "unavailable" || retRoute.toll.status === "unavailable" ? "unavailable" : "included",
-            roundTrip: { discountCents: rq.discountCents, twoOneWayCents: rq.twoOneWayCents, ruleLabel: rq.rule?.label ?? null, legs: rq.legs.map((l) => ({ label: l.direction === "outbound" ? "Outbound" : "Return", totalCents: l.totalCents })) },
+            roundTrip: { savingsCents: rq.discountCents, ruleLabel: rq.rule?.label ?? null },
           };
           continue;
         }
         const q = calculateQuote(v.config, routeToInput(trip, route, key, discount));
-        if (q.ok) quotes[key] = toPublicQuote(q, extras);
+        if (q.ok) { const e = withExtras(q, extras); estimates[key] = { estimateCents: e.totalCents, currency: q.currency, tollStatus: q.toll.status }; }
       }
     }
-    const quotable = Object.keys(quotes).length > 0;
+    const quotable = Object.keys(estimates).length > 0;
     if (trip.tripType === "hourly" && v.config && !quotable) continue; // vehicle has no hourly rate
-    out.push({ id: v.id, name: v.name, category: v.category, passengers: v.passengers, image: v.image, similarModels: v.similarModels, description: v.description, capacityLabel: v.capacityLabel, tiers: v.tiers.map((t) => ({ id: t.id, name: t.name, fixedPriceCents: t.fixedPriceCents, meetGreetFeeCents: t.meetGreetFeeCents })), quotable, quotes });
+    const tiers = v.tiers.map((t) => {
+      const tripFare: Partial<Record<RouteKey, TripFareOption>> = {};
+      // The combined Trip fare = this tier's fixed/base fee + the trip estimate. A tier with no fixed fee configured has no online fare.
+      if (t.fixedPriceCents != null) {
+        for (const key of Object.keys(estimates) as RouteKey[]) {
+          const e = estimates[key]!;
+          tripFare[key] = { cents: combinedTripFareCents(t.fixedPriceCents, e.estimateCents), currency: e.currency, tollStatus: e.tollStatus, ...(e.roundTrip ? { roundTrip: e.roundTrip } : {}) };
+        }
+      }
+      return { id: t.id, name: t.name, meetGreetFeeCents: t.meetGreetFeeCents, tripFare };
+    });
+    out.push({ id: v.id, name: v.name, category: v.category, passengers: v.passengers, image: v.image, similarModels: v.similarModels, description: v.description, capacityLabel: v.capacityLabel, tiers, quotable });
   }
   return out;
 }

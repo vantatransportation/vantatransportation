@@ -43,7 +43,7 @@ export type CreateBookingResult =
       ok: true; id: string; reference: string; totalCents: number | null; currency: string; vehicleName: string; duplicate: boolean; customerId: string;
       region: Region; requiresReview: boolean; roundTrip: boolean; discountCents: number; meetGreetRequested: boolean; meetGreetPending: boolean;
       trackingCode: string | null; paymentToken: string | null; payment: { kind: "full" | "deposit"; amountCents: number } | null; childSeatFeeCents: number;
-      /** What is charged online: fixed tier price + Meet & Greet + child seats. null when the tier price is not configured. */
+      /** INTERNAL breakdown of what is charged online (tier fee + trip estimate + Meet & Greet + seats = totalCents). null when the complete fare cannot be calculated. Use customerPricingOf() for anything a customer sees. */
       online: OnlineCharge | null;
     }
   | { ok: false; status: number; error: string };
@@ -100,14 +100,7 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
   const seatRes = seatExtra(settings.seats, trip.childSeats ?? NO_SEATS, Boolean(rt), trip.passengers);
   if (!seatRes.ok) return { ok: false, status: 422, error: seatRes.error };
   const seatCents = seatRes.line?.cents ?? 0;
-  // The online charge is calculated here, from the database, whatever the browser displayed. Quote conversions at an
-  // agreed price carry no online charge.
-  const chargeRes = input.priceOverrideCents != null ? null : onlineCharge(tier, { meetGreet: wantsMG, addonsCents: seatCents });
-  if (chargeRes && !chargeRes.ok && wantsMG && (chargeRes.reason === "meet_greet_unavailable" || chargeRes.reason === "tier_missing")) {
-    return { ok: false, status: 422, error: `${CHARGE_REASON_TEXT[chargeRes.reason]} Please untick Meet & Greet or contact us.` };
-  }
-  const online: OnlineCharge | null = chargeRes && chargeRes.ok ? chargeRes.charge : null;
-  const extras: ExtraLine[] = []; // the trip estimate carries no add-ons
+  const extras: ExtraLine[] = []; // the trip estimate carries no add-ons (Meet & Greet and seats are added to the online total below)
 
   let totalCents: number | null = null;
   let snapshot: Record<string, unknown> | null = null;
@@ -138,6 +131,15 @@ export async function createBooking(db: SupabaseClient, input: CreateBookingInpu
       snapshot = { ...q.snapshot, extras, route: { distanceMiles: route.distanceMiles, durationMinutes: route.durationMinutes, toll: route.toll } };
     }
   }
+  // The ONLINE charge is the COMPLETE booking total, calculated here from the database, whatever the browser displayed:
+  // tier fixed fee + the server-calculated trip estimate (`totalCents`, before any quote override) + Meet & Greet + child seats.
+  // When the trip estimate is unknown (pricing unpublished, no route) there is no online charge at all: the tier fee is never charged alone.
+  // Quote conversions at an agreed price carry no online charge.
+  const chargeRes = input.priceOverrideCents != null ? null : onlineCharge(tier, { meetGreet: wantsMG, addonsCents: seatCents, tripEstimateCents: totalCents });
+  if (chargeRes && !chargeRes.ok && wantsMG && (chargeRes.reason === "meet_greet_unavailable" || chargeRes.reason === "tier_missing")) {
+    return { ok: false, status: 422, error: `${CHARGE_REASON_TEXT[chargeRes.reason]} Please untick Meet & Greet or contact us.` };
+  }
+  const online: OnlineCharge | null = chargeRes && chargeRes.ok ? chargeRes.charge : null;
   if (input.priceOverrideCents != null) {
     snapshot = { ...(snapshot ?? {}), override: { priceCents: input.priceOverrideCents, originalTotalCents: totalCents, quoteRequestId: input.quoteRequestId ?? null } };
     totalCents = input.priceOverrideCents;

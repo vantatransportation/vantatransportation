@@ -13,7 +13,8 @@ test("tier cards show no price; vehicle cards show the final total", () => {
   assert.match(tierBlock, /t\.description/); assert.match(tierBlock, /VehiclePhoto/);
   const vehicleBlock = calc.slice(b, calc.indexOf("</fieldset>", b));
   assert.match(vehicleBlock, /cardTotal/);
-  assert.match(vehicleBlock, /fixedPriceCents \+ \(meetGreet \? vt\.meetGreetFeeCents \?\? 0 : 0\) \+ seatFee/); // the same components the server charges
+  assert.match(vehicleBlock, /vFare\.cents \+ \(meetGreet \? vt\?\.meetGreetFeeCents \?\? 0 : 0\) \+ seatFee/); // combined trip fare + the selected services the server charges
+  assert.ok(!/fixedPriceCents/.test(calc), "the calculator never handles the tier fixed fee");
   assert.ok(!/Estimated trip fare|Fixed .* price, charged online/.test(vehicleBlock), "no second price or tier breakdown on vehicle cards");
 });
 

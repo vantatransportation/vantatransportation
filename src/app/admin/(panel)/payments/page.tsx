@@ -36,7 +36,7 @@ export default async function Payments() {
   return (
     <>
       <h1>Payments</h1>
-      <p className="adm-sub">Actual online payments confirmed by Stripe or PayPal. Amounts here are the fixed tier price plus add-ons, never the mileage/hourly trip estimate.</p>
+      <p className="adm-sub">Actual online payments confirmed by Stripe or PayPal. Each amount is the complete booking total: tier fixed fee + trip estimate + Meet &amp; Greet + child seats. Customers see only the combined trip fare (fixed fee + estimate), the services and the total.</p>
 
       <div className="twocol">
         <div className="panel">
@@ -67,9 +67,9 @@ export default async function Payments() {
 
       <div className="tbl-wrap">
         <table className="tbl">
-          <thead><tr><th>Date</th><th>Booking</th><th>Provider</th><th>Tier</th><th>Fixed price</th><th>Meet &amp; Greet</th><th>Seats</th><th>Charged</th><th>Status</th><th>Reference</th></tr></thead>
+          <thead><tr><th>Date</th><th>Booking</th><th>Provider</th><th>Tier</th><th>Fixed fee (internal)</th><th>Trip estimate (internal)</th><th>Meet &amp; Greet</th><th>Seats</th><th>Charged</th><th>Status</th><th>Reference</th></tr></thead>
           <tbody>
-            {rows.length === 0 && <tr><td colSpan={10} className="muted">No payment attempts yet.</td></tr>}
+            {rows.length === 0 && <tr><td colSpan={11} className="muted">No payment attempts yet.</td></tr>}
             {rows.map((p) => (
               <tr key={p.id}>
                 <td>{fmtDate(p.paid_at ?? p.created_at, BUSINESS_TZ)}</td>
@@ -77,6 +77,7 @@ export default async function Payments() {
                 <td>{p.provider === "paypal" ? "PayPal" : "Card (Stripe)"}</td>
                 <td>{p.tier_name ?? ""}</td>
                 <td>{p.fixed_price_cents != null ? fmtMoney(p.fixed_price_cents) : ""}</td>
+                <td>{p.estimated_trip_fare_cents != null ? fmtMoney(p.estimated_trip_fare_cents) : ""}</td>
                 <td>{p.meet_greet_cents > 0 ? fmtMoney(p.meet_greet_cents) : ""}</td>
                 <td>{p.other_addons_cents > 0 ? fmtMoney(p.other_addons_cents) : ""}</td>
                 <td>{fmtMoney(p.amount_cents)}{p.refunded_cents > 0 ? ` (refunded ${fmtMoney(p.refunded_cents)})` : ""}{p.kind === "deposit" ? " deposit" : ""}</td>

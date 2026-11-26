@@ -6,6 +6,7 @@ import { loadBookingSettings } from "@/lib/policies";
 import { paymentPlan } from "@/lib/payments";
 import { availableProviders } from "@/lib/payment-providers";
 import { chargeForBooking } from "@/lib/payments-server";
+import { customerPricingOf } from "@/lib/tier-pricing";
 import { paypalClientId } from "@/lib/paypal";
 import { validToken } from "@/lib/payments-server";
 import { formatMoney } from "@/lib/pricing/engine";
@@ -26,7 +27,7 @@ export default async function PayPage({ params, searchParams }: { params: Promis
   const sp = await searchParams;
   const back = Array.isArray(sp.checkout) ? sp.checkout[0] : sp.checkout;
   const db = validToken(token) ? getAdminClient() : null;
-  const { data: b } = db ? await db.from("bookings").select("id,reference,status,driver_id,payment_released_at,confirmed_at,pickup_at,estimated_fare_cents,currency,amount_paid_cents,payment_status,child_seat_fee_cents,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,online_amount_cents").eq("payment_token", token).maybeSingle() : { data: null };
+  const { data: b } = db ? await db.from("bookings").select("id,reference,status,driver_id,payment_released_at,confirmed_at,pickup_at,estimated_fare_cents,currency,amount_paid_cents,payment_status,child_seat_fee_cents,source_quote_request_id,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,online_amount_cents").eq("payment_token", token).maybeSingle() : { data: null };
 
   if (!db || !b) {
     return (
@@ -37,6 +38,7 @@ export default async function PayPage({ params, searchParams }: { params: Promis
   const providers = availableProviders(settings);
   const c = await chargeForBooking(db, b); // the same server calculation the payment endpoints use
   const charge = c.ok ? c.charge : null;
+  const shown = charge ? customerPricingOf(charge) : null; // customer-safe: combined Trip fare, services, Total. The tier fee is never rendered.
   const closed = ["cancelled", "no_show", "rejected", "completed"].includes(b.status);
   const released = Boolean(b.payment_released_at && b.driver_id) && !closed;
   const plan = released && charge && providers.length ? paymentPlan(settings.payment, charge.totalCents, b.amount_paid_cents ?? 0) : null;
@@ -56,16 +58,15 @@ export default async function PayPage({ params, searchParams }: { params: Promis
           {back === "return" && <div className="notice" role="status">Thank you. We confirm payments with our payment provider before showing them as paid. If this page still says payment is pending, check again in a minute or two. Returning to this page does not itself mark anything as paid.</div>}
           {back === "cancelled" && <div className="notice" role="status">The payment was not completed and you have not been charged. You can try again below.</div>}
           <section className="panel-dark" aria-label="Price breakdown" style={{ marginTop: "1.5rem" }}>
-            <h2 style={{ fontSize: "1.4rem" }}>What you pay online</h2>
-            {charge ? (
+            <h2 style={{ fontSize: "1.4rem" }}>Your price</h2>
+            {shown ? (
               <table className="lines"><tbody>
-                <tr><td>Fixed {charge.tierName} price</td><td>{formatMoney(charge.fixedPriceCents, b.currency)}</td></tr>
-                {charge.meetGreetCents > 0 && <tr><td>Airport Meet &amp; Greet</td><td>{formatMoney(charge.meetGreetCents, b.currency)}</td></tr>}
-                {charge.addonsCents > 0 && <tr><td>Child car seats</td><td>{formatMoney(charge.addonsCents, b.currency)}</td></tr>}
-                <tr className="total"><td>Total online amount</td><td>{formatMoney(charge.totalCents, b.currency)}</td></tr>
+                <tr><td>Trip fare</td><td>{formatMoney(shown.tripFareCents, b.currency)}</td></tr>
+                {shown.meetGreetCents > 0 && <tr><td>Airport Meet &amp; Greet</td><td>{formatMoney(shown.meetGreetCents, b.currency)}</td></tr>}
+                {shown.childSeatCents > 0 && <tr><td>Child car seats</td><td>{formatMoney(shown.childSeatCents, b.currency)}</td></tr>}
+                <tr className="total"><td>Total</td><td>{formatMoney(shown.totalCents, b.currency)}</td></tr>
               </tbody></table>
             ) : <p className="muted">An online amount has not been set up for this booking.</p>}
-            {b.estimated_fare_cents != null && <p className="muted" style={{ marginTop: "1rem" }}>Estimated trip fare: {formatMoney(b.estimated_fare_cents, b.currency)}. This estimate is for information only and is not included in the online amount above.</p>}
           </section>
           <dl className="kv" style={{ marginTop: "1.5rem" }}>
             <dt>Paid so far</dt><dd>{formatMoney(b.amount_paid_cents ?? 0, b.currency)}</dd>

@@ -7,7 +7,7 @@ import { cancelPaymentIntent, capturePaymentIntent, createCheckoutSession, expir
 import { captureOrder, createOrder } from "@/lib/paypal";
 import { verifyPayPalOrder } from "@/lib/paypal-verify";
 import { availableProviders, type Provider } from "@/lib/payment-providers";
-import { CHARGE_REASON_TEXT, onlineCharge, type OnlineCharge } from "@/lib/tier-pricing";
+import { CHARGE_REASON_TEXT, customerPricingOf, onlineCharge, type OnlineCharge } from "@/lib/tier-pricing";
 import { notify } from "@/lib/notify";
 import { formatMoney } from "@/lib/pricing/engine";
 import { isOpenForDriver, type BookingStatus } from "@/lib/booking-status";
@@ -27,30 +27,69 @@ export type CheckoutOutcome =
   | { ok: false; status: number; error: string };
 
 /**
- * The ONLINE charge for a booking, always from trusted data and never from the browser:
- *   fixed price of the booking's tier + Meet & Greet (if it was selected) + child seats.
- * Mileage, hourly, duration and toll amounts are not part of it. The tier price and fees are the snapshot frozen when the
- * booking was requested, so later admin changes never rewrite them. Bookings that pre-date the snapshot are priced once
- * from the tier's current configuration and then frozen.
+ * The ONLINE charge for a booking, always from trusted data and never from the browser. It is the COMPLETE booking total:
+ *   tier fixed fee + server-calculated trip estimate + Meet & Greet (if selected) + child seats.
+ * The amount is frozen on the booking when it is requested (online_amount_cents, with fixed_price_cents, the add-on fees and
+ * estimated_fare_cents recording its parts), so later admin changes to tier prices or rates never rewrite it.
+ *
+ * Bookings created BEFORE this fix froze only fixed + Meet & Greet + seats (they under-charged: the trip fare was left out).
+ * Such a booking is re-frozen ONCE at the complete total, but only while no money has been held, started or taken for it and it is
+ * still open. If a hold or payment already exists the frozen amount is honoured unchanged (history is never rewritten).
  */
+const TERMINAL = ["cancelled", "no_show", "rejected", "completed"];
+const MONEY_STATES = ["pending", "authorized", "capture_pending", "capture_failed", "paid", "partially_refunded", "refunded", "review"];
+
 export async function chargeForBooking(db: SupabaseClient, b: Row): Promise<{ ok: true; charge: OnlineCharge } | { ok: false; error: string }> {
   if (b.online_amount_cents != null && b.fixed_price_cents != null) {
     const mg = b.meet_greet_selected ? b.meet_greet_fee_cents : 0;
     if (b.meet_greet_selected && (mg == null || mg <= 0)) return { ok: false, error: "The Meet & Greet fee for this booking is missing. Please contact us." };
     const addons = b.child_seat_fee_cents ?? 0;
-    const total = b.fixed_price_cents + (mg ?? 0) + addons;
-    if (total !== b.online_amount_cents) return { ok: false, error: "The saved amount for this booking is inconsistent. Please contact us." };
-    return { ok: true, charge: { tierId: b.tier_id ?? null, tierName: b.tier_name ?? "", fixedPriceCents: b.fixed_price_cents, meetGreetCents: mg ?? 0, addonsCents: addons, totalCents: total } };
+    const tripEstimate = b.online_amount_cents - b.fixed_price_cents - (mg ?? 0) - addons; // what the frozen total holds beyond the tier fee and services
+    if (tripEstimate < 0) return { ok: false, error: "The saved amount for this booking is inconsistent. Please contact us." };
+    // Pre-fix booking (trip fare missing from the frozen amount): upgrade it once, only while nothing has been held or paid.
+    if (tripEstimate === 0 && (b.estimated_fare_cents ?? 0) > 0 && !b.source_quote_request_id && !TERMINAL.includes(String(b.status))) {
+      const { data: money } = await db.from("payments").select("id,status,paid_at").eq("booking_id", b.id);
+      const touched = (money ?? []).some((r: Row) => r.paid_at || MONEY_STATES.includes(String(r.status))) || (b.amount_paid_cents ?? 0) > 0;
+      if (!touched) {
+        const total = b.fixed_price_cents + b.estimated_fare_cents + (mg ?? 0) + addons;
+        const up = await db.from("bookings").update({ online_amount_cents: total }).eq("id", b.id).eq("online_amount_cents", b.online_amount_cents).select("id");
+        if (!up.error && up.data?.length) {
+          await db.from("activity_logs").insert({ action: "booking.charge_upgraded", entity_type: "booking", entity_id: b.id, meta: { previousCents: b.online_amount_cents, newCents: total, reason: "trip fare added to the online amount" } });
+          return { ok: true, charge: { tierId: b.tier_id ?? null, tierName: b.tier_name ?? "", fixedPriceCents: b.fixed_price_cents, tripEstimateCents: b.estimated_fare_cents, meetGreetCents: mg ?? 0, addonsCents: addons, totalCents: total } };
+        }
+        // lost a race (another request upgraded or paid it first): re-read below on the next call; use the stored value now
+        const again = await db.from("bookings").select("online_amount_cents").eq("id", b.id).maybeSingle();
+        const amt = again.data?.online_amount_cents ?? b.online_amount_cents;
+        return { ok: true, charge: { tierId: b.tier_id ?? null, tierName: b.tier_name ?? "", fixedPriceCents: b.fixed_price_cents, tripEstimateCents: amt - b.fixed_price_cents - (mg ?? 0) - addons, meetGreetCents: mg ?? 0, addonsCents: addons, totalCents: amt } };
+      }
+    }
+    return { ok: true, charge: { tierId: b.tier_id ?? null, tierName: b.tier_name ?? "", fixedPriceCents: b.fixed_price_cents, tripEstimateCents: tripEstimate, meetGreetCents: mg ?? 0, addonsCents: addons, totalCents: b.online_amount_cents } };
   }
+  // Quote conversions carry an agreed price that is arranged with the customer directly: no automatic tier-based online charge.
+  if (b.source_quote_request_id) return { ok: false, error: "Online payment is not available for this booking. We will arrange payment with you directly." };
   if (!b.tier_id) return { ok: false, error: "Online payment is not available for this booking. We will arrange payment with you directly." };
   const { data: t } = await db.from("vehicle_tiers").select("id,name,fixed_price_cents,meet_greet_fee_cents").eq("id", b.tier_id).maybeSingle();
-  const r = onlineCharge(t ? { id: t.id, name: t.name, fixedPriceCents: t.fixed_price_cents ?? null, meetGreetFeeCents: t.meet_greet_fee_cents ?? null } : null, { meetGreet: Boolean(b.meet_greet_selected), addonsCents: b.child_seat_fee_cents ?? 0 });
-  if (!r.ok) return { ok: false, error: r.reason === "price_not_set" ? "Online payment is not available for this booking yet." : CHARGE_REASON_TEXT[r.reason] };
+  const r = onlineCharge(t ? { id: t.id, name: t.name, fixedPriceCents: t.fixed_price_cents ?? null, meetGreetFeeCents: t.meet_greet_fee_cents ?? null } : null, { meetGreet: Boolean(b.meet_greet_selected), addonsCents: b.child_seat_fee_cents ?? 0, tripEstimateCents: b.estimated_fare_cents ?? null });
+  if (!r.ok) return { ok: false, error: r.reason === "price_not_set" || r.reason === "trip_fare_unavailable" ? "Online payment is not available for this booking yet." : CHARGE_REASON_TEXT[r.reason] };
   await db.from("bookings").update({ tier_name: r.charge.tierName, fixed_price_cents: r.charge.fixedPriceCents, meet_greet_fee_cents: b.meet_greet_selected ? r.charge.meetGreetCents : null, online_amount_cents: r.charge.totalCents }).eq("id", b.id);
   return r;
 }
 
-const BOOKING_COLUMNS = "id,reference,status,driver_id,payment_released_at,currency,estimated_fare_cents,amount_paid_cents,customer_id,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,child_seat_fee_cents,online_amount_cents";
+/**
+ * The lines a payment provider shows the customer. They add up to `amountCents`, and contain only the combined Trip fare
+ * and the separately displayed services: never the tier fee, a rate or any internal component. A deposit is a single line.
+ */
+export function customerLines(charge: OnlineCharge, reference: string, amountCents: number): { name: string; amountCents: number }[] {
+  if (amountCents !== charge.totalCents) return [{ name: `Deposit for booking ${reference}`, amountCents }];
+  const p = customerPricingOf(charge);
+  return [
+    { name: `Trip fare (${reference})`, amountCents: p.tripFareCents },
+    ...(p.meetGreetCents > 0 ? [{ name: "Airport Meet & Greet", amountCents: p.meetGreetCents }] : []),
+    ...(p.childSeatCents > 0 ? [{ name: "Child car seats", amountCents: p.childSeatCents }] : []),
+  ];
+}
+
+const BOOKING_COLUMNS = "id,reference,status,driver_id,payment_released_at,currency,estimated_fare_cents,amount_paid_cents,customer_id,source_quote_request_id,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,child_seat_fee_cents,online_amount_cents";
 
 /**
  * Starts a payment with the chosen provider. The amount is recalculated here from the database; the only things the
@@ -88,16 +127,13 @@ export async function startCheckout(db: SupabaseClient, token: string, provider:
   const ins = await db.from("payments").insert({
     booking_id: b.id, provider, amount_cents: plan.amountCents, currency, kind: plan.kind, status: "pending",
     tier_id: charge.tierId, tier_name: charge.tierName, fixed_price_cents: charge.fixedPriceCents, meet_greet_cents: charge.meetGreetCents,
-    other_addons_cents: charge.addonsCents, estimated_trip_fare_cents: b.estimated_fare_cents ?? null,
+    other_addons_cents: charge.addonsCents, estimated_trip_fare_cents: charge.tripEstimateCents,
   }).select("id").single();
   if (ins.error) return { ok: false, status: 500, error: "Could not start the payment. Please try again." };
   const paymentId: string = ins.data.id;
 
   // Line items shown to the customer by the provider. A deposit is a single line.
-  const full = plan.amountCents === charge.totalCents;
-  const lines = full
-    ? [{ name: `Fixed ${charge.tierName} price (${b.reference})`, amountCents: charge.fixedPriceCents }, ...(charge.meetGreetCents > 0 ? [{ name: "Airport Meet & Greet", amountCents: charge.meetGreetCents }] : []), ...(charge.addonsCents > 0 ? [{ name: "Child car seats", amountCents: charge.addonsCents }] : [])]
-    : [{ name: `Deposit for booking ${b.reference}`, amountCents: plan.amountCents }];
+  const lines = customerLines(charge, String(b.reference), plan.amountCents);
   const fail = async (error: string, status: number): Promise<CheckoutOutcome> => {
     console.error(`[payments] ${provider} checkout failed`, error);
     await db.from("payments").update({ status: "failed", failure_reason: error.slice(0, 300) }).eq("id", paymentId);
@@ -108,7 +144,7 @@ export async function startCheckout(db: SupabaseClient, token: string, provider:
     const { data: cust } = await db.from("customers").select("email").eq("id", b.customer_id).maybeSingle();
     const s = await createCheckoutSession({
       amountCents: plan.amountCents, currency, lines, successUrl: `${siteUrl}/pay/${token}?checkout=return`, cancelUrl: `${siteUrl}/pay/${token}?checkout=cancelled`,
-      bookingId: b.id, paymentId, customerEmail: cust?.email ?? undefined, idempotencyKey: `pay-${paymentId}`,
+      bookingId: b.id, paymentId, customerEmail: cust?.email ?? undefined, idempotencyKey: `pay-${paymentId}`, description: `Vanta Transportation booking ${b.reference}`,
     });
     if (!s.ok) return fail(s.error, 502);
     await db.from("payments").update({ provider_ref: s.id, stripe_session_id: s.id, checkout_url: s.url }).eq("id", paymentId);
@@ -205,6 +241,7 @@ async function recordPaid(db: SupabaseClient, p: Row, txnId: string | null) {
     Reference: b?.reference ?? "", "Amount paid": formatMoney(p.amount_cents, p.currency), "Payment type": p.kind === "deposit" ? "Deposit" : "Online payment",
     "Payment status": status, "Payment provider": p.provider === "paypal" ? "PayPal" : "Card (Stripe)", Tier: p.tier_name ?? undefined,
     "Fixed tier price": p.fixed_price_cents != null ? formatMoney(p.fixed_price_cents, p.currency) : undefined,
+    "Trip estimate (internal)": p.estimated_trip_fare_cents != null ? formatMoney(p.estimated_trip_fare_cents, p.currency) : undefined,
     "Meet & Greet": p.meet_greet_cents > 0 ? formatMoney(p.meet_greet_cents, p.currency) : undefined,
     "Child car seats": p.other_addons_cents > 0 ? formatMoney(p.other_addons_cents, p.currency) : undefined,
     Confirmed: confirmable || b?.confirmed_at ? "Yes" : "No",
@@ -392,23 +429,23 @@ export async function startAuthorization(db: SupabaseClient, bookingId: string, 
   if (!c.ok) return { ok: false, reason: "no_online_charge" };
   const plan = paymentPlan(settings.payment, c.charge.totalCents, b.amount_paid_cents ?? 0);
   if (!plan) return { ok: false, reason: "nothing_due" };
+  // Never create a second authorization for a booking that already holds one (or is waiting for / capturing one): retries are harmless.
+  const { data: live } = await db.from("payments").select("id").eq("booking_id", b.id).eq("provider", "stripe").eq("manual_capture", true).in("status", ["authorized", "capture_pending"]);
+  if (live?.length) return { ok: false, reason: "already_authorized" };
   const { data: open } = await db.from("payments").select("id,provider_ref").eq("booking_id", b.id).eq("provider", "stripe").eq("status", "pending");
   for (const p of open ?? []) { if (p.provider_ref) await expireCheckoutSession(p.provider_ref); await db.from("payments").update({ status: "expired" }).eq("id", p.id); }
   const currency = b.currency ?? "USD";
   const ins = await db.from("payments").insert({
     booking_id: b.id, provider: "stripe", amount_cents: plan.amountCents, currency, kind: plan.kind, status: "pending", manual_capture: true,
     tier_id: c.charge.tierId, tier_name: c.charge.tierName, fixed_price_cents: c.charge.fixedPriceCents, meet_greet_cents: c.charge.meetGreetCents,
-    other_addons_cents: c.charge.addonsCents, estimated_trip_fare_cents: b.estimated_fare_cents ?? null,
+    other_addons_cents: c.charge.addonsCents, estimated_trip_fare_cents: c.charge.tripEstimateCents,
   }).select("id").single();
   if (ins.error) return { ok: false, reason: "db" };
   const paymentId: string = ins.data.id;
-  const full = plan.amountCents === c.charge.totalCents;
-  const lines = full
-    ? [{ name: `Fixed ${c.charge.tierName} price (${b.reference})`, amountCents: c.charge.fixedPriceCents }, ...(c.charge.meetGreetCents > 0 ? [{ name: "Airport Meet & Greet", amountCents: c.charge.meetGreetCents }] : []), ...(c.charge.addonsCents > 0 ? [{ name: "Child car seats", amountCents: c.charge.addonsCents }] : [])]
-    : [{ name: `Deposit for booking ${b.reference}`, amountCents: plan.amountCents }];
+  const lines = customerLines(c.charge, String(b.reference), plan.amountCents);
   const { data: cust } = await db.from("customers").select("email").eq("id", b.customer_id).maybeSingle();
   const ref = encodeURIComponent(String(b.reference));
-  const s = await createCheckoutSession({ amountCents: plan.amountCents, currency, lines, successUrl: `${siteUrl}/book/confirmation?ref=${ref}&card=authorized`, cancelUrl: `${siteUrl}/book/confirmation?ref=${ref}&card=cancelled`, bookingId: b.id, paymentId, customerEmail: cust?.email ?? undefined, idempotencyKey: `auth-${paymentId}`, manualCapture: true });
+  const s = await createCheckoutSession({ amountCents: plan.amountCents, currency, lines, successUrl: `${siteUrl}/book/confirmation?ref=${ref}&card=authorized`, cancelUrl: `${siteUrl}/book/confirmation?ref=${ref}&card=cancelled`, bookingId: b.id, paymentId, customerEmail: cust?.email ?? undefined, idempotencyKey: `auth-${paymentId}`, manualCapture: true, description: `Vanta Transportation booking ${b.reference}` });
   if (!s.ok) { console.error("[payments] authorization session failed", s.error); await db.from("payments").update({ status: "failed", failure_reason: s.error.slice(0, 300) }).eq("id", paymentId); return { ok: false, reason: "stripe_error" }; }
   await db.from("payments").update({ provider_ref: s.id, stripe_session_id: s.id, checkout_url: s.url }).eq("id", paymentId);
   return { ok: true, url: s.url };

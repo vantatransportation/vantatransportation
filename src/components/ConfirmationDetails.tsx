@@ -5,7 +5,9 @@ import { useMemo } from "react";
 import { formatMoney } from "@/lib/pricing/engine";
 import { useSessionString } from "@/lib/use-session";
 
-interface Saved { reference: string; totalCents: number | null; onlineAmountCents?: number | null; currency: string; shownTotalCents: number | null; trackingId?: string | null }
+/** Server-confirmed, customer-safe pricing from POST /api/bookings: ONE combined trip fare, services separately, total. */
+interface SavedPricing { tripFareCents: number; meetGreetCents: number; childSeatCents: number; totalCents: number }
+interface Saved { reference: string; pricing?: SavedPricing | null; currency: string; shownTotalCents: number | null; trackingId?: string | null }
 
 export default function ConfirmationDetails({ reference }: { reference: string }) {
   const raw = useSessionString("vanta:confirmation");
@@ -18,14 +20,20 @@ export default function ConfirmationDetails({ reference }: { reference: string }
     }
   }, [raw, reference]);
   if (!saved) return null;
-  // The saved online amount is what the server calculated; compare it with what the customer saw.
-  const online = saved.onlineAmountCents ?? null;
-  const changed = online != null && saved.shownTotalCents != null && online !== saved.shownTotalCents;
+  // The saved amounts are what the server calculated; compare the total with what the customer saw.
+  const p = saved.pricing ?? null;
+  const changed = p != null && saved.shownTotalCents != null && p.totalCents !== saved.shownTotalCents;
   return (
     <div className="notice" style={{ marginTop: "1.5rem" }}>
-      {online != null ? <p>Amount due online: <strong>{formatMoney(online, saved.currency)}</strong> <span className="muted">(fixed tier price plus any add-ons)</span></p> : <p>We will confirm your price with you.</p>}
-      {saved.totalCents != null && <p className="muted" style={{ marginTop: ".5rem" }}>Estimated trip fare: {formatMoney(saved.totalCents, saved.currency)}. For information only: it is not part of the online amount.</p>}
-      {changed && <p className="muted" style={{ marginTop: ".5rem" }}>The online amount differs from the one you saw ({formatMoney(saved.shownTotalCents!, saved.currency)}) because the tier prices were updated. The amount shown here is the one we recorded.</p>}
+      {p ? (
+        <table className="lines" aria-label="Price"><tbody>
+          <tr><td>Trip fare</td><td>{formatMoney(p.tripFareCents, saved.currency)}</td></tr>
+          {p.meetGreetCents > 0 && <tr><td>Airport Meet &amp; Greet</td><td>{formatMoney(p.meetGreetCents, saved.currency)}</td></tr>}
+          {p.childSeatCents > 0 && <tr><td>Child car seats</td><td>{formatMoney(p.childSeatCents, saved.currency)}</td></tr>}
+          <tr className="total"><td>Total</td><td>{formatMoney(p.totalCents, saved.currency)}</td></tr>
+        </tbody></table>
+      ) : <p>We will confirm your price with you.</p>}
+      {changed && <p className="muted" style={{ marginTop: ".5rem" }}>The total differs from the one you saw ({formatMoney(saved.shownTotalCents!, saved.currency)}) because our prices were updated. The amount shown here is the one we recorded.</p>}
       {saved.trackingId && (
         <div style={{ marginTop: "1rem" }}>
           <p>Your tracking ID: <strong style={{ letterSpacing: ".05em" }}>{saved.trackingId}</strong></p>

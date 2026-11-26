@@ -10,6 +10,8 @@ export interface CheckoutInput {
   bookingId: string; paymentId: string; customerEmail?: string; idempotencyKey: string;
   /** Authorize now, capture later: the card is held, not charged, until the server captures it. */
   manualCapture?: boolean;
+  /** Customer-facing description on the PaymentIntent/receipt. Must contain no internal pricing. */
+  description?: string;
 }
 export type CheckoutResult = { ok: true; id: string; url: string } | { ok: false; error: string };
 
@@ -31,6 +33,7 @@ export async function createCheckoutSession(i: CheckoutInput): Promise<CheckoutR
     expires_at: String(Math.floor(Date.now() / 1000) + (i.manualCapture ? 23 * 3600 : 3600)),
   });
   if (i.manualCapture) b.set("payment_intent_data[capture_method]", "manual");
+  if (i.description) b.set("payment_intent_data[description]", i.description.slice(0, 200));
   // One Checkout line per charged component; they must add up to the amount the server calculated.
   if (i.lines.reduce((n, l) => n + l.amountCents, 0) !== i.amountCents) return { ok: false, error: "Line items do not add up to the amount." };
   i.lines.forEach((l, n) => {

@@ -18,15 +18,15 @@ export default async function CustomerDetail({ params }: { params: Promise<{ id:
   if (!c) notFound();
 
   const [bookings, leads, quotes, followUps, notes] = await Promise.all([
-    db.from("bookings").select("id,reference,status,pickup_at,pickup_address,dropoff_address,estimated_fare_cents,vehicles(name)").eq("customer_id", id).order("pickup_at", { ascending: false }),
+    db.from("bookings").select("id,reference,status,pickup_at,pickup_address,dropoff_address,estimated_fare_cents,online_amount_cents,vehicles(name)").eq("customer_id", id).order("pickup_at", { ascending: false }),
     db.from("leads").select("id,subject,message,status,created_at").eq("customer_id", id).order("created_at", { ascending: false }),
     db.from("quote_requests").select("id,status,original_quote_cents,revised_price_cents,created_at").eq("customer_id", id).order("created_at", { ascending: false }),
     db.from("follow_ups").select("id,title,due_at,completed_at").eq("customer_id", id).order("due_at"),
     db.from("crm_notes").select("id,body,created_at").eq("entity_type", "customer").eq("entity_id", id).order("created_at", { ascending: false }),
   ]);
-  type B = { id: string; reference: string; status: string; pickup_at: string; pickup_address: string; dropoff_address: string | null; estimated_fare_cents: number | null; vehicles: { name: string } | null };
+  type B = { id: string; reference: string; status: string; pickup_at: string; pickup_address: string; dropoff_address: string | null; estimated_fare_cents: number | null; online_amount_cents: number | null; vehicles: { name: string } | null };
   const bk = (bookings.data ?? []) as unknown as B[];
-  const total = bk.filter((b) => b.status !== "cancelled").reduce((s, b) => s + (b.estimated_fare_cents ?? 0), 0);
+  const total = bk.filter((b) => b.status !== "cancelled").reduce((s, b) => s + (b.online_amount_cents ?? b.estimated_fare_cents ?? 0), 0);
   const now = Date.now();
 
   return (
@@ -67,7 +67,7 @@ export default async function CustomerDetail({ params }: { params: Promise<{ id:
       <h2>Booking history</h2>
       <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Ref</th><th>Pickup</th><th>Trip</th><th>Vehicle</th><th>Fare</th><th>Status</th></tr></thead><tbody>
         {bk.length === 0 && <tr><td colSpan={6} className="muted">No bookings.</td></tr>}
-        {bk.map((b) => <tr key={b.id}><td><Link href={`/admin/bookings/${b.id}`} style={{ textDecoration: "underline" }}>{b.reference}</Link></td><td>{fmtDate(b.pickup_at, BUSINESS_TZ)}</td><td>{b.pickup_address} → {b.dropoff_address}</td><td>{b.vehicles?.name}</td><td>{fmtMoney(b.estimated_fare_cents)}</td><td>{label(b.status)}</td></tr>)}
+        {bk.map((b) => <tr key={b.id}><td><Link href={`/admin/bookings/${b.id}`} style={{ textDecoration: "underline" }}>{b.reference}</Link></td><td>{fmtDate(b.pickup_at, BUSINESS_TZ)}</td><td>{b.pickup_address} → {b.dropoff_address}</td><td>{b.vehicles?.name}</td><td>{fmtMoney(b.online_amount_cents ?? b.estimated_fare_cents)}</td><td>{label(b.status)}</td></tr>)}
       </tbody></table></div>
 
       <h2>Inquiries and quote requests</h2>

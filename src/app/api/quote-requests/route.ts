@@ -13,6 +13,7 @@ import { loadActiveRoundTripRules, loadBookingSettings, pickRule, seatExtra } fr
 import { findOrCreateCustomer } from "@/lib/customers";
 import { notify } from "@/lib/notify";
 import { clean, EMAIL_RE, phoneDigits } from "@/lib/validation";
+import { combinedTripFareCents } from "@/lib/tier-pricing";
 import { classifyTrip, fulfilmentFor, REGION_LABEL } from "@/lib/coverage";
 
 export const runtime = "nodejs";
@@ -88,6 +89,13 @@ export async function POST(request: Request) {
         const q = calculateQuote(vehicle.config, routeToInput(trip, route, routeKey, await lookupPromo(db, trip.promoCode)));
         if (q.ok) { const e = withExtras(q, extras); originalCents = e.totalCents; snapshot = { ...q.snapshot }; lineItems = e.lineItems; }
       }
+    }
+    // The "original quote" is what the customer was shown as the combined Trip fare: the selected tier's fixed fee + the server-calculated trip estimate.
+    // The internal split is kept in the snapshot for admins only. Without a configured tier fee the plain estimate is kept (as before).
+    const tierFee = tierId ? vehicle?.tiers.find((t) => t.id === tierId)?.fixedPriceCents ?? null : null;
+    if (originalCents != null && tierFee != null) {
+      snapshot = { ...(snapshot ?? {}), originalQuote: { tripEstimateCents: originalCents, tierFixedPriceCents: tierFee, tripFareCents: combinedTripFareCents(tierFee, originalCents) } };
+      originalCents = combinedTripFareCents(tierFee, originalCents);
     }
     const region = classifyTrip([trip.pickup.text, ...trip.stops.map((s) => s.text), trip.dropoff.text]);
 

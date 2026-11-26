@@ -5,6 +5,7 @@ import { UUID_RE, chatOpen } from "@/lib/chat-server";
 import { buildTimeline, firstName, normalizeTrackingCode, type TimelineStep } from "@/lib/tracking";
 import { getHelpline, type Helpline } from "@/lib/helpline";
 import { driverDisplayName } from "@/lib/driver/profile";
+import { customerPricing, type CustomerPricing } from "@/lib/tier-pricing";
 
 /**
  * What a customer may see about ONE booking, reached with that booking's secret: the tracking ID (public Track page) or the
@@ -23,14 +24,14 @@ export interface TripView {
   confirmed: boolean; paymentStatus: string; awaitingPayment: boolean;
   chatOpen: boolean; chatAvailable: boolean; terminalNote: string | null;
   helpline: Helpline | null;
-  /** Token (private link) credential only: itemised online charges and whether the Pay button should show. */
-  charges: { fixedPriceCents: number; rushCents: number; tipCents: number; meetGreetCents: number; seatCents: number; totalCents: number; currency: string } | null;
+  /** Token (private link) credential only: the customer-safe price (combined Trip fare, optional services, Total) and whether the Pay button should show. */
+  charges: (CustomerPricing & { currency: string }) | null;
   payable: boolean;
 }
 
 export type Credential = { kind: "token"; token: unknown } | { kind: "code"; code: unknown };
 
-const COLS = "id,reference,status,pickup_at,pickup_address,dropoff_address,passengers,driver_id,payment_status,payment_released_at,confirmed_at,tier_name,online_amount_cents,fixed_price_cents,rush_surcharge_cents,tip_cents,meet_greet_selected,meet_greet_fee_cents,child_seat_fee_cents,currency,rejection_reason,cancellation_reason,vehicles(name,vehicle_categories(name))";
+const COLS = "id,reference,status,pickup_at,pickup_address,dropoff_address,passengers,driver_id,payment_status,payment_released_at,confirmed_at,tier_name,online_amount_cents,meet_greet_selected,meet_greet_fee_cents,child_seat_fee_cents,currency,rejection_reason,cancellation_reason,vehicles(name,vehicle_categories(name))";
 const PAID = ["paid", "deposit_paid", "partially_refunded", "refunded"];
 
 export async function loadTrip(db: SupabaseClient, cred: Credential | string): Promise<{ id: string; view: TripView; driverId: string | null } | null> {
@@ -64,7 +65,7 @@ export async function loadTrip(db: SupabaseClient, cred: Credential | string): P
   const paid = PAID.includes(String(b.payment_status));
   const settled = ["paid", "refunded", "partially_refunded"].includes(String(b.payment_status));
   const confirmed = Boolean(b.confirmed_at) || b.status === "confirmed"; // "confirmed" as a status is only ever set by the verified-payment path (or legacy rows)
-  const hasAmount = b.online_amount_cents != null && b.fixed_price_cents != null;
+  const hasAmount = b.online_amount_cents != null; // the tier fee and other internal components are not even read here
   const tl = buildTimeline({ status, hasDriver: Boolean(b.driver_id), released, paid, confirmed });
   const veh = b.vehicles as { name?: string; vehicle_categories?: { name?: string } | null } | null;
   return {
@@ -78,7 +79,7 @@ export async function loadTrip(db: SupabaseClient, cred: Credential | string): P
       chatOpen: chatOpen(b), chatAvailable: chatOpen(b),
       terminalNote: status === "rejected" ? (b.rejection_reason ?? "We were unable to accept this request.") : status === "cancelled" ? (b.cancellation_reason ?? "This booking was cancelled.") : null,
       helpline: await getHelpline(db),
-      charges: c.kind === "token" && hasAmount ? { fixedPriceCents: b.fixed_price_cents, rushCents: b.rush_surcharge_cents ?? 0, tipCents: b.tip_cents ?? 0, meetGreetCents: b.meet_greet_selected ? b.meet_greet_fee_cents ?? 0 : 0, seatCents: b.child_seat_fee_cents ?? 0, totalCents: b.online_amount_cents, currency: b.currency ?? "USD" } : null,
+      charges: c.kind === "token" && hasAmount ? { ...customerPricing(b.online_amount_cents, b.meet_greet_selected ? b.meet_greet_fee_cents : 0, b.child_seat_fee_cents), currency: b.currency ?? "USD" } : null,
       payable: c.kind === "token" && released && open && hasAmount && !settled,
     },
   };

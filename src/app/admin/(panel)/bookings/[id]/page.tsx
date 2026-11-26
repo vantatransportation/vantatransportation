@@ -61,8 +61,16 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
         <h3>Pricing and payment</h3>
         <dl className="kv">
           <dt>Tier</dt><dd>{b.tier_name ?? "Not recorded"}</dd>
-          <dt>Estimated trip fare</dt><dd>{b.estimated_fare_cents != null ? fmtMoney(b.estimated_fare_cents) : "To be confirmed"} <span className="muted">(calculated from mileage/hours/tolls; information only, not charged online)</span></dd>
-          <dt>Charged online</dt><dd>{b.online_amount_cents != null ? `${fmtMoney(b.online_amount_cents)} = fixed tier price ${fmtMoney(b.fixed_price_cents ?? 0)}${b.meet_greet_selected ? ` + Meet & Greet ${fmtMoney(b.meet_greet_fee_cents ?? 0)}` : ""}${(b.child_seat_fee_cents ?? 0) > 0 ? ` + child seats ${fmtMoney(b.child_seat_fee_cents)}` : ""}` : "Not set up (tier fixed price was not configured when this was requested)"}</dd>
+          <dt>Total payable</dt><dd>{b.online_amount_cents != null ? <strong>{fmtMoney(b.online_amount_cents)}</strong> : "Not set up (trip fare or tier fixed fee was not available when this was requested)"} <span className="muted">(the complete amount authorized / captured / paid)</span></dd>
+          {b.online_amount_cents != null && (() => {
+            const mg = b.meet_greet_selected ? b.meet_greet_fee_cents ?? 0 : 0; const seatsFee = b.child_seat_fee_cents ?? 0; const fixed = b.fixed_price_cents ?? 0;
+            const est = b.online_amount_cents - fixed - mg - seatsFee;
+            return <>
+              <dt>Internal breakdown</dt><dd>tier fixed fee {fmtMoney(fixed)} + trip estimate {fmtMoney(est)}{mg > 0 ? ` + Meet & Greet ${fmtMoney(mg)}` : ""}{seatsFee > 0 ? ` + child seats ${fmtMoney(seatsFee)}` : ""} = {fmtMoney(b.online_amount_cents)} <span className="muted">(admin only)</span>{est === 0 && (b.estimated_fare_cents ?? 0) > 0 ? <span className="muted"> · created before the trip fare was included; re-priced automatically at payment time if nothing was held or paid</span> : null}</dd>
+              <dt>Customer sees</dt><dd>Trip fare {fmtMoney(est + fixed)}{mg > 0 ? ` · Meet & Greet ${fmtMoney(mg)}` : ""}{seatsFee > 0 ? ` · Child seats ${fmtMoney(seatsFee)}` : ""} · <strong>Total {fmtMoney(b.online_amount_cents)}</strong></dd>
+            </>;
+          })()}
+          <dt>Trip estimate at request</dt><dd>{b.estimated_fare_cents != null ? fmtMoney(b.estimated_fare_cents) : "To be confirmed"} <span className="muted">(distance/hourly fare, surcharges, tolls, discounts; internal)</span></dd>
           <dt>Meet &amp; Greet</dt><dd>{b.meet_greet_selected ? "Selected (fee frozen at request time)" : "Not selected"}</dd>
           <dt>Payment status</dt><dd>{String(b.payment_status).replace(/_/g, " ")} · collected {fmtMoney(b.amount_paid_cents ?? 0)}</dd>
           <dt>Confirmed</dt><dd>{b.confirmed_at ? `Yes, ${fmtDate(b.confirmed_at, BUSINESS_TZ)} (after verified payment)` : "Not yet"}</dd>

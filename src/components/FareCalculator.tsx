@@ -87,14 +87,14 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
   const tierChoices: TierOptionDto[] = result ? tierChoicesFrom(result.vehicles, result.tiers) : [];
   const tierVehicles: VehicleOptionDto[] = result ? vehiclesInTier(result.vehicles, tierId) : [];
   const vehicle: VehicleOptionDto | undefined = tierVehicles.find((v) => v.id === vehicleId);
-  const quote = vehicle?.quotes[route?.key ?? "fastest"] ?? null;
-  // What is charged ONLINE (display only; the server recalculates it): fixed tier price + Meet & Greet + child seats.
-  // The trip estimate (mileage/hours/tolls) is shown separately and is never added to it.
-  const tp = vehicle?.tiers.find((t) => t.id === tierId) ?? null; // the SELECTED tier's prices (the same vehicle can have different ones in another tier)
+  // What is charged ONLINE (display only; the server recalculates it): ONE combined Trip fare for the selected vehicle, tier and route,
+  // plus Meet & Greet and child seats shown separately. The tier fee, rates and formulas are never sent to the browser.
+  const tp = vehicle?.tiers.find((t) => t.id === tierId) ?? null; // the SELECTED tier (the same vehicle can have different prices in another tier)
+  const tripFare = tp?.tripFare[route?.key ?? "fastest"] ?? null;
   const seatFee = result?.seatFeeCents ?? 0;
   const mgOffered = !meetGreet || (tp?.meetGreetFeeCents != null);
   const mgFee = meetGreet && tp?.meetGreetFeeCents != null ? tp.meetGreetFeeCents : 0;
-  const onlineTotal = tp?.fixedPriceCents != null && mgOffered ? tp.fixedPriceCents + mgFee + seatFee : null;
+  const onlineTotal = tripFare != null && mgOffered ? tripFare.cents + mgFee + seatFee : null;
 
   async function getFares(e: React.FormEvent) {
     e.preventDefault();
@@ -132,8 +132,8 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
       trip: { ...lastTrip, meetGreet }, vehicleId: vehicle.id, vehicleName: vehicle.name, tierId, routeKey: route.key,
       submissionKey: newKey(),
       display: {
-        quote, distanceMiles: route.distanceMiles, durationMinutes: route.durationMinutes, routeLabel: route.label,
-        online: tp ? { tierName: tp.name, fixedPriceCents: tp.fixedPriceCents, meetGreetCents: mgFee, seatFeeCents: seatFee } : null,
+        distanceMiles: route.distanceMiles, durationMinutes: route.durationMinutes, routeLabel: route.label,
+        pricing: tp ? { tierName: tp.name, tripFare, meetGreetCents: mgFee, seatFeeCents: seatFee } : null,
       },
     };
     try { sessionStorage.setItem(TRIP_STORAGE_KEY, JSON.stringify(stored)); } catch { /* ignore */ }
@@ -222,7 +222,7 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
               )}
               {tripType === "hourly" && (
                 <div className="field"><label htmlFor="c-promo2">Promo code (optional)</label><input id="c-promo2" value={promo} onChange={(e) => setPromo(e.target.value)} autoComplete="off" />
-                  <span className="help muted">Hourly bookings include a mileage allowance. Extra miles are charged separately and itemized in your quote.</span></div>
+                  <span className="help muted">Hourly bookings include a mileage allowance. Extra miles beyond the allowance are included in your trip fare.</span></div>
               )}
 
               <h3 className="calc__section">Extras</h3>
@@ -236,7 +236,7 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
               </div>
               <fieldset className="fieldset seats">
                 <legend>Child car seats (optional)</legend>
-                <p className="muted">{result?.seatInfo ? `${formatMoney(result.seatInfo.oneWayCents)} per seat one way, ${formatMoney(result.seatInfo.roundTripCents)} per seat for a round trip (charged once for the whole round trip). Seats are charged online with the fixed price.` : "The seat fee is charged online as an add-on and is shown separately from the trip estimate."} {SEAT_CONFIRMATION_NOTE}</p>
+                <p className="muted">{result?.seatInfo ? `${formatMoney(result.seatInfo.oneWayCents)} per seat one way, ${formatMoney(result.seatInfo.roundTripCents)} per seat for a round trip (charged once for the whole round trip). Seats are included in your total and listed separately.` : "The seat fee is included in your total and listed separately."} {SEAT_CONFIRMATION_NOTE}</p>
                 <div className="seats__grid">
                   {SEAT_TYPES.map((t: SeatType) => (
                     <div className="field" key={t}>
@@ -275,13 +275,13 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
                   <fieldset className="opts">
                     <legend>Route</legend>
                     {result.routes.map((r) => {
-                      const alt = vehicle?.quotes[r.key]; const base = vehicle?.quotes.fastest;
-                      const diff = alt && base && r.key !== "fastest" ? alt.totalCents - base.totalCents : null;
+                      const alt = tp?.tripFare[r.key]; const base = tp?.tripFare.fastest;
+                      const diff = alt && base && r.key !== "fastest" ? alt.cents - base.cents : null;
                       return (
                         <label key={r.key} className={`opt${routeKey === r.key ? " is-on" : ""}`}>
                           <input type="radio" name="route" checked={routeKey === r.key} onChange={() => setRouteKey(r.key)} />
                           <span><strong>{r.label}</strong><br /><small>{r.distanceMiles} mi · about {r.durationMinutes} min · {tollText(r.toll.status, r.toll.amount)}</small></span>
-                          {alt && <span className="opt__price">{formatMoney(alt.totalCents, alt.currency)}{diff != null && diff !== 0 && <small> ({diff > 0 ? "+" : "−"}{formatMoney(Math.abs(diff))} vs fastest)</small>}</span>}
+                          {alt && <span className="opt__price">{formatMoney(alt.cents, alt.currency)}{diff != null && diff !== 0 && <small> ({diff > 0 ? "+" : "−"}{formatMoney(Math.abs(diff))} vs fastest)</small>}</span>}
                         </label>
                       );
                     })}
@@ -320,9 +320,10 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
                       const on = vehicleId === v.id;
                       const vt = v.tiers.find((t) => t.id === tierId) ?? null;
                       const otherTiers = v.tiers.filter((t) => t.id !== tierId).map((t) => t.name);
-                      // The FINAL total for this vehicle in the chosen tier, computed from the same fixed price, Meet & Greet fee and seat fee the server charges.
+                      // The FINAL total for this vehicle in the chosen tier on the chosen route: the combined Trip fare plus the selected services the server charges.
                       const mgBlocked = meetGreet && vt?.meetGreetFeeCents == null;
-                      const cardTotal = vt?.fixedPriceCents != null && !mgBlocked ? vt.fixedPriceCents + (meetGreet ? vt.meetGreetFeeCents ?? 0 : 0) + seatFee : null;
+                      const vFare = vt?.tripFare[route?.key ?? "fastest"] ?? null;
+                      const cardTotal = vFare != null && !mgBlocked ? vFare.cents + (meetGreet ? vt?.meetGreetFeeCents ?? 0 : 0) + seatFee : null;
                       return (
                         <li key={v.id}>
                           <label className={`vcard${on ? " is-on" : ""}`}>
@@ -363,48 +364,30 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
                 <h3>{vehicle.name}</h3>
                 <p className="muted">{[tp?.name, vehicle.capacityLabel].filter(Boolean).join(" · ")}{lastTrip?.returnLeg ? " · Round trip" : ""}</p>
                 {seatCount0 > 0 && <p className="muted">{SEAT_CONFIRMATION_NOTE}</p>}
-                <h4 className="summary__h">Charged online</h4>
-                {tp?.fixedPriceCents != null ? (
-                  <table className="lines" aria-label="Amount charged online"><tbody>
-                    <tr><td>Trip fare</td><td>{formatMoney(tp.fixedPriceCents)}</td></tr>
-                    {meetGreet && tp.meetGreetFeeCents != null && <tr><td>Airport Meet &amp; Greet<span className="tag">requested</span></td><td>{formatMoney(tp.meetGreetFeeCents)}</td></tr>}
+                <h4 className="summary__h">Your price</h4>
+                {tripFare != null ? (
+                  <table className="lines" aria-label="Price"><tbody>
+                    <tr><td>Trip fare</td><td>{formatMoney(tripFare.cents, tripFare.currency)}</td></tr>
+                    {meetGreet && tp?.meetGreetFeeCents != null && <tr><td>Airport Meet &amp; Greet<span className="tag">requested</span></td><td>{formatMoney(tp.meetGreetFeeCents)}</td></tr>}
                     {seatFee > 0 && <tr><td>Child car seats</td><td>{formatMoney(seatFee)}</td></tr>}
-                    {onlineTotal != null && <tr className="total"><td>Total due online</td><td>{formatMoney(onlineTotal)}</td></tr>}
+                    {onlineTotal != null && <tr className="total"><td>Total</td><td>{formatMoney(onlineTotal)}</td></tr>}
                   </tbody></table>
-                ) : <p className="muted">The fixed price for {tp?.name ?? "this vehicle"} has not been set yet, so online payment is not available for it. You can still send a booking request and we will confirm the price with you.</p>}
+                ) : <p className="muted">An online price is not available for {tp?.name ?? "this vehicle"} on this trip yet, so online payment is not available for it. You can still send a booking request and we will confirm the price with you.</p>}
                 {meetGreet && !mgOffered && <div className="notice notice--error" role="alert">Meet &amp; Greet is not offered for the {tp?.name ?? "selected"} tier. Untick it to continue, or choose another vehicle.</div>}
-                {meetGreet && mgOffered && <p className="muted">Meet &amp; Greet is a request until Vanta confirms it. Its fee is charged once, with the fixed price.</p>}
-
-                <h4 className="summary__h">Estimated trip fare</h4>
-                {quote ? (
-                  <>
-                    <p className="muted">Calculated from distance, time and tolls for information. It is <strong>not</strong> charged through online payment.</p>
-                    <details>
-                      <summary>How the estimate is calculated</summary>
-                      <table className="lines"><tbody>
-                        {quote.lineItems.map((l, i) => (
-                          <tr key={i}><td>{l.label}{l.detail && <small className="muted"><br />{l.detail}</small>}</td><td>{l.cents < 0 ? "−" : ""}{formatMoney(Math.abs(l.cents), quote.currency)}</td></tr>
-                        ))}
-                      </tbody></table>
-                    </details>
-                    <table className="lines"><tbody><tr className="total"><td>Estimated trip fare</td><td>{formatMoney(quote.totalCents, quote.currency)}</td></tr></tbody></table>
-                    {quote.roundTrip && (
-                      <p className="muted">
-                        {quote.roundTrip.legs.map((l) => `${l.label} ${formatMoney(l.totalCents, quote.currency)}`).join(" · ")}. Two separate one-way trips: {formatMoney(quote.roundTrip.twoOneWayCents, quote.currency)}.{" "}
-                        {quote.roundTrip.discountCents > 0 ? `Round-trip discount: ${formatMoney(quote.roundTrip.discountCents, quote.currency)}.` : "No round-trip discount is currently active."}
-                      </p>
-                    )}
-                    {quote.tollStatus === "unavailable" && <p className="muted">Toll costs could not be estimated for this route and are not included.</p>}
-                    <p className="muted">Your booking is confirmed only when we confirm it with you.</p>
-                  </>
-                ) : <p className="muted">An estimate is not available for this vehicle. We will confirm the price when we reply to your booking request.</p>}
+                {tripFare != null && <>
+                  {tripFare.roundTrip && tripFare.roundTrip.savingsCents > 0 && <p className="muted">Your trip fare already includes a round-trip saving of {formatMoney(tripFare.roundTrip.savingsCents, tripFare.currency)}.</p>}
+                  {tripFare.roundTrip && tripFare.roundTrip.savingsCents === 0 && <p className="muted">Your trip fare covers both legs of your round trip.</p>}
+                  {tripFare.tollStatus === "unavailable" && <p className="muted">Toll costs could not be estimated for this route and are not included.</p>}
+                  {meetGreet && mgOffered && <p className="muted">Meet &amp; Greet is a request until Vanta confirms it. Its fee is included once in the total.</p>}
+                  <p className="muted">Your booking is confirmed only when we confirm it with you.</p>
+                </>}
 
                 {stale && <div className="notice">Trip details changed. Update fares to continue.</div>}
                 <button className="btn btn--primary" style={{ width: "100%" }} onClick={continueToBooking} disabled={stale || !mgOffered}>Continue to booking</button>
                 <p className="muted" style={{ marginTop: ".75rem" }}>Need a custom price or something unusual? <Link href="/quote" onClick={onClose} style={{ textDecoration: "underline" }}>GET A QUOTE</Link></p>
-                {quote && (
+                {tripFare && (
                   <div className="dontlike">
-                    <p><strong>Don&apos;t like the estimate?</strong> You can send us a query. {BETTER_QUOTE_DISCLAIMER}</p>
+                    <p><strong>Don&apos;t like the price?</strong> You can send us a query. {BETTER_QUOTE_DISCLAIMER}</p>
                     <button className="btn btn--ghost" style={{ width: "100%" }} onClick={() => setPanel("quote")} disabled={stale}>Request a Better Quote</button>
                   </div>
                 )}
@@ -414,7 +397,7 @@ export default function FareCalculator({ prefill, onClose }: { prefill: Calculat
             {result && vehicle && panel === "quote" && (
               <form className="summary" onSubmit={sendQuoteRequest} noValidate>
                 <h3>Request a better quote</h3>
-                <p className="muted">Your trip, vehicle and current quote ({quote ? formatMoney(quote.totalCents, quote.currency) : "n/a"}) are included automatically.</p>
+                <p className="muted">Your trip, vehicle and current price ({onlineTotal != null ? formatMoney(onlineTotal) : tripFare ? formatMoney(tripFare.cents, tripFare.currency) : "n/a"}) are included automatically.</p>
                 <div className="field"><label htmlFor="q-name">Name</label><input id="q-name" value={qr.name} onChange={(e) => setQr({ ...qr, name: e.target.value })} autoComplete="name" />{fieldErr("name")}</div>
                 <div className="field"><label htmlFor="q-email">Email</label><input id="q-email" type="email" value={qr.email} onChange={(e) => setQr({ ...qr, email: e.target.value })} autoComplete="email" />{fieldErr("email")}</div>
                 <div className="field"><label htmlFor="q-phone">Phone</label><input id="q-phone" type="tel" value={qr.phone} onChange={(e) => setQr({ ...qr, phone: e.target.value })} autoComplete="tel" />{fieldErr("phone")}</div>

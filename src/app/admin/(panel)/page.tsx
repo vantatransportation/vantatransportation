@@ -28,10 +28,11 @@ export default async function Overview() {
     count("bookings", (q) => q.eq("status", "completed")),
     count("quote_requests", (q) => q.in("status", ["new", "reviewing"])),
     count("follow_ups", (q) => q.is("completed_at", null).lt("due_at", nowIso)),
-    db.from("bookings").select("estimated_fare_cents").neq("status", "cancelled").not("estimated_fare_cents", "is", null).limit(10000),
+    db.from("bookings").select("estimated_fare_cents,online_amount_cents").neq("status", "cancelled").limit(10000),
     db.from("activity_logs").select("id,action,created_at,entity_type").order("created_at", { ascending: false }).limit(12),
   ]);
-  const totalValue = ((value.data ?? []) as { estimated_fare_cents: number }[]).reduce((s, r) => s + r.estimated_fare_cents, 0);
+  // Booking value = the complete booking total (online amount) when one was calculated, otherwise the plain trip estimate (older / unpriced bookings).
+  const totalValue = ((value.data ?? []) as { estimated_fare_cents: number | null; online_amount_cents: number | null }[]).reduce((s, r) => s + (r.online_amount_cents ?? r.estimated_fare_cents ?? 0), 0);
   const unacknowledged = await loadUnacknowledgedRides(db);
   const authorizations = await loadAuthorizations(db);
   const warnings = configWarnings();

@@ -157,24 +157,28 @@ test("existing eligibility rules still apply: active, available, seating; and ve
 
 test("each tier keeps its own price: the same vehicle carries different fixed prices and Meet & Greet fees per tier", async () => {
   const s = (await quote()).vehicles.find((v: any) => v.name === "S-Class");
-  assert.deepEqual(s.tiers.map((t: any) => [t.name, t.fixedPriceCents, t.meetGreetFeeCents]), [["Luxury", 15000, 3500], ["Luxury Plus", 22000, 5000]]);
-  // The trip estimate belongs to the vehicle (unchanged pricing model); it does not depend on the tier.
-  assert.ok(s.quotes.fastest.totalCents > 0 && s.quotes.fastest.totalCents !== 15000 && s.quotes.fastest.totalCents !== 22000);
+  assert.deepEqual(s.tiers.map((t: any) => [t.name, t.meetGreetFeeCents]), [["Luxury", 3500], ["Luxury Plus", 5000]]);
+  // The trip estimate belongs to the vehicle and is identical in both tiers; the customer sees ONE combined fare per tier (fee + estimate),
+  // so the two combined fares differ by exactly the difference of the tier fixed fees ($70), and no fixed fee is exposed.
+  const [lux, plus] = s.tiers.map((t: any) => t.tripFare.fastest.cents);
+  assert.equal(plus - lux, 22000 - 15000);
+  assert.ok(lux > 15000);
+  assert.ok(!JSON.stringify(s).includes("fixedPriceCents"));
 });
 
 // ---------------------------------------------------------------------------------------------- booking validation
 test("booking in each of a vehicle's tiers saves THAT tier and charges THAT tier's fixed price and Meet & Greet fee", async () => {
   const lux = await book(V["S-Class"], T.luxury);
   assert.equal(lux.res.status, 200);
-  assert.deepEqual([lux.row.tier_id, lux.row.tier_name, lux.row.fixed_price_cents, lux.row.online_amount_cents], [T.luxury, "Luxury", 15000, 15000]);
+  assert.deepEqual([lux.row.tier_id, lux.row.tier_name, lux.row.fixed_price_cents, lux.row.online_amount_cents], [T.luxury, "Luxury", 15000, 15000 + lux.row.estimated_fare_cents]);
   const plus = await book(V["S-Class"], T.plus.toUpperCase()); // ids are matched case-insensitively
   assert.equal(plus.res.status, 200);
-  assert.deepEqual([plus.row.tier_id, plus.row.tier_name, plus.row.fixed_price_cents, plus.row.online_amount_cents], [T.plus, "Luxury Plus", 22000, 22000]);
+  assert.deepEqual([plus.row.tier_id, plus.row.tier_name, plus.row.fixed_price_cents, plus.row.online_amount_cents], [T.plus, "Luxury Plus", 22000, 22000 + plus.row.estimated_fare_cents]);
   assert.equal(plus.row.vehicle_id, lux.row.vehicle_id); // same canonical vehicle
   assert.equal(plus.row.estimated_fare_cents, lux.row.estimated_fare_cents);
   const mg = await book(V["S-Class"], T.plus, { airport: { airport: "Dulles Airport", direction: "arrival", flightNumber: "UA1", airline: "United", terminal: "B", passengerName: "Ann Rider" } }, { meetGreet: true });
   assert.equal(mg.res.status, 200);
-  assert.equal(mg.row.meet_greet_fee_cents, 5000); assert.equal(mg.row.online_amount_cents, 22000 + 5000);
+  assert.equal(mg.row.meet_greet_fee_cents, 5000); assert.equal(mg.row.online_amount_cents, 22000 + mg.row.estimated_fare_cents + 5000);
 });
 
 test("the server rejects vehicle/tier pairs that are not offered, unknown tiers and a missing tier for a multi-tier vehicle", async () => {

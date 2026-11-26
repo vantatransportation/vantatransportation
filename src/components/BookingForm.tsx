@@ -44,15 +44,16 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
   }
 
   const { trip, display } = stored;
-  const q = display.quote;
   const when = `${trip.date} at ${trip.time}`;
   const detectedAirport = looksLikeAirport(trip.pickup.text) || looksLikeAirport(trip.dropoff.text) || (trip.returnLeg ? looksLikeAirport(trip.returnLeg.pickup.text) || looksLikeAirport(trip.returnLeg.dropoff.text) : false);
   const meetGreet = trip.meetGreet === true; // chosen in Calculate Your Fare; the fee is the selected tier's fee
   const airport = meetGreet ? true : (airportOn ?? detectedAirport);
   const pickupIsAirport = looksLikeAirport(trip.pickup.text);
   const airportGuess = pickupIsAirport ? trip.pickup.text : looksLikeAirport(trip.dropoff.text) ? trip.dropoff.text : "";
-  const online = display.online ?? null;
-  const onlineTotal = online && online.fixedPriceCents != null ? online.fixedPriceCents + online.meetGreetCents + online.seatFeeCents : null;
+  // Display copy only: the server recalculates the complete total when the booking is submitted. ONE combined Trip fare, services separately, total.
+  const pricing = display.pricing ?? null;
+  const tripFare = pricing?.tripFare ?? null;
+  const onlineTotal = tripFare ? tripFare.cents + pricing!.meetGreetCents + pricing!.seatFeeCents : null;
 
   async function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -77,7 +78,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
       if (!res.ok) return setStatus({ kind: "error", message: data.error ?? "Something went wrong. Please try again.", fields: data.fields });
       try {
         sessionStorage.removeItem(TRIP_STORAGE_KEY);
-        sessionStorage.setItem("vanta:confirmation", JSON.stringify({ reference: data.reference, totalCents: data.totalCents, currency: data.currency, shownTotalCents: onlineTotal, trackingId: data.trackingId ?? null }));
+        sessionStorage.setItem("vanta:confirmation", JSON.stringify({ reference: data.reference, pricing: data.pricing ?? null, currency: data.currency, shownTotalCents: onlineTotal, trackingId: data.trackingId ?? null }));
       } catch { /* ignore */ }
       if (typeof data.authorizeUrl === "string" && data.authorizeUrl.startsWith("https://")) { window.location.assign(data.authorizeUrl); return; } // Stripe hosted card page (a hold, not a charge)
       router.push(`/book/confirmation?ref=${encodeURIComponent(data.reference)}`);
@@ -104,25 +105,16 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
           <dt>Trip type</dt><dd>{trip.tripType === "hourly" ? `By the hour (${trip.hours} h)` : trip.returnLeg ? "Round trip" : "Point to point"}</dd>
           <dt>Route</dt><dd>{display.distanceMiles} mi, about {display.durationMinutes} min ({display.routeLabel})</dd>
         </dl>
-        <h3 className="summary__h">Charged online</h3>
-        {online && online.fixedPriceCents != null ? (
-          <table className="lines" aria-label="Amount charged online"><tbody>
-            <tr><td>Fixed {online.tierName} price</td><td>{formatMoney(online.fixedPriceCents)}</td></tr>
-            {meetGreet && <tr><td>Airport Meet &amp; Greet<span className="tag">requested</span></td><td>{formatMoney(online.meetGreetCents)}</td></tr>}
-            {online.seatFeeCents > 0 && <tr><td>Child car seats<span className="tag">requested</span></td><td>{formatMoney(online.seatFeeCents)}</td></tr>}
-            <tr className="total"><td>Total due online</td><td>{formatMoney(onlineTotal ?? 0)}</td></tr>
+        <h3 className="summary__h">Your price</h3>
+        {tripFare && pricing ? (
+          <table className="lines" aria-label="Price"><tbody>
+            <tr><td>Trip fare</td><td>{formatMoney(tripFare.cents, tripFare.currency)}</td></tr>
+            {meetGreet && <tr><td>Airport Meet &amp; Greet<span className="tag">requested</span></td><td>{formatMoney(pricing.meetGreetCents)}</td></tr>}
+            {pricing.seatFeeCents > 0 && <tr><td>Child car seats<span className="tag">requested</span></td><td>{formatMoney(pricing.seatFeeCents)}</td></tr>}
+            <tr className="total"><td>Total</td><td>{formatMoney(onlineTotal ?? 0)}</td></tr>
           </tbody></table>
-        ) : <p className="muted">An online amount is not set up for this vehicle&apos;s tier yet. We will confirm the price with you.</p>}
-        <h3 className="summary__h">Estimated trip fare</h3>
-        {q ? (
-          <>
-            <table className="lines"><tbody><tr className="total"><td>Estimated trip fare</td><td>{formatMoney(q.totalCents, q.currency)}</td></tr></tbody></table>
-            <p className="muted">Calculated from distance, time and tolls. For information only: it is not part of the online amount.</p>
-            <details><summary>How the estimate is calculated</summary>
-              <table className="lines"><tbody>{q.lineItems.map((l, i) => <tr key={i}><td>{l.label}{l.detail && <small className="muted"><br />{l.detail}</small>}</td><td>{l.cents < 0 ? "−" : ""}{formatMoney(Math.abs(l.cents), q.currency)}</td></tr>)}</tbody></table>
-            </details>
-          </>
-        ) : <p className="muted">An estimate is not available. We will confirm the price with you.</p>}
+        ) : <p className="muted">An online price is not available for this trip yet. We will confirm the price with you.</p>}
+        {tripFare?.tollStatus === "unavailable" && <p className="muted">Toll costs could not be estimated for this route and are not included.</p>}
         {meetGreet && <p className="muted">Meet &amp; Greet is requested here and is not confirmed until Vanta confirms it.</p>}
         {trip.childSeats && seatCount(trip.childSeats) > 0 && <p className="muted">{SEAT_CONFIRMATION_NOTE}</p>}
         <p className="muted">We verify the amounts again when you submit. This is a booking request, not a confirmed booking. Nothing is charged when you submit. If we approve your request we email you a secure payment link, and your booking is confirmed once the payment is received.</p>

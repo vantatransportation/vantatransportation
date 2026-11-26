@@ -8,28 +8,31 @@ import { verifyPayPalOrder } from "../src/lib/paypal-verify.ts";
 const read = (f: string) => readFileSync(new URL(f, import.meta.url), "utf8");
 const tier = (fixed: number | null, mg: number | null) => ({ id: "t1", name: "Luxury", fixedPriceCents: fixed, meetGreetFeeCents: mg });
 
-test("online charge = fixed tier price + Meet & Greet (if selected) + add-ons; the trip estimate is not an input", () => {
-  // Illustrative numbers only (a $150 fixed price and the $35 fee): nothing here is production configuration.
-  const a = onlineCharge(tier(15000, 3500), { meetGreet: true, addonsCents: 0 });
-  assert.ok(a.ok); if (a.ok) assert.deepEqual([a.charge.fixedPriceCents, a.charge.meetGreetCents, a.charge.totalCents], [15000, 3500, 18500]);
-  const none = onlineCharge(tier(15000, 3500), { meetGreet: false, addonsCents: 0 });
-  assert.ok(none.ok); if (none.ok) assert.equal(none.charge.totalCents, 15000);                         // deselected: fee removed
-  const seats = onlineCharge(tier(15000, 3500), { meetGreet: true, addonsCents: 2000 });
-  if (seats.ok) assert.equal(seats.charge.totalCents, 20500);
+test("online charge = fixed tier fee + trip estimate + Meet & Greet (if selected) + add-ons, each exactly once", () => {
+  // Illustrative numbers only ($150 tier fee, $130 trip estimate, $35 fee): nothing here is production configuration.
+  const a = onlineCharge(tier(15000, 3500), { meetGreet: true, addonsCents: 0, tripEstimateCents: 13000 });
+  assert.ok(a.ok); if (a.ok) assert.deepEqual([a.charge.fixedPriceCents, a.charge.tripEstimateCents, a.charge.meetGreetCents, a.charge.totalCents], [15000, 13000, 3500, 31500]);
+  const none = onlineCharge(tier(15000, 3500), { meetGreet: false, addonsCents: 0, tripEstimateCents: 13000 });
+  assert.ok(none.ok); if (none.ok) assert.equal(none.charge.totalCents, 28000);                         // deselected: fee removed
+  const seats = onlineCharge(tier(15000, 3500), { meetGreet: true, addonsCents: 2000, tripEstimateCents: 13000 });
+  if (seats.ok) assert.equal(seats.charge.totalCents, 33500);
   // Recalculating (or switching tier and back) never stacks the fee.
-  const again = onlineCharge(tier(15000, 3500), { meetGreet: true, addonsCents: 0 });
+  const again = onlineCharge(tier(15000, 3500), { meetGreet: true, addonsCents: 0, tripEstimateCents: 13000 });
   assert.deepEqual(again, a);
-  const other = onlineCharge(tier(10000, 2500), { meetGreet: true, addonsCents: 0 });
-  if (other.ok) assert.equal(other.charge.totalCents, 12500);
+  const other = onlineCharge(tier(10000, 2500), { meetGreet: true, addonsCents: 0, tripEstimateCents: 13000 });
+  if (other.ok) assert.equal(other.charge.totalCents, 25500);
 });
 
-test("online charge refuses to invent amounts", () => {
-  assert.deepEqual(onlineCharge(tier(null, 3500), { meetGreet: false, addonsCents: 0 }), { ok: false, reason: "price_not_set" });
-  assert.deepEqual(onlineCharge(null, { meetGreet: false, addonsCents: 0 }), { ok: false, reason: "tier_missing" });
-  assert.deepEqual(onlineCharge(tier(15000, null), { meetGreet: true, addonsCents: 0 }), { ok: false, reason: "meet_greet_unavailable" });
-  assert.equal(onlineCharge(tier(15000, null), { meetGreet: false, addonsCents: 0 }).ok, true);
-  assert.deepEqual(onlineCharge(tier(15000.5, 3500), { meetGreet: false, addonsCents: 0 }), { ok: false, reason: "invalid" });
-  assert.deepEqual(onlineCharge(tier(15000, 3500), { meetGreet: false, addonsCents: -1 }), { ok: false, reason: "invalid" });
+test("online charge refuses to invent amounts (and never falls back to the tier fee alone)", () => {
+  const o = { meetGreet: false, addonsCents: 0, tripEstimateCents: 13000 };
+  assert.deepEqual(onlineCharge(tier(null, 3500), o), { ok: false, reason: "price_not_set" });
+  assert.deepEqual(onlineCharge(null, o), { ok: false, reason: "tier_missing" });
+  assert.deepEqual(onlineCharge(tier(15000, null), { ...o, meetGreet: true }), { ok: false, reason: "meet_greet_unavailable" });
+  assert.equal(onlineCharge(tier(15000, null), o).ok, true);
+  assert.deepEqual(onlineCharge(tier(15000.5, 3500), o), { ok: false, reason: "invalid" });
+  assert.deepEqual(onlineCharge(tier(15000, 3500), { ...o, addonsCents: -1 }), { ok: false, reason: "invalid" });
+  assert.deepEqual(onlineCharge(tier(15000, 3500), { ...o, tripEstimateCents: null }), { ok: false, reason: "trip_fare_unavailable" });
+  assert.deepEqual(onlineCharge(tier(15000, 3500), { ...o, tripEstimateCents: -5 }), { ok: false, reason: "invalid" });
 });
 
 test("tier price validation: positive dollars within a sane ceiling, or blank (not configured)", () => {
@@ -90,8 +93,7 @@ test("Meet & Greet wording: optional paid service, shown in the calculator, neve
   }
   const form = read("../src/components/BookingForm.tsx");
   assert.ok(!/setMeetGreet/.test(form)); // single source of truth: the calculator's choice
-  assert.ok(calc.includes("Estimated trip fare") && calc.includes("Charged online") && calc.includes("Total due online"));
-  assert.match(calc, /not<\/strong> charged through online payment/);
+  assert.ok(calc.includes("Trip fare") && calc.includes("Your price") && calc.includes("Total") && !calc.includes("Estimated trip fare"));
 });
 
 test("navbar: all original destinations kept, theme controls collapsed into a dropdown, keyboard and focus handling present", () => {

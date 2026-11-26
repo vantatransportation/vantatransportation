@@ -104,12 +104,10 @@ export default function TripStatus({ credential, initial, tz }: { credential: Cl
         </dl>
         {c && (
           <table className="lines" aria-label="Charges"><tbody>
-            <tr><td>Fixed price</td><td>{formatMoney(c.fixedPriceCents, c.currency)}</td></tr>
-            {c.rushCents > 0 && <tr><td>Rush-hour surcharge</td><td>{formatMoney(c.rushCents, c.currency)}</td></tr>}
-            {c.tipCents > 0 && <tr><td>Tip</td><td>{formatMoney(c.tipCents, c.currency)}</td></tr>}
+            <tr><td>Trip fare</td><td>{formatMoney(c.tripFareCents, c.currency)}</td></tr>
             {c.meetGreetCents > 0 && <tr><td>Airport Meet &amp; Greet</td><td>{formatMoney(c.meetGreetCents, c.currency)}</td></tr>}
-            {c.seatCents > 0 && <tr><td>Child car seats</td><td>{formatMoney(c.seatCents, c.currency)}</td></tr>}
-            <tr className="total"><td>Total online</td><td>{formatMoney(c.totalCents, c.currency)}</td></tr>
+            {c.childSeatCents > 0 && <tr><td>Child car seats</td><td>{formatMoney(c.childSeatCents, c.currency)}</td></tr>}
+            <tr className="total"><td>Total</td><td>{formatMoney(c.totalCents, c.currency)}</td></tr>
           </tbody></table>
         )}
         {credential.kind === "token" && <p className="muted">Payment: {trip.paymentStatus.replace(/_/g, " ")}</p>}

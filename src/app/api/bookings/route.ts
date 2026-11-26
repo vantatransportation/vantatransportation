@@ -8,6 +8,7 @@ import { createBooking } from "@/lib/fare/booking";
 import { notify } from "@/lib/notify";
 import { clean, EMAIL_RE, phoneDigits } from "@/lib/validation";
 import { formatMoney } from "@/lib/pricing/engine";
+import { customerPricingOf } from "@/lib/tier-pricing";
 import { validateBookingDetails } from "@/lib/booking-details";
 import { REGION_LABEL } from "@/lib/coverage";
 import { childSeatSummary, NO_SEATS } from "@/lib/child-seats";
@@ -58,6 +59,7 @@ export async function POST(request: Request) {
       const site = (process.env.NEXT_PUBLIC_SITE_URL || "").replace(/\/$/, "");
       // No payment link is created or sent at submission: payment is released only after an admin approves the booking.
       const trackUrl = result.trackingCode && site ? `${site}/track#id=${result.trackingCode}` : undefined;
+      const cp = result.online ? customerPricingOf(result.online) : null;
       const extrasText = [t.returnLeg ? "Round trip" : "", seatText ? `Child seats: ${seatText} (requested)` : "", result.meetGreetRequested ? "Meet & Greet requested" : ""].filter(Boolean).join(", ");
       // Alerts intentionally omit phone numbers, notes, passenger instructions and emergency contacts.
       await notify(db, "booking.created", { type: "booking", id: result.id }, {
@@ -65,11 +67,14 @@ export async function POST(request: Request) {
         Stops: t.stops.map((s) => s.text).join(" | ") || undefined, Destination: t.dropoff.text,
         When: formatPickup(t.pickupAtIso, BUSINESS_TZ) + (t.returnLeg ? `  (return ${formatPickup(t.returnLeg.pickupAtIso, BUSINESS_TZ)})` : ""), Passengers: String(t.passengers), Vehicle: result.vehicleName,
         "Trip type": t.tripType === "hourly" ? `Hourly (${t.hours} h)` : t.returnLeg ? "Round trip" : "Point to point",
-        "Estimated trip fare (information only)": result.totalCents != null ? formatMoney(result.totalCents, result.currency) : "To be confirmed",
-        Tier: result.online?.tierName, "Fixed tier price": result.online ? formatMoney(result.online.fixedPriceCents, result.currency) : undefined,
-        "Meet & Greet": result.online && result.online.meetGreetCents > 0 ? formatMoney(result.online.meetGreetCents, result.currency) : result.meetGreetRequested ? "Requested" : undefined,
-        "Child car seats": result.childSeatFeeCents > 0 ? formatMoney(result.childSeatFeeCents, result.currency) : undefined,
-        "Online amount due": result.online ? formatMoney(result.online.totalCents, result.currency) : "Not set up yet",
+        // Customer-facing fields (the customer email uses ONLY these): one combined Trip fare, optional services, Total.
+        "Trip fare": cp ? formatMoney(cp.tripFareCents, result.currency) : "To be confirmed",
+        "Meet & Greet": cp && cp.meetGreetCents > 0 ? formatMoney(cp.meetGreetCents, result.currency) : result.meetGreetRequested ? "Requested" : undefined,
+        "Child car seats": cp && cp.childSeatCents > 0 ? formatMoney(cp.childSeatCents, result.currency) : undefined,
+        Total: cp ? formatMoney(cp.totalCents, result.currency) : undefined,
+        // Internal fields (the business email only; see templates.ts): the admin keeps the full breakdown.
+        Tier: result.online?.tierName, "Fixed tier price (internal)": result.online ? formatMoney(result.online.fixedPriceCents, result.currency) : undefined,
+        "Trip estimate (internal)": result.online ? formatMoney(result.online.tripEstimateCents, result.currency) : result.totalCents != null ? formatMoney(result.totalCents, result.currency) : undefined,
         "Service region": REGION_LABEL[result.region], "Needs staff review": result.requiresReview ? "Yes" : undefined,
         "Requested extras": extrasText || undefined, "Booking for": det.details.bookingFor === "other" ? "Someone else" : undefined,
         _customerEmail: email, _customerName: name, _trackingId: result.trackingCode ?? undefined, _trackUrl: trackUrl,
@@ -82,7 +87,9 @@ export async function POST(request: Request) {
       const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "").replace(/\/$/, "");
       if (siteUrl) { const a = await startAuthorization(db, result.id, siteUrl).catch(() => null); if (a?.ok) authorizeUrl = a.url; }
     }
-    return json({ ok: true, reference: result.reference, totalCents: result.totalCents, onlineAmountCents: result.online?.totalCents ?? null, currency: result.currency, trackingId: result.trackingCode, payUrl: null, authorizeUrl });
+    // Customer-safe pricing only: the combined Trip fare, the selected services and the Total. No tier fee, rate or internal component.
+    const pricing = result.online ? customerPricingOf(result.online) : null;
+    return json({ ok: true, reference: result.reference, pricing, currency: result.currency, trackingId: result.trackingCode, payUrl: null, authorizeUrl });
   } catch (e) {
     console.error("[bookings] unexpected error", e);
     return json({ error: "We could not save your booking. Please try again." }, 500);

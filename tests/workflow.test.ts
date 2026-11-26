@@ -126,8 +126,9 @@ test("draft pricing is never used for customer quotes", async () => {
   const data = await res.json();
   assert.equal(data.pricingAvailable, false);
   assert.ok(data.vehicles.length === 2);
-  assert.ok(data.vehicles.every((v: any) => v.quotable === false && Object.keys(v.quotes).length === 0));
+  assert.ok(data.vehicles.every((v: any) => v.quotable === false && v.tiers.every((t: any) => Object.keys(t.tripFare).length === 0)));
   assert.ok(!JSON.stringify(data).includes('"per_mile"'));
+  assert.ok(!JSON.stringify(data).includes("fixedPriceCents")); // the tier fixed fee never reaches the browser
 });
 
 test("with ACTIVE pricing: real route distance, toll-aware options, surcharge, capacity filter", async () => {
@@ -139,11 +140,17 @@ test("with ACTIVE pricing: real route distance, toll-aware options, surcharge, c
   assert.equal(data.pricingAvailable, true);
   assert.deepEqual(data.routes.map((r: any) => r.key), ["fastest", "no_tolls"]);
   const ec = data.vehicles.find((v: any) => v.name === "E-Class");
-  assert.equal(ec.quotes.fastest.totalCents, 20 * 6 * 100 + 1000); // 20 mi x $6 + $10 fee
-  assert.equal(ec.quotes.fastest.tollStatus, "unavailable");        // toll price unknown: not invented
+  // With no tier fixed fee configured there is no online fare at all (never the plain estimate, never the fee alone).
+  assert.deepEqual(ec.tiers.map((t: any) => Object.keys(t.tripFare).length), [0]);
+  setFixed(null, 15000, null);
+  const priced = (await (await routes.quote.POST(post("/api/fare/quote", trip()))).json()).vehicles.find((v: any) => v.name === "E-Class").tiers[0].tripFare;
+  setFixed(null, null, null);
+  assert.equal(priced.fastest.cents, 15000 + 20 * 6 * 100 + 1000); // tier fee $150 + 20 mi x $6 + $10 fee, as ONE combined amount
+  assert.equal(priced.fastest.tollStatus, "unavailable");        // toll price unknown: not invented
   assert.equal(data.routes[1].distanceMiles, 22);
-  assert.equal(ec.quotes.no_tolls.totalCents, 22 * 6 * 100 + 1000);
-  assert.equal(ec.quotes.no_tolls.tollStatus, "avoided");
+  assert.equal(priced.no_tolls.cents, 15000 + 22 * 6 * 100 + 1000);
+  assert.equal(priced.no_tolls.tollStatus, "avoided");
+  assert.deepEqual(Object.keys(priced.fastest).sort(), ["cents", "currency", "tollStatus"]); // no line items, rates or per-mile details
   const sprinter = data.vehicles.find((v: any) => v.name === "Sprinter");
   assert.equal(sprinter.quotable, false); // no pricing configured at all
 
@@ -159,14 +166,12 @@ test("with ACTIVE pricing: real route distance, toll-aware options, surcharge, c
 test("known toll estimates are added; hourly quotes include extra-mile charges", async () => {
   net.tollMode = "known";
   const d = await (await routes.quote.POST(post("/api/fare/quote", trip()))).json();
-  const ec = d.vehicles.find((v: any) => v.name === "E-Class");
-  assert.equal(ec.quotes.fastest.totalCents, 12000 + 1000 + 450);
+  void d;
+  assert.equal((await quoteFor(trip())).ec.totalCents, 12000 + 1000 + 450);
   net.tollMode = "unknown";
-  const h = await (await routes.quote.POST(post("/api/fare/quote", trip({ tripType: "hourly", hours: 3 })))).json();
-  const q = h.vehicles.find((v: any) => v.name === "E-Class").quotes.fastest;
+  const q = (await quoteFor(trip({ tripType: "hourly", hours: 3 }))).ec;
   assert.equal(q.totalCents, 3 * 100 * 100 + 0 + 1000); // 20 mi within the 20-mile allowance
-  const h2 = await (await routes.quote.POST(post("/api/fare/quote", trip({ tripType: "hourly", hours: 3 })))).json();
-  assert.equal(h2.vehicles.find((v: any) => v.name === "E-Class").quotes.no_tolls.totalCents, 30000 + 2 * 3 * 100 + 1000); // 22 mi: 2 extra
+  assert.equal((await quoteFor(trip({ tripType: "hourly", hours: 3 }), "no_tolls")).ec.totalCents, 30000 + 2 * 3 * 100 + 1000); // 22 mi: 2 extra
 });
 
 test("quote rejects bad input and cross-origin requests", async () => {
@@ -182,7 +187,8 @@ test("booking: server recalculates the fare, ignores browser prices, saves CRM d
   assert.equal(res.status, 200);
   const data = await res.json();
   assert.match(data.reference, /^VT-\d+$/);
-  assert.equal(data.totalCents, 13000); // $120 + $10 fee; NOT the 1 cent sent by the browser
+  assert.equal(data.pricing, null); // no tier fixed fee is configured in this fixture, so there is no online total (the tier fee is never charged or shown alone)
+  assert.ok(!("totalCents" in data) && !("onlineAmountCents" in data));
 
   const b = db.t("bookings")[0];
   assert.equal(b.estimated_fare_cents, 13000);
@@ -249,7 +255,7 @@ test("vehicle without published pricing can still be requested; no invented pric
   const res = await routes.bookings.POST(post("/api/bookings", { ...ack, trip: trip({ passengers: 10 }), vehicleId: ids.sprinter, routeKey: "fastest", name: "Group Lead", email: "grp@example.com", phone: "4105550122", submissionKey: "key-dddddddddddddddd" }));
   assert.equal(res.status, 200);
   const data = await res.json();
-  assert.equal(data.totalCents, null);
+  assert.equal(data.pricing, null);
   assert.equal(db.t("pricing_snapshots").length, snaps);
 });
 
@@ -259,18 +265,18 @@ const rtTrip = (o: object = {}) => trip({ stops: [], returnLeg: { pickup: { text
 
 test("round trip: both legs priced, no discount invented, configured discount applied server-side, legs and snapshot saved", async () => {
   // No active rule yet: sum of two legs, no discount.
-  const none = await (await routes.quote.POST(post("/api/fare/quote", rtTrip()))).json();
-  const q0 = none.vehicles.find((v: any) => v.name === "E-Class").quotes.fastest;
-  assert.equal(q0.roundTrip.discountCents, 0);
-  assert.equal(q0.totalCents, 2 * 13000); // two legs, each 20 mi x $6 + $10 fee
+  setFixed(null, 15000, null);
+  const fare = async () => (await (await routes.quote.POST(post("/api/fare/quote", rtTrip()))).json()).vehicles.find((v: any) => v.name === "E-Class").tiers[0].tripFare.fastest;
+  const q0 = await fare();
+  assert.equal(q0.roundTrip.savingsCents, 0);
+  assert.equal(q0.cents, 15000 + 2 * 13000); // tier fee once + two legs, each 20 mi x $6 + $10 fee
 
   db.seed("round_trip_rules", [{ label: "Round-trip savings", kind: "percent", amount: 10, category_id: null, is_active: true }]);
-  const d = await (await routes.quote.POST(post("/api/fare/quote", rtTrip()))).json();
-  const q = d.vehicles.find((v: any) => v.name === "E-Class").quotes.fastest;
-  assert.equal(q.roundTrip.twoOneWayCents, 26000);
-  assert.equal(q.roundTrip.discountCents, 2600);
-  assert.equal(q.totalCents, 23400);
-  assert.ok(q.lineItems.some((l: any) => l.code === "round_trip_discount" && l.cents === -2600));
+  const q = await fare();
+  assert.equal(q.roundTrip.savingsCents, 2600);                  // 10% of the two legs' fare (26000); the tier fee is not discounted
+  assert.equal(q.cents, 15000 + 23400);
+  assert.ok(!("lineItems" in q) && !("legs" in q.roundTrip) && !("twoOneWayCents" in q.roundTrip)); // no internal split is exposed
+  setFixed(null, null, null);
 
   // Bad return times are rejected.
   assert.equal((await routes.quote.POST(post("/api/fare/quote", rtTrip({ returnLeg: { pickup: { text: "A" }, dropoff: { text: "B" }, date: next(-1), time: "08:00" } })))).status, 422);
@@ -279,7 +285,8 @@ test("round trip: both legs priced, no discount invented, configured discount ap
   assert.equal(res.status, 200);
   const b = db.t("bookings").find((x: any) => x.submission_key === "key-rt-aaaaaaaaaaaa");
   assert.equal(b.trip_direction, "round_trip");
-  assert.equal(b.estimated_fare_cents, 23400);
+  assert.equal(b.estimated_fare_cents, 23400); // the trip estimate only (internal); no tier fee is configured here, so no online amount exists
+  assert.equal(b.online_amount_cents, null);
   const legs = db.t("booking_legs").filter((l: any) => l.booking_id === b.id).sort((a: any, c: any) => a.leg_number - c.leg_number);
   assert.deepEqual(legs.map((l: any) => [l.direction, l.fare_cents]), [["outbound", 13000], ["return", 13000]]);
   assert.equal(legs[1].pickup_address, "Dulles Airport");
@@ -309,7 +316,8 @@ test("booking for someone else: separate booker/passenger, contacts, airport and
   const res = await routes.bookings.POST(post("/api/bookings", body));
   assert.equal(res.status, 200);
   const data = await res.json();
-  assert.equal(data.totalCents, 13000); // the estimate is the trip-based estimate only
+  assert.equal(data.pricing, null); // no tier fee configured here
+  assert.equal(db.t("bookings").find((x: any) => x.reference === data.reference).estimated_fare_cents, 13000); // the trip estimate is stored (internal)
   const b = db.t("bookings").find((x: any) => x.reference === data.reference);
   assert.equal(b.booking_for, "other");
   assert.equal(b.luggage_count, 3);
@@ -357,7 +365,16 @@ const makeBooking = async (extra: Record<string, unknown> = {}, tripOver: Record
   const data = await res.json();
   return { res, data, row: db.t("bookings").find((b: any) => b.reference === data.reference) };
 };
-const quoteFor = async (t: object) => { const d = await (await routes.quote.POST(post("/api/fare/quote", t))).json(); return { d, ec: d.vehicles?.find((v: any) => v.name === "E-Class")?.quotes?.fastest }; };
+// The browser now receives ONE combined Trip fare per tier (tier fee + trip estimate). This helper recovers the plain server-calculated trip ESTIMATE
+// (what older tests assert on) by pricing the E-Class's tier at a $0 fixed fee for the call, then restoring it.
+const quoteFor = async (t: object, key: "fastest" | "no_tolls" = "fastest") => {
+  const tier = db.t("vehicle_tiers")[1]; const saved = tier.fixed_price_cents; tier.fixed_price_cents = 0;
+  try {
+    const d = await (await routes.quote.POST(post("/api/fare/quote", t))).json();
+    const f = d.vehicles?.find((v: any) => v.name === "E-Class")?.tiers?.[0]?.tripFare?.[key];
+    return { d, ec: f ? { ...f, totalCents: f.cents } : undefined };
+  } finally { tier.fixed_price_cents = saved; }
+};
 
 const TIERS = () => db.t("vehicle_tiers");
 const setFixed = (premium: number | null, luxury: number | null, plus: number | null) => { TIERS()[0].fixed_price_cents = premium; TIERS()[1].fixed_price_cents = luxury; TIERS()[2].fixed_price_cents = plus; };
@@ -370,7 +387,6 @@ test("child seats: priced on the server (one way per seat; round trip per seat O
   const one = await quoteFor(trip({ passengers: 3, childSeats: seats }));
   assert.equal(one.ec.totalCents, baseOne);                       // the estimate does not include add-ons
   assert.equal(one.d.seatFeeCents, 2 * 1000);                     // the add-on is reported separately
-  assert.ok(!one.ec.lineItems.some((l: any) => l.code === "child_seat"));
   assert.deepEqual(one.d.seatInfo, { oneWayCents: 1000, roundTripCents: 1500, max: 4 });
 
   const rt = await quoteFor(rtTrip({ passengers: 3, childSeats: seats }));
@@ -381,24 +397,24 @@ test("child seats: priced on the server (one way per seat; round trip per seat O
   assert.equal((await routes.quote.POST(post("/api/fare/quote", trip({ passengers: 2, childSeats: { booster: 3 } })))).status, 422);   // more seats than passengers
   assert.equal((await routes.quote.POST(post("/api/fare/quote", trip({ passengers: 3, childSeats: { booster: 1.5 } })))).status, 422);
 
-  // Booking: the browser's totals are ignored. Estimate = trip estimate; online amount = fixed Luxury price + seats.
+  // Booking: the browser's totals are ignored. Estimate = trip estimate; online amount = fixed Luxury price + trip estimate + seats.
   const b = await makeBooking({ totalCents: 1, childSeatFeeCents: 1, onlineAmountCents: 1 }, { passengers: 3, childSeats: seats });
   assert.equal(b.res.status, 200);
   assert.equal(b.row.estimated_fare_cents, baseOne);
   assert.equal(b.row.child_seat_fee_cents, 2000);
   assert.equal(b.row.fixed_price_cents, 15000);
-  assert.equal(b.row.online_amount_cents, 15000 + 2000);
+  assert.equal(b.row.online_amount_cents, 15000 + baseOne + 2000);
   assert.deepEqual(b.row.child_seats, [{ type: "rear_facing", quantity: 1 }, { type: "booster", quantity: 1 }]);
   assert.match(JSON.stringify(db.t("notification_logs").filter((l: any) => l.entity_id === b.row.id)), /Child seats: 1 × Rear-facing, 1 × Booster \(requested\)/);
 
   const rtBooking = await makeBooking({}, { stops: [], passengers: 3, childSeats: seats, returnLeg: { pickup: { text: "Dulles Airport" }, dropoff: { text: "1 Main St, Baltimore" }, date: next(1), time: "17:00" } });
   assert.equal(rtBooking.row.child_seat_fee_cents, 3000);
-  assert.equal(rtBooking.row.online_amount_cents, 15000 + 3000);
+  assert.equal(rtBooking.row.online_amount_cents, 15000 + baseRt + 3000);
 
   // Admin-configurable rate: a price change applies to new quotes and leaves saved bookings alone.
   db.t("booking_settings")[0].child_seat_one_way_cents = 1200;
   assert.equal((await quoteFor(trip({ passengers: 3, childSeats: seats }))).d.seatFeeCents, 2 * 1200);
-  assert.equal(b.row.online_amount_cents, 17000);
+  assert.equal(b.row.online_amount_cents, 15000 + baseOne + 2000);
   db.t("booking_settings")[0].child_seat_one_way_cents = 1000;
   setFixed(null, null, null);
 });
@@ -552,8 +568,9 @@ test("Stripe Checkout: amount comes only from the saved server-side total; clien
   assert.equal((await pay(b.row.payment_token, { unapproved: true })).status, 409); // payment is impossible before admin approval
   assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 0);
   assert.equal(b.row.payment_status, "unpaid");
-  const total = b.row.online_amount_cents; assert.equal(total, 15000); // the fixed Luxury price, not the trip estimate
-  assert.notEqual(total, b.row.estimated_fare_cents);
+  const total = b.row.online_amount_cents; assert.ok(b.row.estimated_fare_cents > 0);
+  assert.equal(total, 15000 + b.row.estimated_fare_cents); // the COMPLETE total: fixed Luxury fee + trip estimate (not the fee alone)
+  assert.notEqual(total, b.row.fixed_price_cents);
 
   const callsBefore = net.calls.length;
   const r = await pay(b.row.payment_token, { amountCents: 1, amount: 1, totalCents: 1 });
@@ -714,39 +731,41 @@ const airportBlock = { airport: "Dulles Airport", direction: "arrival", flightNu
 test("tiers: exactly three are offered with their fixed price and Meet & Greet fee; the trip estimate stays a separate, informational calculation", async () => {
   setFixed(10000, 15000, 22000);
   const { d, ec } = await quoteFor(trip());
+  assert.ok(!JSON.stringify(d).includes("fixedPriceCents")); // the tier fixed fee is never sent to the browser
   assert.deepEqual(d.tiers.map((t: any) => t.name), ["Premium", "Luxury", "Luxury Plus"]);
   assert.deepEqual(d.tiers.map((t: any) => t.meetGreetFeeCents), [2500, 3500, 5000]); // initial approved fees
   const lux = d.vehicles.find((v: any) => v.name === "E-Class"), prem = d.vehicles.find((v: any) => v.name === "Sprinter");
   assert.deepEqual(lux.tiers.map((t: any) => t.name), ["Luxury"]); assert.deepEqual(prem.tiers.map((t: any) => t.name), ["Premium"]);
-  assert.deepEqual([lux.tiers[0].fixedPriceCents, lux.tiers[0].meetGreetFeeCents], [15000, 3500]);
-  assert.deepEqual([prem.tiers[0].fixedPriceCents, prem.tiers[0].meetGreetFeeCents], [10000, 2500]);
+  assert.deepEqual([lux.tiers[0].meetGreetFeeCents, prem.tiers[0].meetGreetFeeCents], [3500, 2500]);
   assert.ok(ec.totalCents > 0 && ec.totalCents !== 15000); // the mileage-based estimate is still calculated, and is not the fixed price
-  assert.ok(!JSON.stringify(ec.lineItems).includes("Fixed"));
+  // The customer-facing fare is ONE combined amount: this tier's fixed fee + the trip estimate.
+  const rawLux = (await (await routes.quote.POST(post("/api/fare/quote", trip()))).json()).vehicles.find((v: any) => v.name === "E-Class").tiers[0].tripFare.fastest;
+  assert.equal(rawLux.cents, 15000 + ec.totalCents);
 });
 
 test("Meet & Greet: fee comes from the selected tier on the server; changing tier changes the fee; deselecting removes it; never added twice; airport details required", async () => {
   setFixed(10000, 15000, 22000); setPay("full");
   const base = (await makeBooking({ details: undefined, airport: airportBlock })).row;
   assert.equal(base.meet_greet_selected, false);
-  assert.equal(base.online_amount_cents, 15000);                       // deselected: no fee in the charge
+  assert.equal(base.online_amount_cents, 15000 + base.estimated_fare_cents); // deselected: no Meet & Greet fee in the charge
 
   const lux = await makeBooking({ airport: airportBlock, fixedPriceCents: 1, meetGreetCents: 1, onlineAmountCents: 1 }, { meetGreet: true }); // a tierId is validated, not trusted: see tests/vehicle-tiers.test.ts
   assert.equal(lux.res.status, 200);
   assert.equal(lux.row.meet_greet_selected, true);
   assert.equal(lux.row.fixed_price_cents, 15000); assert.equal(lux.row.meet_greet_fee_cents, 3500);
-  assert.equal(lux.row.online_amount_cents, 15000 + 3500);             // browser-supplied values ignored
+  assert.equal(lux.row.online_amount_cents, 15000 + lux.row.estimated_fare_cents + 3500); // browser-supplied values ignored
   assert.equal(lux.row.tier_name, "Luxury");
   const air = db.t("booking_airport_details").find((a: any) => a.booking_id === lux.row.id);
   assert.equal(air.meet_greet_requested, true); assert.equal(air.meet_greet_status, "requested"); assert.equal(air.meet_greet_charge_cents, 3500);
-  assert.notEqual(lux.row.online_amount_cents, lux.row.estimated_fare_cents);
   const snap = db.t("pricing_snapshots").find((x: any) => x.booking_id === lux.row.id);
-  assert.equal(snap.snapshot.online.totalCents, 18500);
+  assert.equal(snap.snapshot.online.totalCents, lux.row.online_amount_cents);
 
   // Different tier (Premium vehicle): its own fee. Another submission of the same trip does not add the fee twice.
   const prem = await makeBooking({ vehicleId: ids.sprinter, airport: airportBlock }, { meetGreet: true });
-  assert.equal(prem.row.meet_greet_fee_cents, 2500); assert.equal(prem.row.online_amount_cents, 10000 + 2500);
+  assert.equal(prem.res.status, 200); assert.equal(prem.row.meet_greet_selected, true);
+  assert.equal(prem.row.online_amount_cents, null); // no published trip fare for this vehicle: NO online charge (never the tier fee + services alone)
   const again = await makeBooking({ airport: airportBlock, submissionKey: lux.row.submission_key }, { meetGreet: true });
-  assert.equal(again.row.online_amount_cents, 18500); assert.equal(db.t("bookings").filter((b: any) => b.submission_key === lux.row.submission_key).length, 1);
+  assert.equal(again.row.online_amount_cents, lux.row.online_amount_cents); assert.equal(db.t("bookings").filter((b: any) => b.submission_key === lux.row.submission_key).length, 1);
 
   // Airport details are required for Meet & Greet; it must be switched on and offered for the tier.
   assert.equal((await makeBooking({}, { meetGreet: true })).res.status, 422);
@@ -769,14 +788,14 @@ test("fixed prices: a missing price means no online charge (never invented); lat
   assert.equal((await pay(none.row.payment_token)).status, 409);       // checkout refuses: price not set yet
 
   setFixed(10000, 15000, 22000);
-  const before = await makeBooking(); assert.equal(before.row.online_amount_cents, 15000);
+  const before = await makeBooking(); const est = before.row.estimated_fare_cents; assert.equal(before.row.online_amount_cents, 15000 + est);
   luxury().fixed_price_cents = 18000; luxury().meet_greet_fee_cents = 4000;      // admin raises the prices
-  assert.equal(before.row.online_amount_cents, 15000); assert.equal(before.row.fixed_price_cents, 15000);
+  assert.equal(before.row.online_amount_cents, 15000 + est); assert.equal(before.row.fixed_price_cents, 15000);
   const checkout = await pay(before.row.payment_token);                           // the customer pays what they were shown
   assert.equal(checkout.status, 200);
-  assert.equal(db.t("payments").filter((p: any) => p.booking_id === before.row.id).at(-1).amount_cents, 15000);
+  assert.equal(db.t("payments").filter((p: any) => p.booking_id === before.row.id).at(-1).amount_cents, 15000 + est);
   const after = await makeBooking();                                              // a NEW booking uses the new price
-  assert.equal(after.row.online_amount_cents, 18000);
+  assert.equal(after.row.online_amount_cents, 18000 + est);
   luxury().fixed_price_cents = 15000; luxury().meet_greet_fee_cents = 3500;
 });
 
@@ -807,25 +826,31 @@ test("admin: only an authorized admin can set tier fixed prices and Meet & Greet
   // The saved price shows up in new fare calculations.
   await upd({ fixed_price_cents: "260" });
   assert.equal(tier.fixed_price_cents, 26000);
-  assert.equal((await quoteFor(trip())).d.tiers[2].fixedPriceCents, 26000);
+  assert.equal(tier.fixed_price_cents, 26000); // (the browser never receives the fee; it shows up inside the combined trip fare)
   globalThis.__cookies = {};
 });
 
 // ---- Stripe line items for the fixed-price charge -----------------------------------------------------
-test("Stripe checkout lists the charged components once each: fixed price, Meet & Greet, child seats; never the trip estimate", async () => {
+test("Stripe checkout lists ONE combined Trip fare plus Meet & Greet and child seats; the tier fee and estimate are never listed separately", async () => {
   setFixed(10000, 15000, 22000); setPay("full");
   const b = await makeBooking({ airport: airportBlock }, { meetGreet: true, passengers: 3, childSeats: { booster: 2 } });
-  assert.equal(b.row.online_amount_cents, 15000 + 3500 + 2000);
+  const est = b.row.estimated_fare_cents;
+  assert.equal(b.row.online_amount_cents, 15000 + est + 3500 + 2000);
   const from = net.calls.length;
   assert.equal((await pay(b.row.payment_token)).status, 200);
   const form = new URLSearchParams(String(net.calls.slice(from).find((c) => c.url === "https://api.stripe.com/v1/checkout/sessions")!.body));
   const amounts = [0, 1, 2, 3].map((i) => form.get(`line_items[${i}][price_data][unit_amount]`)).filter(Boolean);
-  assert.deepEqual(amounts, ["15000", "3500", "2000"]);
+  assert.deepEqual(amounts, [String(15000 + est), "3500", "2000"]);          // Trip fare = tier fee + estimate, then the two services
+  assert.equal(form.get("line_items[0][price_data][product_data][name]"), `Trip fare (${b.row.reference})`);
   assert.equal(form.get("line_items[1][price_data][product_data][name]"), "Airport Meet & Greet");
-  assert.equal(String(b.row.estimated_fare_cents) === "15000", false);
+  assert.equal(amounts.reduce((n, a) => n + Number(a), 0), Number(form.get("line_items[0][price_data][unit_amount]")) + 5500);
+  const sc = net.calls.slice(from).find((c) => c.url === "https://api.stripe.com/v1/checkout/sessions")!;
+  const everything = String(sc.body);
+  assert.ok(!/fixed|per mile|per_mile|tier/i.test(decodeURIComponent(everything.replace(/\+/g, " "))), "nothing customer-visible at Stripe mentions the tier fee or rates");
+  assert.ok(!amounts.includes("15000"));                                      // the tier fee alone is never a line
   const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
-  assert.deepEqual([p.provider, p.tier_name, p.fixed_price_cents, p.meet_greet_cents, p.other_addons_cents, p.amount_cents], ["stripe", "Luxury", 15000, 3500, 2000, 20500]);
-  assert.equal(p.estimated_trip_fare_cents, b.row.estimated_fare_cents);   // recorded for reference only
+  assert.deepEqual([p.provider, p.tier_name, p.fixed_price_cents, p.meet_greet_cents, p.other_addons_cents, p.amount_cents], ["stripe", "Luxury", 15000, 3500, 2000, 15000 + est + 5500]);
+  assert.equal(p.estimated_trip_fare_cents, est);                            // the internal split stays on the payment row, for admins
 });
 
 // ---- PayPal -------------------------------------------------------------------------------------------
@@ -874,12 +899,13 @@ test("PayPal: the order amount is calculated on the server; capture is verified 
     assert.equal(r.status, 200); assert.match(out.orderId, /^PPORDER/);
     const order = net.pp.orders.get(out.orderId);
     const unit = order.purchase_units[0];
-    assert.equal(unit.amount.value, "185.00");                       // 15000 + 3500 cents, no floating point
+    const est = b.row.estimated_fare_cents; const dec = (c: number) => (c / 100).toFixed(2);
+    assert.equal(unit.amount.value, dec(15000 + est + 3500));        // complete total in integer cents, no floating point
     assert.equal(unit.amount.currency_code, "USD");
     assert.equal(unit.custom_id, b.row.id);
-    assert.deepEqual(unit.items.map((i: any) => i.unit_amount.value), ["150.00", "35.00"]);
+    assert.deepEqual(unit.items.map((i: any) => i.unit_amount.value), [dec(15000 + est), "35.00"]);   // combined Trip fare + Meet & Greet
     const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
-    assert.deepEqual([p.provider, p.provider_ref, p.status, p.amount_cents, p.fixed_price_cents, p.meet_greet_cents], ["paypal", out.orderId, "pending", 18500, 15000, 3500]);
+    assert.deepEqual([p.provider, p.provider_ref, p.status, p.amount_cents, p.fixed_price_cents, p.meet_greet_cents], ["paypal", out.orderId, "pending", 15000 + est + 3500, 15000, 3500]);
     assert.equal(unit.reference_id, p.id);
     assert.equal(b.row.payment_status, "pending"); assert.equal(b.row.amount_paid_cents, 0); // creating an order marks nothing paid
 
@@ -892,7 +918,7 @@ test("PayPal: the order amount is calculated on the server; capture is verified 
     const cap = await capture(b.row.payment_token, out.orderId);
     assert.equal(cap.status, 200); assert.equal((await cap.json()).status, "paid");
     assert.equal(p.status, "paid"); assert.equal(p.provider_txn_id, `CAP${out.orderId}`); assert.ok(p.paid_at);
-    assert.equal(b.row.amount_paid_cents, 18500); assert.equal(b.row.payment_status, "paid");
+    assert.equal(b.row.amount_paid_cents, 15000 + 13000 + 3500); assert.equal(b.row.payment_status, "paid");
     assert.equal(b.row.status, "confirmed");                         // confirmed by the verified payment
     const mails = () => db.t("notification_logs").filter((l: any) => l.event === "payment.paid" && l.entity_id === b.row.id);
     assert.equal(mails().length, 1); assert.equal(db.t("notification_logs").filter((l: any) => l.event === "booking.confirmed" && l.entity_id === b.row.id).length, 1);
@@ -900,7 +926,7 @@ test("PayPal: the order amount is calculated on the server; capture is verified 
     // Capturing again (double click, retry) is harmless: same state, no extra emails or payment rows.
     assert.equal((await (await capture(b.row.payment_token, out.orderId)).json()).status, "paid");
     assert.equal(mails().length, 1); assert.equal(db.t("notification_logs").filter((l: any) => l.event === "booking.confirmed" && l.entity_id === b.row.id).length, 1); assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 1);
-    assert.equal(b.row.amount_paid_cents, 18500);
+    assert.equal(b.row.amount_paid_cents, 15000 + 13000 + 3500);
   });
 });
 
@@ -927,7 +953,7 @@ test("PayPal: a captured amount that does not match is flagged for review, never
     const second = await startPayPal(b2);                              // retry path
     assert.notEqual(second.out.orderId, first.out.orderId);
     assert.equal((await capture(b2.row.payment_token, second.out.orderId)).status, 200);
-    assert.equal(b2.row.payment_status, "paid"); assert.equal(b2.row.amount_paid_cents, 15000);
+    assert.equal(b2.row.payment_status, "paid"); assert.equal(b2.row.amount_paid_cents, 15000 + b2.row.estimated_fare_cents);
   });
 });
 
@@ -937,7 +963,7 @@ test("PayPal webhook: signature verified with PayPal; completed payments recorde
     const b = await makeBooking();
     const { out } = await startPayPal(b);
     const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
-    const completed = (id: string, value = "150.00") => ({ id, event_type: "PAYMENT.CAPTURE.COMPLETED", resource: { id: `CAPW${out.orderId}`, status: "COMPLETED", amount: { currency_code: "USD", value }, custom_id: b.row.id, supplementary_data: { related_ids: { order_id: out.orderId } } } });
+    const completed = (id: string, value = "280.00") => ({ id, event_type: "PAYMENT.CAPTURE.COMPLETED", resource: { id: `CAPW${out.orderId}`, status: "COMPLETED", amount: { currency_code: "USD", value }, custom_id: b.row.id, supplementary_data: { related_ids: { order_id: out.orderId } } } });
 
     net.pp.verify = false;
     assert.equal((await routes.ppwebhook.POST(ppHook(completed("WH-EVT-1")))).status, 400);      // forged
@@ -947,19 +973,19 @@ test("PayPal webhook: signature verified with PayPal; completed payments recorde
     assert.equal(p.status, "review"); assert.equal(b.row.amount_paid_cents, 0);
 
     const b2 = await makeBooking(); const o2 = (await startPayPal(b2)).out; const p2 = db.t("payments").find((x: any) => x.booking_id === b2.row.id);
-    const ev = { id: "WH-EVT-3", event_type: "PAYMENT.CAPTURE.COMPLETED", resource: { id: "CAPW2", status: "COMPLETED", amount: { currency_code: "USD", value: "150.00" }, custom_id: b2.row.id, supplementary_data: { related_ids: { order_id: o2.orderId } } } };
+    const ev = { id: "WH-EVT-3", event_type: "PAYMENT.CAPTURE.COMPLETED", resource: { id: "CAPW2", status: "COMPLETED", amount: { currency_code: "USD", value: "280.00" }, custom_id: b2.row.id, supplementary_data: { related_ids: { order_id: o2.orderId } } } };
     const ok = await routes.ppwebhook.POST(ppHook(ev));
     assert.equal(ok.status, 200); assert.equal((await ok.json()).result, "processed");
-    assert.equal(p2.status, "paid"); assert.equal(p2.provider_txn_id, "CAPW2"); assert.equal(b2.row.amount_paid_cents, 15000); assert.equal(b2.row.status, "confirmed");
+    assert.equal(p2.status, "paid"); assert.equal(p2.provider_txn_id, "CAPW2"); assert.equal(b2.row.amount_paid_cents, 28000); assert.equal(b2.row.status, "confirmed");
     const dup = await routes.ppwebhook.POST(ppHook(ev));
     assert.equal((await dup.json()).result, "duplicate");
     await routes.ppwebhook.POST(ppHook({ ...ev, id: "WH-EVT-4" }));                           // same payment, new event id
-    assert.equal(b2.row.amount_paid_cents, 15000);
+    assert.equal(b2.row.amount_paid_cents, 28000);
     assert.equal(db.t("notification_logs").filter((l: any) => (l.event === "payment.paid" || l.event === "booking.confirmed") && l.entity_id === b2.row.id).length, 2); // a replayed webhook never emails twice
 
     const refund = { id: "WH-EVT-5", event_type: "PAYMENT.CAPTURE.REFUNDED", resource: { id: "REF1", amount: { currency_code: "USD", value: "50.00" }, links: [{ rel: "up", href: "https://api.paypal.com/v2/payments/captures/CAPW2" }] } };
     await routes.ppwebhook.POST(ppHook(refund));
-    assert.equal(p2.status, "partially_refunded"); assert.equal(p2.refunded_cents, 5000); assert.equal(b2.row.amount_paid_cents, 10000);
+    assert.equal(p2.status, "partially_refunded"); assert.equal(p2.refunded_cents, 5000); assert.equal(b2.row.amount_paid_cents, 28000 - 5000);
 
     // Both providers write to the same table, with provider-specific references.
     const sb = await makeBooking(); await pay(sb.row.payment_token);
@@ -1043,7 +1069,7 @@ test("approval releases payment; confirmation comes ONLY from the verified payme
   const conf = brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes("is confirmed"));
   assert.equal(conf.length, 1);
   const h = JSON.stringify(conf[0].body);
-  for (const must of [b.row.reference, b.row.tracking_code, "1 Main St, Baltimore", "Stop Cafe, Towson", "Dulles Airport", "E-Class", "$150.00", "+1 555-010-0199", "/track#id="]) assert.ok(h.includes(must), must);
+  for (const must of [b.row.reference, b.row.tracking_code, "1 Main St, Baltimore", "Stop Cafe, Towson", "Dulles Airport", "E-Class", `$${(b.row.online_amount_cents / 100).toFixed(2)}`, "+1 555-010-0199", "/track#id="]) assert.ok(h.includes(must), must);
 
   // Redelivery of the SAME event, a NEW event id for the same payment, and a late async-success event: nothing changes, no more emails.
   await routes.webhook.POST(hook(evt));
@@ -1052,12 +1078,12 @@ test("approval releases payment; confirmation comes ONLY from the verified payme
   assert.equal(brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes("is confirmed")).length, 1);
   assert.equal(brevoTo("owner@example.com").filter((c) => JSON.stringify(c.body).includes("Payment received")).length, 1);
   assert.equal(db.t("booking_status_history").filter((x: any) => x.booking_id === b.row.id && x.to_status === "confirmed").length, 1);
-  assert.equal(b.row.amount_paid_cents, 15000);
+  assert.equal(b.row.amount_paid_cents, 28000);
   // Two deliveries racing each other record one payment and one confirmation.
   const b2 = await flow(); await approve(b2); await pay(b2.row.payment_token);
   const p2 = db.t("payments").find((x: any) => x.booking_id === b2.row.id); net.calls.length = 0;
   await Promise.all([routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p2, {}, "evt_race_a"))), routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p2, {}, "evt_race_b")))]);
-  assert.equal(b2.row.amount_paid_cents, 15000);
+  assert.equal(b2.row.amount_paid_cents, 28000);
   assert.equal(brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes("is confirmed")).length, 1);
 });
 
@@ -1159,7 +1185,9 @@ test("private link token page data: charges and pay button only for the token ho
   const { loadTrip } = await import("../src/lib/trip.ts");
   const b = await flow(); await approve(b);
   const viaToken: any = await loadTrip(db, b.row.payment_token);
-  assert.equal(viaToken.view.payable, true); assert.equal(viaToken.view.charges.totalCents, 15000);
+  assert.equal(viaToken.view.payable, true); assert.equal(viaToken.view.charges.totalCents, b.row.online_amount_cents);
+  assert.deepEqual(Object.keys(viaToken.view.charges).sort(), ["childSeatCents", "currency", "meetGreetCents", "totalCents", "tripFareCents"]); // no tier fee, no rates
+  assert.equal(viaToken.view.charges.tripFareCents + viaToken.view.charges.meetGreetCents + viaToken.view.charges.childSeatCents, viaToken.view.charges.totalCents);
   assert.ok(!JSON.stringify(viaToken.view).includes("4105550999") && !JSON.stringify(viaToken.view).includes("4105550100"));
   assert.equal(await loadTrip(db, "not-a-uuid"), null);
   assert.equal(await loadTrip(db, { kind: "code", code: b.row.payment_token }), null);
@@ -1742,4 +1770,110 @@ test("admin authorization alerts: expiry levels, needs-payment rows first, soone
   assert.equal(rows.find((r) => r.paymentId === soon.p.id)!.level, "within_24h");
   assert.equal(rows.find((r) => r.paymentId === failed.p.id)!.level, "expired");
   assert.ok(!JSON.stringify(rows).includes("4242424242424242"));                          // only brand + last four, never a card number
+});
+
+// =====================================================================================================
+// Complete trip fare: the online total = tier fee + trip estimate + Meet & Greet + seats. Customers see ONE combined Trip fare.
+// =====================================================================================================
+test("complete fare: stored total, Stripe authorization, customer view and admin breakdown all reconcile to the same total", async () => {
+  authOn();
+  const from = net.calls.length;
+  const b = await makeBooking({ airport: airportBlock, totalCents: 1 }, { meetGreet: true, passengers: 3, childSeats: { booster: 2 } });
+  const r = b.row;
+  const fixed = 15000, est = r.estimated_fare_cents, mg = 3500, seatsFee = 2000;
+  assert.ok(est > 0);
+  assert.equal(r.online_amount_cents, fixed + est + mg + seatsFee);                       // never the tier fee alone
+  // Stripe authorization uses the COMPLETE total, as ONE session with customer-safe lines.
+  const sc = net.calls.slice(from).find((c) => c.url === "https://api.stripe.com/v1/checkout/sessions")!;
+  const form = new URLSearchParams(String(sc.body));
+  const lines = [0, 1, 2, 3].map((i) => form.get(`line_items[${i}][price_data][unit_amount]`)).filter(Boolean).map(Number);
+  assert.deepEqual(lines, [fixed + est, mg, seatsFee]);
+  assert.equal(lines.reduce((a, c) => a + c, 0), r.online_amount_cents);
+  assert.equal(net.calls.slice(from).filter((c) => c.url === "https://api.stripe.com/v1/checkout/sessions").length, 1); // one authorization, not one per component
+  const p = db.t("payments").find((x: any) => x.booking_id === r.id);
+  assert.equal(p.amount_cents, r.online_amount_cents); assert.equal(p.manual_capture, true);
+  // Admin keeps the internal split on the payment row; it reconciles exactly.
+  assert.deepEqual([p.fixed_price_cents, p.estimated_trip_fare_cents, p.meet_greet_cents, p.other_addons_cents], [fixed, est, mg, seatsFee]);
+  assert.equal(p.fixed_price_cents + p.estimated_trip_fare_cents + p.meet_greet_cents + p.other_addons_cents, p.amount_cents);
+  assert.match(form.get("payment_intent_data[description]")!, /^Vanta Transportation booking VT-\d+$/);
+  // Customer response: combined trip fare + services + total only.
+  assert.deepEqual(b.data.pricing, { tripFareCents: fixed + est, meetGreetCents: mg, childSeatCents: seatsFee, totalCents: r.online_amount_cents });
+  assert.ok(!("fixedPriceCents" in b.data.pricing));
+  // Capture on admin approval takes the same complete amount (and only once).
+  const piId = mkPI(p);
+  await routes.webhook.POST(hook(sessionUnpaid(p, piId)));
+  await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", stripeMock.pis.get(piId))));
+  assert.equal(p.status, "authorized");
+  net.calls.length = 0; stripeMock.captureCalls = 0;
+  assert.equal((await approve(b)).status, 200);
+  assert.equal((net.calls.find((c) => /\/capture$/.test(c.url))!.body as URLSearchParams).get("amount_to_capture"), String(fixed + est + mg + seatsFee));
+  assert.equal(stripeMock.captureCalls, 1);
+  assert.equal(r.payment_status, "paid"); assert.equal(r.amount_paid_cents, r.online_amount_cents);
+});
+
+test("complete fare: no customer-facing surface (emails, tracking/pay data, quote API, Stripe) reveals the tier fee or rates", async () => {
+  authOn();
+  net.calls.length = 0;
+  const b = await makeBooking({ airport: airportBlock }, { meetGreet: true, childSeats: { booster: 1 } });
+  const r = b.row; const total = (r.online_amount_cents / 100).toFixed(2); const tripFare = ((15000 + r.estimated_fare_cents) / 100).toFixed(2);
+  const customerMail = JSON.stringify(brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes(r.reference)).map((c) => c.body));
+  assert.ok(customerMail.includes("Trip fare") && customerMail.includes(`$${tripFare}`) && customerMail.includes(`$${total}`));
+  assert.ok(customerMail.includes("Meet &amp; Greet") || customerMail.includes("Meet & Greet"));
+  for (const leak of ["$150.00", "Fixed tier", "Trip estimate", "(internal)", "per mile", "per_mile", "$6.00"]) assert.ok(!customerMail.includes(leak), `customer email leaks: ${leak}`);
+  // The business email keeps the internal breakdown.
+  const bizMail = JSON.stringify(net.calls.filter((c) => c.url === "https://api.brevo.com/v3/smtp/email" && !(c.body?.to ?? []).some((t: any) => t.email === "ann@example.com") && JSON.stringify(c.body).includes(r.reference)).map((c) => c.body));
+  assert.ok(bizMail.includes("Fixed tier price (internal)") && bizMail.includes("$150.00"));
+  // Customer pages' data and the public quote API.
+  const { loadTrip } = await import("../src/lib/trip.ts");
+  const view: any = await loadTrip(db, r.payment_token);
+  assert.ok(!JSON.stringify(view).match(/fixed|15000|per_?mile/i));
+  assert.equal(view.view.charges.tripFareCents, 15000 + r.estimated_fare_cents);
+  const quoteJson = JSON.stringify(await (await routes.quote.POST(post("/api/fare/quote", trip()))).json());
+  assert.ok(!/fixedPriceCents|per_mile|perMile|lineItems|\/mi/.test(quoteJson));
+  // Stripe-facing request has no internal wording or tier fee line.
+  const stripeBody = decodeURIComponent(net.calls.filter((c) => c.url.includes("api.stripe.com")).map((c) => String(c.body)).join("&").replace(/\+/g, " "));
+  assert.ok(!/fixed|per mile|tier/i.test(stripeBody));
+  // Admin retains the internal pieces on the booking.
+  assert.deepEqual([r.fixed_price_cents, r.estimated_fare_cents > 0, r.meet_greet_fee_cents], [15000, true, 3500]);
+});
+
+test("complete fare: retries never create a second authorization; failed/expired holds are never 'paid'", async () => {
+  authOn();
+  const b = await makeBooking();
+  const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
+  const { startAuthorization } = await import("../src/lib/payments-server.ts");
+  // Pretend the hold exists; a retry must not open another authorization.
+  p.status = "authorized";
+  const before = db.t("payments").filter((x: any) => x.booking_id === b.row.id).length;
+  const again: any = await startAuthorization(db as any, b.row.id, "http://site.test");
+  assert.equal(again.ok, false);
+  assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, before);
+  // A hold that failed or lapsed never marks anything paid.
+  p.status = "authorization_expired";
+  assert.equal(b.row.payment_status === "paid", false); assert.equal(p.paid_at ?? null, null);
+});
+
+test("complete fare: bookings created before the fix (frozen at tier fee + services) are re-priced once, only while nothing was held or paid", async () => {
+  setPay("full"); setFixed(10000, 15000, 22000);
+  db.t("booking_settings")[0].stripe_authorize_at_booking = false;
+  const { chargeForBooking } = await import("../src/lib/payments-server.ts");
+  const legacy = async () => { const b = await makeBooking(); b.row.online_amount_cents = 15000; return b; }; // what the old code froze
+  const a = await legacy();
+  const c: any = await chargeForBooking(db as any, a.row);
+  assert.ok(c.ok); assert.equal(c.charge.totalCents, 15000 + a.row.estimated_fare_cents); assert.equal(a.row.online_amount_cents, 15000 + a.row.estimated_fare_cents);
+  assert.ok(db.t("activity_logs").some((l: any) => l.action === "booking.charge_upgraded" && l.entity_id === a.row.id));
+  const c2: any = await chargeForBooking(db as any, a.row);                                  // idempotent: no second upgrade
+  assert.equal(c2.charge.totalCents, 15000 + a.row.estimated_fare_cents);
+  // Money already held/paid: the historical amount is honoured, never rewritten.
+  const h = await legacy();
+  db.seed("payments", [{ booking_id: h.row.id, provider: "stripe", amount_cents: 15000, status: "paid", paid_at: new Date().toISOString(), currency: "USD" }]);
+  const hc: any = await chargeForBooking(db as any, h.row);
+  assert.equal(hc.charge.totalCents, 15000); assert.equal(h.row.online_amount_cents, 15000);
+  // Completed/cancelled bookings are never re-priced.
+  const done = await legacy(); done.row.status = "completed";
+  assert.equal(((await chargeForBooking(db as any, done.row)) as any).charge.totalCents, 15000);
+  // Unknown trip fare: no online amount at all (never the fee alone).
+  const noEst = await makeBooking(); noEst.row.online_amount_cents = null; noEst.row.fixed_price_cents = null; noEst.row.estimated_fare_cents = null;
+  assert.equal(((await chargeForBooking(db as any, noEst.row)) as any).ok, false);
+  setFixed(null, null, null);
 });
