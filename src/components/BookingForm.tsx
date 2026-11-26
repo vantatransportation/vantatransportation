@@ -81,7 +81,8 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
         sessionStorage.setItem("vanta:confirmation", JSON.stringify({ reference: data.reference, pricing: data.pricing ?? null, currency: data.currency, shownTotalCents: onlineTotal, trackingId: data.trackingId ?? null }));
       } catch { /* ignore */ }
       if (typeof data.authorizeUrl === "string" && data.authorizeUrl.startsWith("https://")) { window.location.assign(data.authorizeUrl); return; } // Stripe hosted card page (a hold, not a charge)
-      router.push(`/book/confirmation?ref=${encodeURIComponent(data.reference)}`);
+      // No card step (not enabled, or it could not be opened): the customer's own booking page, which offers the card step again when it applies.
+      router.push(typeof data.confirmUrl === "string" && data.confirmUrl.startsWith("/book/confirmation?") ? data.confirmUrl : `/book/confirmation?ref=${encodeURIComponent(data.reference)}`);
     } catch {
       setStatus({ kind: "error", message: "Could not reach the server. Your details are kept; please try again." });
     }

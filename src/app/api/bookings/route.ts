@@ -6,6 +6,7 @@ import { zonedToUtc, formatPickup } from "@/lib/geo/time";
 import { BUSINESS_TZ } from "@/lib/config";
 import { createBooking } from "@/lib/fare/booking";
 import { notify } from "@/lib/notify";
+import { siteBase, trackingUrl } from "@/lib/tracking-url";
 import { clean, EMAIL_RE, phoneDigits } from "@/lib/validation";
 import { formatMoney } from "@/lib/pricing/engine";
 import { customerPricingOf } from "@/lib/tier-pricing";
@@ -58,7 +59,7 @@ export async function POST(request: Request) {
       const seatText = childSeatSummary(t.childSeats ?? NO_SEATS);
       const site = (process.env.NEXT_PUBLIC_SITE_URL || "").replace(/\/$/, "");
       // No payment link is created or sent at submission: payment is released only after an admin approves the booking.
-      const trackUrl = result.trackingCode && site ? `${site}/track#id=${result.trackingCode}` : undefined;
+      const trackUrl = trackingUrl(result.trackingCode) ?? undefined;
       const cp = result.online ? customerPricingOf(result.online) : null;
       const extrasText = [t.returnLeg ? "Round trip" : "", seatText ? `Child seats: ${seatText} (requested)` : "", result.meetGreetRequested ? "Meet & Greet requested" : ""].filter(Boolean).join(", ");
       // Alerts intentionally omit phone numbers, notes, passenger instructions and emergency contacts.
@@ -80,16 +81,19 @@ export async function POST(request: Request) {
         _customerEmail: email, _customerName: name, _trackingId: result.trackingCode ?? undefined, _trackUrl: trackUrl,
       });
     }
-    // Authorize now, capture later: the customer is sent to Stripe's hosted page to hold their card (nothing is charged). If Stripe is not
-    // available or anything fails here, the booking is already saved and simply continues with the normal pay-after-approval link.
+    // Authorize now, capture later: the customer is sent straight to Stripe's hosted page to hold their card (nothing is charged). This also
+    // runs for a repeated submission (same submissionKey), so a double click or a retry still lands on the card step for the SAME booking.
+    // If Stripe is off or anything fails, the booking is already saved and its own page (confirmUrl) offers the card step again.
     let authorizeUrl: string | null = null;
-    if (!result.duplicate && result.online) {
-      const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || "").replace(/\/$/, "");
-      if (siteUrl) { const a = await startAuthorization(db, result.id, siteUrl).catch(() => null); if (a?.ok) authorizeUrl = a.url; }
+    if (result.duplicate || result.online) {
+      const siteUrl = siteBase(); // the configured public https URL; never a localhost or proxy-internal address
+      const a = siteUrl ? await startAuthorization(db, result.id, siteUrl).catch(() => null) : null;
+      if (a?.ok) authorizeUrl = a.url;
     }
+    const confirmUrl = result.paymentToken ? `/book/confirmation?t=${encodeURIComponent(result.paymentToken)}` : null;
     // Customer-safe pricing only: the combined Trip fare, the selected services and the Total. No tier fee, rate or internal component.
     const pricing = result.online ? customerPricingOf(result.online) : null;
-    return json({ ok: true, reference: result.reference, pricing, currency: result.currency, trackingId: result.trackingCode, payUrl: null, authorizeUrl });
+    return json({ ok: true, reference: result.reference, pricing, currency: result.currency, trackingId: result.trackingCode, payUrl: null, authorizeUrl, confirmUrl });
   } catch (e) {
     console.error("[bookings] unexpected error", e);
     return json({ error: "We could not save your booking. Please try again." }, 500);

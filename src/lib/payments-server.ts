@@ -9,6 +9,7 @@ import { verifyPayPalOrder } from "@/lib/paypal-verify";
 import { availableProviders, type Provider } from "@/lib/payment-providers";
 import { CHARGE_REASON_TEXT, customerPricingOf, onlineCharge, type OnlineCharge } from "@/lib/tier-pricing";
 import { notify } from "@/lib/notify";
+import { trackingUrl } from "@/lib/tracking-url";
 import { formatMoney } from "@/lib/pricing/engine";
 import { isOpenForDriver, type BookingStatus } from "@/lib/booking-status";
 import { getHelpline } from "@/lib/helpline";
@@ -89,7 +90,7 @@ export function customerLines(charge: OnlineCharge, reference: string, amountCen
   ];
 }
 
-const BOOKING_COLUMNS = "id,reference,status,driver_id,payment_released_at,currency,estimated_fare_cents,amount_paid_cents,customer_id,source_quote_request_id,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,child_seat_fee_cents,online_amount_cents";
+const BOOKING_COLUMNS = "id,reference,status,driver_id,payment_released_at,currency,estimated_fare_cents,amount_paid_cents,customer_id,source_quote_request_id,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,child_seat_fee_cents,online_amount_cents,payment_token";
 
 /**
  * Starts a payment with the chosen provider. The amount is recalculated here from the database; the only things the
@@ -220,7 +221,6 @@ async function recordPaid(db: SupabaseClient, p: Row, txnId: string | null) {
     }
   }
 
-  const site = (process.env.NEXT_PUBLIC_SITE_URL || "").replace(/\/$/, "");
   if (b && confirmedNow && c?.email) {
     const [stops, helpline] = await Promise.all([db.from("booking_stops").select("position,address").eq("booking_id", b.id).order("position"), getHelpline(db)]);
     const veh = b.vehicles as { name?: string } | null;
@@ -232,7 +232,7 @@ async function recordPaid(db: SupabaseClient, p: Row, txnId: string | null) {
       "Amount paid": formatMoney(p.amount_cents, p.currency), "Payment status": status === "paid" ? "Paid in full" : "Deposit received",
       "Remaining online balance": status === "deposit_paid" && remaining > 0 ? formatMoney(remaining, p.currency) : undefined,
       "Vanta support phone": helpline?.display,
-      _trackingId: b.tracking_code ?? undefined, _trackUrl: site && b.tracking_code ? `${site}/track#id=${b.tracking_code}` : undefined,
+      _trackingId: b.tracking_code ?? undefined, _trackUrl: trackingUrl(b.tracking_code) ?? undefined,
       _customerEmail: c.email, _customerName: c.name ?? undefined,
     }, { dedupeSuffix: "confirmed" });
   }
@@ -417,8 +417,20 @@ const capBefore = (pi: StripePI): { brand: string | null; last4: string | null; 
   return { brand: c?.brand ?? null, last4: c?.last4 ?? null, captureBefore: c?.capture_before ? new Date(Number(c.capture_before) * 1000).toISOString() : null };
 };
 
-/** Creates the hosted authorization page for a freshly saved booking. Failure is harmless: the booking continues with the normal pay-after-approval link. */
-export async function startAuthorization(db: SupabaseClient, bookingId: string, siteUrl: string): Promise<{ ok: true; url: string } | { ok: false; reason: string }> {
+export type AuthorizationOutcome = { ok: true; url: string; reused?: boolean } | { ok: false; reason: string };
+
+/** Hosted card pages stay valid for 23 hours (see createCheckoutSession); an unfinished one is reused for 20 hours, never a stale one. */
+const REUSE_MS = 20 * 3600_000;
+
+/**
+ * Creates (or resumes) the hosted authorization page for a booking that is still awaiting review. Safe to call repeatedly for the same booking:
+ *  - a booking that already holds (or is capturing) an authorization never gets a second one;
+ *  - an unfinished hosted page for the same amount is handed back instead of creating another payment row, so a retry, a refresh or a double
+ *    click cannot produce two holds;
+ *  - otherwise any older unfinished attempt is retired before the new one starts.
+ * Failure is harmless: the booking continues with the normal pay-after-approval link.
+ */
+export async function startAuthorization(db: SupabaseClient, bookingId: string, siteUrl: string): Promise<AuthorizationOutcome> {
   const { data: b } = await db.from("bookings").select(BOOKING_COLUMNS).eq("id", bookingId).maybeSingle();
   if (!b) return { ok: false, reason: "not_found" };
   if (!["new_request", "pending_confirmation"].includes(String(b.status))) return { ok: false, reason: "not_awaiting_review" };
@@ -432,7 +444,9 @@ export async function startAuthorization(db: SupabaseClient, bookingId: string, 
   // Never create a second authorization for a booking that already holds one (or is waiting for / capturing one): retries are harmless.
   const { data: live } = await db.from("payments").select("id").eq("booking_id", b.id).eq("provider", "stripe").eq("manual_capture", true).in("status", ["authorized", "capture_pending"]);
   if (live?.length) return { ok: false, reason: "already_authorized" };
-  const { data: open } = await db.from("payments").select("id,provider_ref").eq("booking_id", b.id).eq("provider", "stripe").eq("status", "pending");
+  const { data: open } = await db.from("payments").select("id,provider_ref,checkout_url,amount_cents,created_at").eq("booking_id", b.id).eq("provider", "stripe").eq("status", "pending");
+  const fresh = (open ?? []).filter((p: Row) => p.checkout_url && p.amount_cents === plan.amountCents && Date.now() - new Date(String(p.created_at)).getTime() < REUSE_MS);
+  if (open?.length === 1 && fresh.length === 1) return { ok: true, url: String(fresh[0].checkout_url), reused: true };
   for (const p of open ?? []) { if (p.provider_ref) await expireCheckoutSession(p.provider_ref); await db.from("payments").update({ status: "expired" }).eq("id", p.id); }
   const currency = b.currency ?? "USD";
   const ins = await db.from("payments").insert({
@@ -444,11 +458,20 @@ export async function startAuthorization(db: SupabaseClient, bookingId: string, 
   const paymentId: string = ins.data.id;
   const lines = customerLines(c.charge, String(b.reference), plan.amountCents);
   const { data: cust } = await db.from("customers").select("email").eq("id", b.customer_id).maybeSingle();
-  const ref = encodeURIComponent(String(b.reference));
-  const s = await createCheckoutSession({ amountCents: plan.amountCents, currency, lines, successUrl: `${siteUrl}/book/confirmation?ref=${ref}&card=authorized`, cancelUrl: `${siteUrl}/book/confirmation?ref=${ref}&card=cancelled`, bookingId: b.id, paymentId, customerEmail: cust?.email ?? undefined, idempotencyKey: `auth-${paymentId}`, manualCapture: true, description: `Vanta Transportation booking ${b.reference}` });
+  // The customer comes back to THEIR booking's status page, found by the private token (the booking reference is guessable and is never a key).
+  const back = b.payment_token && validToken(b.payment_token) ? `t=${encodeURIComponent(String(b.payment_token))}` : `ref=${encodeURIComponent(String(b.reference))}`;
+  const s = await createCheckoutSession({ amountCents: plan.amountCents, currency, lines, successUrl: `${siteUrl}/book/confirmation?${back}&card=authorized`, cancelUrl: `${siteUrl}/book/confirmation?${back}&card=cancelled`, bookingId: b.id, paymentId, customerEmail: cust?.email ?? undefined, idempotencyKey: `auth-${paymentId}`, manualCapture: true, description: `Vanta Transportation booking ${b.reference}` });
   if (!s.ok) { console.error("[payments] authorization session failed", s.error); await db.from("payments").update({ status: "failed", failure_reason: s.error.slice(0, 300) }).eq("id", paymentId); return { ok: false, reason: "stripe_error" }; }
   await db.from("payments").update({ provider_ref: s.id, stripe_session_id: s.id, checkout_url: s.url }).eq("id", paymentId);
   return { ok: true, url: s.url };
+}
+
+/** Resume or retry the card step with the booking's private token (the customer's own link), never a booking reference. */
+export async function startAuthorizationByToken(db: SupabaseClient, token: unknown, siteUrl: string): Promise<AuthorizationOutcome> {
+  if (!validToken(token)) return { ok: false, reason: "not_found" };
+  const { data: b } = await db.from("bookings").select("id").eq("payment_token", token).maybeSingle();
+  if (!b) return { ok: false, reason: "not_found" };
+  return startAuthorization(db, b.id, siteUrl);
 }
 
 /** Verified: Stripe reports the card is held. Records the hold, its expiry and non-sensitive card details. Charges nothing. */

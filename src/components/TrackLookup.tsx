@@ -47,13 +47,20 @@ export default function TrackLookup({ tz }: { tz: string }) {
   }, []);
 
   useEffect(() => {
-    const m = /^#id=([^&]+)/.exec(window.location.hash);
-    if (!m) return;
-    let id = "";
-    try { id = decodeURIComponent(m[1]); } catch { return; }
-    history.replaceState(null, "", window.location.pathname); // keep the ID out of the address bar, history and bookmarks
-    setInput(id);
-    void lookup(id);
+    // Reads a direct link (#id=TRK-...) on arrival AND when the hash changes on an already-open Track page (for example a link
+    // followed from the confirmation page), loads that one ride and removes the ID from the address bar.
+    const fromHash = () => {
+      const m = /^#id=([^&]+)/.exec(window.location.hash);
+      if (!m) return;
+      let id = "";
+      try { id = decodeURIComponent(m[1]); } catch { return; }
+      history.replaceState(null, "", window.location.pathname); // keep the ID out of the address bar, history and bookmarks
+      setInput(id);
+      void lookup(id);
+    };
+    fromHash();
+    window.addEventListener("hashchange", fromHash);
+    return () => window.removeEventListener("hashchange", fromHash);
   }, [lookup]);
 
   useEffect(() => { if (view.kind === "found" || view.kind === "error") result.current?.focus(); }, [view.kind]);

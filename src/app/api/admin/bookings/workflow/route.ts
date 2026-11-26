@@ -8,6 +8,7 @@ import { AWAITING_PAYMENT_MESSAGE, AWAITING_REVIEW, DRIVER_FLOW, canApprove, can
 import { formatMoney } from "@/lib/pricing/engine";
 import { availableProviders } from "@/lib/payment-providers";
 import { loadBookingSettings } from "@/lib/policies";
+import { trackingUrl } from "@/lib/tracking-url";
 import { captureAuthorization, releaseAuthorization, type CaptureResult } from "@/lib/payments-server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -99,7 +100,7 @@ export async function POST(request: Request) {
         const payable = availableProviders(settings).length > 0 && b.online_amount_cents != null && b.payment_token && site;
         await notify(g.db, "booking.approved", { type: "booking", id }, {
           ...common, // driver details are emailed only once the booking is confirmed by verified payment (see booking.confirmed)
-          "Booking page": site && b.tracking_code ? `${site}/track#id=${b.tracking_code}` : undefined, _trackingId: b.tracking_code ?? undefined, Total: b.online_amount_cents != null ? formatMoney(b.online_amount_cents, b.currency ?? "USD") : undefined,
+          "Booking page": trackingUrl(b.tracking_code) ?? undefined, _trackingId: b.tracking_code ?? undefined, Total: b.online_amount_cents != null ? formatMoney(b.online_amount_cents, b.currency ?? "USD") : undefined,
           _customerEmail: cust.email, _customerName: cust.name, _payUrl: payable ? `${site}/pay/${b.payment_token}` : undefined,
         }, { dedupeSuffix: assignment.data.id });
       }

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useMemo } from "react";
 import { formatMoney } from "@/lib/pricing/engine";
 import { useSessionString } from "@/lib/use-session";
+import { trackingPath } from "@/lib/tracking-url";
 
 /** Server-confirmed, customer-safe pricing from POST /api/bookings: ONE combined trip fare, services separately, total. */
 interface SavedPricing { tripFareCents: number; meetGreetCents: number; childSeatCents: number; totalCents: number }
@@ -36,8 +37,8 @@ export default function ConfirmationDetails({ reference }: { reference: string }
       {changed && <p className="muted" style={{ marginTop: ".5rem" }}>The total differs from the one you saw ({formatMoney(saved.shownTotalCents!, saved.currency)}) because our prices were updated. The amount shown here is the one we recorded.</p>}
       {saved.trackingId && (
         <div style={{ marginTop: "1rem" }}>
-          <p>Your tracking ID: <strong style={{ letterSpacing: ".05em" }}>{saved.trackingId}</strong></p>
-          <p className="muted" style={{ marginTop: ".4rem" }}>Keep it private. It is also in your email. Use it on <Link href="/track" style={{ textDecoration: "underline" }}>Track Your Ride</Link> to follow your request. No payment is taken now: if we approve your booking we email you a secure payment link, and it is confirmed once that payment is verified.</p>
+          <p>Your tracking ID: {trackingPath(saved.trackingId) ? <Link href={trackingPath(saved.trackingId)!} style={{ textDecoration: "underline", fontWeight: 700, letterSpacing: ".05em" }}>{saved.trackingId}</Link> : <strong style={{ letterSpacing: ".05em" }}>{saved.trackingId}</strong>}</p>
+          <p className="muted" style={{ marginTop: ".4rem" }}>Keep it private. It is also in your email. Select it, or use <Link href="/track" style={{ textDecoration: "underline" }}>Track Your Ride</Link>, to follow your request. No payment is taken now: if we approve your booking we email you a secure payment link, and it is confirmed once that payment is verified.</p>
         </div>
       )}
     </div>

@@ -114,6 +114,7 @@ before(async () => {
     read: await import("../src/app/api/admin/notifications/read/route.ts"),
     sign: await import("../src/app/api/admin/cloudinary/sign/route.ts"),
     checkout: await import("../src/app/api/payments/checkout/route.ts"),
+    authorize: await import("../src/app/api/payments/authorize/route.ts"),
     ppcapture: await import("../src/app/api/payments/paypal/capture/route.ts"),
     ppwebhook: await import("../src/app/api/paypal/webhook/route.ts"),
     webhook: await import("../src/app/api/stripe/webhook/route.ts"),
@@ -1607,7 +1608,7 @@ test("authorize at booking: hosted manual-capture session for the server-compute
   assert.equal(form.get("payment_intent_data[capture_method]"), "manual");
   assert.equal(form.get("line_items[0][price_data][unit_amount]"), String(b.row.online_amount_cents)); // never the browser's number
   assert.equal(form.get("metadata[booking_id]"), b.row.id);
-  assert.match(form.get("success_url")!, /\/book\/confirmation\?ref=VT-\d+&card=authorized$/);
+  assert.match(form.get("success_url")!, /\/book\/confirmation\?t=[0-9a-f-]{36}&card=authorized$/); assert.ok(!form.get("success_url")!.includes("VT-")); // keyed by the private token, never the guessable reference
   const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
   assert.equal(p.manual_capture, true); assert.equal(p.status, "pending"); assert.equal(p.amount_cents, b.row.online_amount_cents);
   assert.equal(b.row.status, "new_request"); assert.equal(b.row.confirmed_at ?? null, null);
@@ -1876,4 +1877,191 @@ test("complete fare: bookings created before the fix (frozen at tier fee + servi
   const noEst = await makeBooking(); noEst.row.online_amount_cents = null; noEst.row.fixed_price_cents = null; noEst.row.estimated_fare_cents = null;
   assert.equal(((await chargeForBooking(db as any, noEst.row)) as any).ok, false);
   setFixed(null, null, null);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Post-booking card step (direct redirect, resume, retry) and direct tracking links
+// ---------------------------------------------------------------------------------------------------------------------------------
+const authorizePost = (token: unknown, extra?: Record<string, string>) => post("/api/payments/authorize", { token }, extra);
+const stripePayments = (id: string) => db.t("payments").filter((x: any) => x.booking_id === id);
+
+test("redirect: a new booking goes straight to the card step for THAT booking; the booking is saved first and a private-token page is the fallback", async () => {
+  authOn();
+  const b = await makeBooking();
+  assert.equal(b.res.status, 200);
+  assert.match(b.data.authorizeUrl, /^https:\/\/checkout\.stripe\.com\//);                       // client redirects here
+  assert.equal(b.data.confirmUrl, `/book/confirmation?t=${b.row.payment_token}`);               // private token, never the VT- reference
+  assert.ok(!JSON.stringify(b.data).includes(b.row.id));                                         // no internal database id
+  const rows = stripePayments(b.row.id);
+  assert.equal(rows.length, 1); assert.equal(rows[0].booking_id, b.row.id); assert.equal(rows[0].manual_capture, true);
+  assert.equal(rows[0].amount_cents, b.row.online_amount_cents);                                 // the server-calculated final amount
+  assert.equal(rows[0].checkout_url, b.data.authorizeUrl);
+  assert.equal(b.row.payment_status === "paid", false); assert.equal(rows[0].paid_at ?? null, null); assert.equal(b.row.confirmed_at ?? null, null);
+  // Authorize-at-booking OFF: no card redirect, the customer's own page is used (admin approval still releases payment).
+  Object.assign(db.t("booking_settings")[0], { stripe_authorize_at_booking: false });
+  const off = await makeBooking();
+  assert.equal(off.data.authorizeUrl, null); assert.match(off.data.confirmUrl, /^\/book\/confirmation\?t=/); assert.equal(stripePayments(off.row.id).length, 0);
+});
+
+test("retry: a repeated submission, refresh or double click resumes the SAME booking and payment; no duplicate booking, no second hold", async () => {
+  authOn();
+  const key = `dup-${++pk}-bbbbbbbbbbbbbbbbbb`;
+  const bookings0 = db.t("bookings").length;
+  const first = await makeBooking({ submissionKey: key });
+  const second = await makeBooking({ submissionKey: key });                                      // the customer pressed submit again
+  assert.equal(db.t("bookings").length, bookings0 + 1);                                          // one booking
+  assert.equal(second.data.reference, first.data.reference);
+  assert.equal(stripePayments(first.row.id).length, 1);                                          // one payment attempt
+  assert.equal(second.data.authorizeUrl, first.data.authorizeUrl);                               // same hosted page handed back
+  // The resume endpoint (private token) returns the same page and creates nothing new, however many times it is hit.
+  const sessions0 = net.calls.filter((c) => c.url === "https://api.stripe.com/v1/checkout/sessions").length;
+  for (let i = 0; i < 3; i++) { const r = await routes.authorize.POST(authorizePost(first.row.payment_token)); assert.equal(r.status, 200); assert.equal((await r.json()).url, first.data.authorizeUrl); }
+  assert.equal(net.calls.filter((c) => c.url === "https://api.stripe.com/v1/checkout/sessions").length, sessions0);
+  assert.equal(stripePayments(first.row.id).length, 1);
+});
+
+test("retry after a failed or unfinished card step: a new attempt replaces the old one, never adds a second live one; a hold is never duplicated", async () => {
+  authOn();
+  // Stripe unavailable while booking: the booking is still saved, the response says where to resume.
+  const saved = process.env.STRIPE_SECRET_KEY; delete process.env.STRIPE_SECRET_KEY;
+  const b = await makeBooking();
+  process.env.STRIPE_SECRET_KEY = saved;
+  assert.equal(b.res.status, 200); assert.equal(b.data.authorizeUrl, null); assert.match(b.data.confirmUrl, /^\/book\/confirmation\?t=/);
+  const { loadConfirmation } = await import("../src/lib/confirmation.ts");
+  const v0: any = await loadConfirmation(db, b.row.payment_token);
+  assert.equal(v0.card, "none"); assert.equal(v0.canAuthorize, true);
+  // Resume with the private token: a hosted page is created for this booking.
+  const r1 = await routes.authorize.POST(authorizePost(b.row.payment_token)); assert.equal(r1.status, 200);
+  const url1 = (await r1.json()).url; assert.match(url1, /^https:\/\/checkout\.stripe\.com\//);
+  const p = stripePayments(b.row.id).find((x: any) => x.status === "pending")!;
+  // The card was declined: the attempt fails; the customer can retry and gets a NEW page for the same booking and amount.
+  await routes.webhook.POST(hook(piEvent("payment_intent.payment_failed", { id: "pi_x", object: "payment_intent", metadata: { booking_id: b.row.id, payment_id: p.id }, last_payment_error: { message: "Your card was declined." } })));
+  assert.equal(p.status, "failed"); assert.equal(((await loadConfirmation(db, b.row.payment_token)) as any).card, "failed");
+  const r2 = await routes.authorize.POST(authorizePost(b.row.payment_token)); assert.equal(r2.status, 200);
+  assert.notEqual((await r2.json()).url, url1);
+  assert.equal(stripePayments(b.row.id).filter((x: any) => x.status === "pending").length, 1);   // exactly one live attempt
+  assert.equal(b.row.payment_status === "paid", false);
+  // Once a hold exists, retries are refused: no second authorization, nothing created.
+  const pending = stripePayments(b.row.id).find((x: any) => x.status === "pending")!;
+  const piId = mkPI(pending);
+  await routes.webhook.POST(hook(sessionUnpaid(pending, piId)));
+  await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", stripeMock.pis.get(piId))));
+  assert.equal(pending.status, "authorized");
+  const count = stripePayments(b.row.id).length;
+  const r3 = await routes.authorize.POST(authorizePost(b.row.payment_token));
+  assert.equal(r3.status, 409); assert.equal((await r3.json()).reason, "already_authorized");
+  assert.equal(stripePayments(b.row.id).length, count);
+  const v1: any = await loadConfirmation(db, b.row.payment_token);
+  assert.equal(v1.card, "held"); assert.equal(v1.canAuthorize, false);
+  assert.equal(pending.paid_at ?? null, null); assert.notEqual(b.row.payment_status, "paid");     // authorized is NOT paid
+});
+
+test("resume endpoint: private token only; foreign origin, malformed or unknown tokens and booking references are refused and reveal nothing", async () => {
+  authOn();
+  const b = await makeBooking();
+  const n = db.t("payments").length;
+  assert.equal((await routes.authorize.POST(new Request("http://site.test/api/payments/authorize", { method: "POST", headers: { ...HDR(), origin: "http://evil.test" }, body: JSON.stringify({ token: b.row.payment_token }) }))).status, 403);
+  for (const bad of [b.row.reference, b.row.tracking_code, b.row.id.slice(0, 8), "", null, 5, {}]) assert.equal((await routes.authorize.POST(authorizePost(bad))).status, 400, String(bad));
+  assert.equal((await routes.authorize.POST(authorizePost("00000000-0000-4000-8000-000000000000"))).status, 404);
+  assert.equal(db.t("payments").length, n);
+  // After admin approval the card-authorization endpoint does nothing: the existing pay link flow owns that stage.
+  await approve(b);
+  const r = await routes.authorize.POST(authorizePost(b.row.payment_token)); assert.equal(r.status, 409);
+});
+
+test("confirmation page data: tied to the private token, customer-safe, shows tracking ID; unknown tokens and references give nothing", async () => {
+  authOn();
+  const b = await makeBooking();
+  const { loadConfirmation } = await import("../src/lib/confirmation.ts");
+  const v: any = await loadConfirmation(db, b.row.payment_token);
+  assert.equal(v.reference, b.row.reference); assert.equal(v.trackingCode, b.row.tracking_code);
+  assert.equal(v.pricing.totalCents, b.row.online_amount_cents);
+  const dump = JSON.stringify(v);
+  for (const secret of [b.row.id, b.row.payment_token, b.row.customer_id, "fixed", "tier", "Dana", "4105550100", "ann@example.com"]) assert.ok(!dump.includes(String(secret)), String(secret));
+  assert.equal(await loadConfirmation(db, b.row.reference), null); assert.equal(await loadConfirmation(db, b.row.tracking_code), null); assert.equal(await loadConfirmation(db, "00000000-0000-4000-8000-000000000000"), null);
+  // Payment captured and verified: shown as paid; before that it never is.
+  assert.notEqual(v.card, "paid");
+  const a = await authorized(); await approve(a.b);
+  assert.equal(((await loadConfirmation(db, a.b.row.payment_token)) as any).card, "paid");
+  // The page itself links the tracking ID straight to that ride and offers the resume button.
+  const page = readFileSync("src/app/(site)/book/confirmation/page.tsx", "utf8");
+  assert.ok(page.includes("trackingPath(view.trackingCode)") && page.includes("href={track}") && page.includes("AuthorizeCardButton") && page.includes('referrer: "no-referrer"'));
+  const form = readFileSync("src/components/BookingForm.tsx", "utf8");
+  assert.ok(form.includes("window.location.assign(data.authorizeUrl)") && form.includes("data.confirmUrl"));
+});
+
+test("tracking links: URL builder uses the production https site, never localhost; malformed IDs never produce a link", async () => {
+  const { siteBase, trackingUrl, trackingPath } = await import("../src/lib/tracking-url.ts");
+  const code = "TRK-7Q2MK-9XH4D-B6TWA";
+  assert.equal(trackingUrl(code, "https://vantatransportation.example"), `https://vantatransportation.example/track#id=${code}`);
+  assert.equal(trackingUrl(" trk 7q2mk.9xh4d-b6twa ", "https://v.example"), `https://v.example/track#id=${code}`);
+  assert.equal(siteBase("https://v.example/", "production"), "https://v.example");
+  assert.equal(siteBase("http://v.example", "production"), "https://v.example");               // upgraded to https in production
+  assert.equal(siteBase("http://localhost:3000", "production"), null);                          // never localhost in production
+  assert.equal(siteBase("", "production"), null); assert.equal(siteBase("not a url", "production"), null); assert.equal(siteBase("ftp://x.example", "production"), null);
+  assert.equal(siteBase("http://localhost:3000", "development"), "http://localhost:3000");
+  for (const bad of ["VT-1004", "", null, undefined, "TRK-1", 5]) { assert.equal(trackingUrl(bad as any, "https://v.example"), null); assert.equal(trackingPath(bad), null); }
+  assert.equal(trackingUrl(code, null), null);
+  assert.equal(trackingPath(code), `/track#id=${code}`);
+});
+
+test("emails: the Tracking ID is a real hyperlink to that ride in every customer email that shows it (HTML and plain text)", async () => {
+  const { buildNotification, renderEmail } = await import("../src/lib/notify/templates.ts");
+  const code = "TRK-7Q2MK-9XH4D-B6TWA", url = `https://v.example/track#id=${code}`;
+  const base = { Reference: "VT-1", _customerEmail: "ann@example.com", _customerName: "Ann", _trackingId: code, _trackUrl: url, When: "Mon", Pickup: "A", Destination: "B" };
+  const cases: [string, Record<string, string>][] = [["booking.created", base], ["booking.confirmed", base], ["booking.approved", { ...base, _payUrl: "https://v.example/pay/x" }], ["booking.rescheduled", { ...base, "Tracking ID": code, "Previous pickup time": "a", "New pickup time": "b" }]];
+  for (const [ev, d] of cases) {
+    const m = buildNotification(ev as any, d).emails.find((e) => e.audience === "customer")!;
+    const { html, text } = renderEmail(m);
+    assert.ok(html.includes(`<a href="${url}"`) && html.includes(`>${code}</a>`), `${ev}: tracking ID is an anchor`);
+    assert.ok(text.includes(url), `${ev}: plain-text version carries the link`);
+    assert.ok(html.includes(">Track your ride</a>") || ev === "booking.approved", `${ev}: Track your ride button`);
+    assert.ok(!html.includes("localhost"));
+    // Business emails never carry the customer's tracking link.
+    for (const biz of buildNotification(ev as any, d).emails.filter((e) => e.audience === "business")) assert.ok(!renderEmail(biz).html.includes(code));
+  }
+  // The approval email keeps "Pay online" as its button and still links the ID.
+  const ap = buildNotification("booking.approved", { ...base, _payUrl: "https://v.example/pay/x" }).emails[0]; assert.equal(ap.ctaLabel, "Pay online"); assert.equal(ap.links?.["Tracking ID"], url);
+  // No usable URL, no link: never a broken one. Hostile values are escaped and non-http(s) URLs are ignored.
+  const none = renderEmail(buildNotification("booking.created", { ...base, _trackUrl: undefined }).emails[1]); assert.ok(!none.html.includes("<a href"));
+  assert.ok(!renderEmail({ audience: "customer", subject: "s", heading: "h", intro: "i", fields: { "Tracking ID": code }, links: { "Tracking ID": "javascript:alert(1)" } }).html.includes("javascript:"));
+  assert.ok(renderEmail({ audience: "customer", subject: "s", heading: "h", intro: "i", fields: { "Tracking ID": code }, links: { "Tracking ID": 'https://v.example/"><script>' } }).html.includes("&quot;&gt;&lt;script&gt;"));
+});
+
+test("emails sent through Brevo: booking created, approved and confirmed all link the tracking ID to the same ride", async () => {
+  authOn(); net.emailOk = true; net.calls.length = 0;
+  const { b, p } = await authorized();
+  await approve(b);                                                                               // captures the hold -> confirmation email
+  const sent = brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes(b.row.reference));
+  const anchor = `<a href=\\"http://site.test/track#id=${b.row.tracking_code}\\"`;
+  const created = sent.find((c) => String(c.body.subject).includes("We received your booking request"))!;
+  const confirmed = sent.find((c) => String(c.body.subject).includes("is confirmed"))!;
+  for (const m of [created, confirmed]) { assert.ok(m, "email sent"); assert.ok(JSON.stringify(m.body).includes(anchor)); assert.ok(m.body.textContent.includes(`/track#id=${b.row.tracking_code}`)); }
+  assert.equal(p.status, "paid");
+  // An approved-but-unpaid booking (no hold): the approval email links the ID too.
+  Object.assign(db.t("booking_settings")[0], { stripe_authorize_at_booking: false });
+  const u = await makeBooking(); await approve(u);
+  const ap = brevoTo("ann@example.com").find((c) => String(c.body.subject).includes("is approved") && JSON.stringify(c.body).includes(u.row.reference))!;
+  assert.ok(ap && JSON.stringify(ap.body).includes(`<a href=\\"http://site.test/track#id=${u.row.tracking_code}\\"`));
+});
+
+test("direct links: the tracking ID opens THAT ride for pending, authorized and paid bookings; wrong, foreign or reference lookups reveal nothing", async () => {
+  authOn();
+  const pendingB = await makeBooking();
+  const held = await authorized();
+  const paidB = await authorized(); await approve(paidB.b);
+  const tp = async (code: string) => { const r = await trackPost(code); return { status: r.status, body: await r.json() }; };
+  for (const [bk, label] of [[pendingB, "pending"], [held.b, "authorized"], [paidB.b, "paid"]] as const) {
+    const r = await tp(bk.row.tracking_code);
+    assert.equal(r.status, 200, label); assert.equal(r.body.trip.reference, bk.row.reference, label);                  // the right ride
+    const dump = JSON.stringify(r.body);
+    for (const secret of [bk.row.id, bk.row.payment_token, bk.row.customer_id, "4105550100", "ann@example.com", "4105550999", "dana@example.com"]) assert.ok(!dump.includes(String(secret)), `${label}: ${secret}`); // (the driver plate is intentionally shown once confirmed and paid)
+  }
+  assert.equal((await tp(paidB.b.row.tracking_code)).body.trip.paymentStatus, "paid"); assert.notEqual((await tp(held.b.row.tracking_code)).body.trip.paymentStatus, "paid");
+  // Other people's codes, guessed codes and the booking reference never return a booking.
+  for (const bad of ["TRK-AAAAA-AAAAA-AAAAA", pendingB.row.reference, pendingB.row.payment_token, pendingB.row.id, "TRK-"]) { const r = await tp(bad); assert.equal(r.status, 404, String(bad)); assert.equal(r.body.trip, undefined); }
+  // The direct link is the existing fragment format that the Track page reads and clears; manual entry still goes through the same lookup.
+  const tl = readFileSync("src/components/TrackLookup.tsx", "utf8");
+  assert.ok(tl.includes("#id=") && tl.includes('addEventListener("hashchange"') && tl.includes("history.replaceState") && tl.includes('id="track-id"') && tl.includes("onSubmit"));
+  const conf = readFileSync("src/components/ConfirmationDetails.tsx", "utf8"); assert.ok(conf.includes("trackingPath(saved.trackingId)"));
 });

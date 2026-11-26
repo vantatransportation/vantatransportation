@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { buildNotification, renderEmail, type EmailMessage, type NotifyEvent } from "./templates";
 import { brevoConfigured, sendBrevoEmail, type SendResult } from "./brevo";
 import { DEFAULT_BUSINESS_EMAIL } from "@/lib/config";
+import { siteBase, trackingUrl } from "@/lib/tracking-url";
 
 export interface ConfigWarning { channel: "email" | "maps" | "database" | "payments" | "photos"; message: string }
 
@@ -10,6 +11,7 @@ export interface ConfigWarning { channel: "email" | "maps" | "database" | "payme
 export function configWarnings(): ConfigWarning[] {
   const w: ConfigWarning[] = [];
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) w.push({ channel: "database", message: "Supabase URL or service-role key is missing. Submissions cannot be stored." });
+  if (!siteBase()) w.push({ channel: "email", message: "NEXT_PUBLIC_SITE_URL is missing or points at localhost. Tracking and payment links in emails are left out until it is set to the public https:// address of the site." });
   if (!process.env.BREVO_API_KEY) w.push({ channel: "email", message: "Email is not configured. Set BREVO_API_KEY. Emails are skipped until then (bookings and inquiries are still saved)." });
   if (!process.env.BREVO_SENDER_EMAIL) w.push({ channel: "email", message: "BREVO_SENDER_EMAIL is not set. It must be a sender or domain you have verified in Brevo." });
   if (!process.env.GOOGLE_MAPS_SERVER_API_KEY) w.push({ channel: "maps", message: "GOOGLE_MAPS_SERVER_API_KEY is missing. The fare calculator cannot route or autocomplete." });
@@ -64,7 +66,10 @@ export async function notify(
 ): Promise<void> {
   try {
     const base = (process.env.NEXT_PUBLIC_SITE_URL || "").replace(/\/$/, "");
-    const built = buildNotification(event, { ...data, _id: entity.id, _adminUrl: base ? `${base}/admin/${entity.type === "booking" ? "bookings" : entity.type === "lead" ? "leads" : "quotes"}/${entity.id}` : undefined });
+    // One place builds the direct tracking link for every customer email that shows a Tracking ID (callers may still pass their own).
+    const code = data._trackingId ?? data["Tracking ID"];
+    const _trackUrl = data._trackUrl ?? (code ? trackingUrl(code) ?? undefined : undefined);
+    const built = buildNotification(event, { ...data, _trackUrl, _id: entity.id, _adminUrl: base ? `${base}/admin/${entity.type === "booking" ? "bookings" : entity.type === "lead" ? "leads" : "quotes"}/${entity.id}` : undefined });
     const suffix = options.dedupeSuffix ?? "";
     if (built.admin) await recordAdminAlert(db, event, entity, built.admin, suffix);
     for (const msg of built.emails) {
@@ -90,7 +95,7 @@ export async function retryNotification(db: SupabaseClient, id: string): Promise
   if (data.channel !== "email") return { ok: false, message: "SMS is no longer supported. This is a historical record." };
   const p = data.payload as Partial<EmailMessage>;
   if (!p?.subject) return { ok: false, message: "This record has no stored email content." };
-  const msg: EmailMessage = { audience: p.audience ?? "business", to: p.to, replyTo: p.replyTo, subject: p.subject, heading: p.heading ?? p.subject, intro: p.intro ?? "", fields: p.fields ?? {}, ctaLabel: p.ctaLabel, ctaUrl: p.ctaUrl, footnote: p.footnote };
+  const msg: EmailMessage = { audience: p.audience ?? "business", to: p.to, replyTo: p.replyTo, subject: p.subject, heading: p.heading ?? p.subject, intro: p.intro ?? "", fields: p.fields ?? {}, ctaLabel: p.ctaLabel, ctaUrl: p.ctaUrl, footnote: p.footnote, links: p.links };
   await attempt(db, data.id, msg, data.attempts ?? 0);
   const after = await db.from("notification_logs").select("status,error").eq("id", id).single();
   return after.data?.status === "sent" ? { ok: true, message: "Sent." } : { ok: false, message: after.data?.error ?? `Status: ${after.data?.status}` };

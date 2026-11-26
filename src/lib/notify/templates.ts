@@ -17,6 +17,8 @@ export interface EmailMessage {
   ctaLabel?: string;
   ctaUrl?: string;
   footnote?: string;
+  /** Field label -> absolute URL. The field's value is rendered as a real hyperlink (used for the Tracking ID). */
+  links?: Record<string, string>;
 }
 export interface AdminAlert { title: string; body: string; link: string }
 export interface BuiltNotification { admin: AdminAlert | null; emails: EmailMessage[] }
@@ -35,7 +37,27 @@ const STATUS_COPY: Record<string, { subject: string; intro: string }> = {
   no_show: { subject: "Update on your Vanta booking", intro: "Your booking has been marked as a no-show because the passenger did not meet the driver at the confirmed pickup. Our no-show policy may apply. Please contact us if you have questions." },
 };
 
+/**
+ * Every customer email that shows a Tracking ID gets that ID as a hyperlink straight to that ride, plus a "Track your ride" button when
+ * the email has no other primary button (the approval email keeps "Pay online" as its button and links the ID instead).
+ */
+function linkTracking(built: BuiltNotification, d: Data): BuiltNotification {
+  const url = d._trackUrl;
+  if (!url || !/^https?:\/\//i.test(url)) return built;
+  return {
+    ...built,
+    emails: built.emails.map((m) => {
+      if (m.audience !== "customer" || !m.fields["Tracking ID"]) return m;
+      return { ...m, links: { ...m.links, "Tracking ID": url }, ...(m.ctaUrl ? {} : { ctaLabel: "Track your ride", ctaUrl: url }) };
+    }),
+  };
+}
+
 export function buildNotification(event: NotifyEvent, d: Data): BuiltNotification {
+  return linkTracking(buildNotificationBase(event, d), d);
+}
+
+function buildNotificationBase(event: NotifyEvent, d: Data): BuiltNotification {
   const id = d._id ?? "";
   switch (event) {
     case "booking.created": {
@@ -181,10 +203,11 @@ export function buildNotification(event: NotifyEvent, d: Data): BuiltNotificatio
 }
 
 export function renderEmail(m: EmailMessage): { html: string; text: string } {
-  const rows = Object.entries(m.fields).map(([k, val]) => `<tr><td style="padding:6px 12px 6px 0;color:#8a8f98;vertical-align:top;white-space:nowrap">${escapeHtml(k)}</td><td style="padding:6px 0;color:#14161a;white-space:pre-wrap">${escapeHtml(val)}</td></tr>`).join("");
+  const linkFor = (k: string) => { const u = m.links?.[k]; return u && /^https?:\/\//i.test(u) ? u : null; };
+  const rows = Object.entries(m.fields).map(([k, val]) => { const u = linkFor(k); return `<tr><td style="padding:6px 12px 6px 0;color:#8a8f98;vertical-align:top;white-space:nowrap">${escapeHtml(k)}</td><td style="padding:6px 0;color:#14161a;white-space:pre-wrap">${u ? `<a href="${escapeHtml(u)}" style="color:#14161a;font-weight:bold;text-decoration:underline">${escapeHtml(val)}</a>` : escapeHtml(val)}</td></tr>`; }).join("");
   const safeUrl = m.ctaUrl && /^https?:\/\//i.test(m.ctaUrl) ? m.ctaUrl : null;
   const cta = safeUrl && m.ctaLabel ? `<p style="margin:24px 0"><a href="${escapeHtml(safeUrl)}" style="background:#14161a;color:#fff;padding:12px 22px;text-decoration:none;border-radius:4px;display:inline-block">${escapeHtml(m.ctaLabel)}</a></p>` : "";
   const html = `<!doctype html><html><body style="margin:0;background:#f3f4f6;font-family:Arial,Helvetica,sans-serif"><div style="max-width:560px;margin:0 auto;padding:24px"><div style="background:#14161a;color:#fff;padding:18px 24px;letter-spacing:.2em;font-size:13px">VANTA TRANSPORTATION</div><div style="background:#fff;padding:24px"><h1 style="font-size:20px;margin:0 0 12px;color:#14161a">${escapeHtml(m.heading)}</h1><p style="color:#333;line-height:1.5">${escapeHtml(m.intro)}</p>${rows ? `<table style="border-collapse:collapse;font-size:14px;margin-top:8px">${rows}</table>` : ""}${cta}${m.footnote ? `<p style="color:#666;font-size:13px;line-height:1.5">${escapeHtml(m.footnote)}</p>` : ""}</div></div></body></html>`;
-  const text = [m.heading, "", m.intro, "", ...Object.entries(m.fields).map(([k, val]) => `${k}: ${val}`), safeUrl && m.ctaLabel ? `\n${m.ctaLabel}: ${safeUrl}` : "", m.footnote ? `\n${m.footnote}` : ""].join("\n");
+  const text = [m.heading, "", m.intro, "", ...Object.entries(m.fields).map(([k, val]) => { const u = linkFor(k); return u && u !== safeUrl ? `${k}: ${val} (${u})` : `${k}: ${val}`; }), safeUrl && m.ctaLabel ? `\n${m.ctaLabel}: ${safeUrl}` : "", m.footnote ? `\n${m.footnote}` : ""].join("\n");
   return { html, text };
 }
