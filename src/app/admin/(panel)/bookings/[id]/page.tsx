@@ -9,7 +9,8 @@ import { BUSINESS_TZ } from "@/lib/config";
 import BookingOps from "@/components/admin/BookingOps";
 import BookingWorkflow from "@/components/admin/BookingWorkflow";
 import BookingConversation, { type ConversationMessage } from "@/components/admin/BookingConversation";
-import { DRIVER_FLOW, canTransition, type BookingStatus } from "@/lib/booking-status";
+import { DRIVER_FLOW, PAID_STATES, canTransition, type BookingStatus } from "@/lib/booking-status";
+import { adminChecklist } from "@/lib/customer-stage";
 import { getHelpline } from "@/lib/helpline";
 import { loadBookingSettings } from "@/lib/policies";
 import { REGION_LABEL, type Region } from "@/lib/coverage";
@@ -24,7 +25,7 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
   const { data: b } = await db.from("bookings").select("*, customers(id,name,email,phone), vehicles(name), vehicle_tiers(name)").eq("id", id).maybeSingle();
   if (!b) notFound();
   const [payQ, legsQ, peopleQ, airportQ, settings] = await Promise.all([
-    db.from("payments").select("id,kind,provider,provider_ref,provider_txn_id,status,amount_cents,refunded_cents,currency,failure_reason,created_at,paid_at,manual_capture,capture_before,card_brand,card_last4,last_error").eq("booking_id", id).order("created_at", { ascending: false }),
+    db.from("payments").select("id,kind,provider,provider_ref,provider_txn_id,status,amount_cents,refunded_cents,currency,failure_reason,created_at,paid_at,manual_capture,saved_card,capture_before,card_brand,card_last4,last_error").eq("booking_id", id).order("created_at", { ascending: false }),
     db.from("booking_legs").select("leg_number,direction,pickup_address,dropoff_address,pickup_at,distance_miles,fare_cents").eq("booking_id", id).order("leg_number"),
     db.from("booking_people").select("role,full_name,phone,email,relationship").eq("booking_id", id).order("created_at"),
     db.from("booking_airport_details").select("*").eq("booking_id", id),
@@ -61,7 +62,7 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
         <h3>Pricing and payment</h3>
         <dl className="kv">
           <dt>Tier</dt><dd>{b.tier_name ?? "Not recorded"}</dd>
-          <dt>Total payable</dt><dd>{b.online_amount_cents != null ? <strong>{fmtMoney(b.online_amount_cents)}</strong> : "Not set up (trip fare or tier fixed fee was not available when this was requested)"} <span className="muted">(the complete amount authorized / captured / paid)</span></dd>
+          <dt>Total payable</dt><dd>{b.online_amount_cents != null ? <strong>{fmtMoney(b.online_amount_cents)}</strong> : "Not set up (trip fare or tier fixed fee was not available when this was requested)"} <span className="muted">(the complete amount charged to the saved card or paid by PayPal after the customer confirms)</span></dd>
           {b.online_amount_cents != null && (() => {
             const mg = b.meet_greet_selected ? b.meet_greet_fee_cents ?? 0 : 0; const seatsFee = b.child_seat_fee_cents ?? 0; const fixed = b.fixed_price_cents ?? 0;
             const est = b.online_amount_cents - fixed - mg - seatsFee;
@@ -73,18 +74,22 @@ export default async function BookingDetail({ params }: { params: Promise<{ id: 
           <dt>Trip estimate at request</dt><dd>{b.estimated_fare_cents != null ? fmtMoney(b.estimated_fare_cents) : "To be confirmed"} <span className="muted">(distance/hourly fare, surcharges, tolls, discounts; internal)</span></dd>
           <dt>Meet &amp; Greet</dt><dd>{b.meet_greet_selected ? "Selected (fee frozen at request time)" : "Not selected"}</dd>
           <dt>Payment status</dt><dd>{String(b.payment_status).replace(/_/g, " ")} · collected {fmtMoney(b.amount_paid_cents ?? 0)}</dd>
+          <dt>Card on file</dt><dd>{b.card_setup_at && b.card_last4 ? `${String(b.card_brand ?? "card").toUpperCase()} ending ${b.card_last4} (saved ${fmtDate(b.card_setup_at, BUSINESS_TZ)}; never charged or held until the customer confirms)` : b.card_flow ? "Not saved yet: the customer has not finished the card step" : "None (booking made before the saved-card workflow)"}</dd>
+          <dt>Admin approval</dt><dd>{b.approved_at ? `Approved ${fmtDate(b.approved_at, BUSINESS_TZ)}` : "Not yet"}</dd>
+          <dt>Customer confirmation</dt><dd>{b.customer_confirmed_at ? `Confirmed ${fmtDate(b.customer_confirmed_at, BUSINESS_TZ)}` : "Not yet (required before the card is charged)"}</dd>
           <dt>Confirmed</dt><dd>{b.confirmed_at ? `Yes, ${fmtDate(b.confirmed_at, BUSINESS_TZ)} (after verified payment)` : "Not yet"}</dd>
           <dt>Tracking ID</dt><dd>{b.tracking_code ?? "Not generated (apply migration 0009)"} <span className="muted">(customer credential; share it only with the customer)</span></dd>
           <dt>Child seats</dt><dd>{seats.length ? `${seats.map((x) => `${x.quantity} × ${x.type.replace(/_/g, "-")}`).join(", ")} (requested, subject to confirmation)` : "None requested"}</dd>
         </dl>
         {payments.length > 0 && <div className="tbl-wrap"><table className="tbl"><thead><tr><th>Date</th><th>Provider</th><th>Type</th><th>Amount</th><th>Status</th><th>Reference</th></tr></thead><tbody>
-          {payments.map((p) => <tr key={p.id}><td>{fmtDate(p.paid_at ?? p.created_at, BUSINESS_TZ)}</td><td>{p.provider === "paypal" ? "PayPal" : "Stripe"}</td><td>{p.kind}</td><td>{fmtMoney(p.amount_cents)}{p.refunded_cents > 0 ? ` (refunded ${fmtMoney(p.refunded_cents)})` : ""}</td><td>{p.status}{p.failure_reason ? ` · ${p.failure_reason}` : ""}</td><td><code>{p.provider_txn_id ?? p.provider_ref ?? ""}</code></td></tr>)}
+          {payments.map((p) => <tr key={p.id}><td>{fmtDate(p.paid_at ?? p.created_at, BUSINESS_TZ)}</td><td>{p.provider === "paypal" ? "PayPal" : (p as { saved_card?: boolean }).saved_card ? "Stripe (saved card)" : "Stripe"}</td><td>{p.kind}</td><td>{fmtMoney(p.amount_cents)}{p.refunded_cents > 0 ? ` (refunded ${fmtMoney(p.refunded_cents)})` : ""}</td><td>{p.status}{p.failure_reason ? ` · ${p.failure_reason}` : ""}</td><td><code>{p.provider_txn_id ?? p.provider_ref ?? ""}</code></td></tr>)}
         </tbody></table></div>}
-        <p className="muted">A booking is confirmed only by a payment the provider has verified (Stripe webhook signature, or PayPal verification): never by an admin click or a customer returning to a page. Refunds are never automatic; issue them in the Stripe or PayPal dashboard and they appear here.</p>
+        <p className="muted">A booking is confirmed only when an admin approved it, the customer confirmed it AND the provider verified the payment (Stripe API/webhook signature, or PayPal verification): never by an admin click alone or a customer returning to a page. A driver can be assigned only after that. Refunds are never automatic; issue them in the Stripe or PayPal dashboard and they appear here.</p>
       </div>
       {!helpline && <div className="banner">The Vanta support phone number is not set. Customers and drivers cannot see a Call Vanta Support button until you add it in Website content (contact.phone). <Link href="/admin/content" style={{ textDecoration: "underline" }}>Website content</Link></div>}
       <BookingWorkflow id={id} status={b.status} driverId={b.driver_id ?? null} driverName={driverRows.find((d) => d.id === b.driver_id)?.full_name ?? null} paymentReleased={Boolean(b.payment_released_at && b.driver_id)}
-        authorization={(() => { const a = [...payments].reverse().find((x) => (x as { manual_capture?: boolean }).manual_capture && ["authorized", "capture_pending", "capture_failed", "authorization_expired"].includes(x.status)) as (typeof payments[number] & { capture_before?: string | null; card_brand?: string | null; card_last4?: string | null; last_error?: string | null }) | undefined; return a ? { status: a.status, amount: fmtMoney(a.amount_cents), card: a.card_last4 ? `${(a.card_brand ?? "card").toUpperCase()} ending ${a.card_last4}` : null, captureBefore: a.capture_before ?? null, error: a.last_error ?? null } : null; })()} pickupAt={b.pickup_at} tz={BUSINESS_TZ} nextSteps={DRIVER_FLOW.filter((to) => to !== "assigned" && canTransition("admin", b.status as BookingStatus, to))} confirmedAt={b.confirmed_at ?? null}
+        {...(() => { const c = adminChecklist({ ...b, driver_id: b.driver_id }); return { checklist: c.items, stageHeadline: c.headline }; })()} cardFlow={Boolean(b.card_flow)} cardSaved={Boolean(b.card_setup_at)} paid={PAID_STATES.includes(String(b.payment_status))}
+        pickupAt={b.pickup_at} tz={BUSINESS_TZ} nextSteps={DRIVER_FLOW.filter((to) => to !== "assigned" && canTransition("admin", b.status as BookingStatus, to))} confirmedAt={b.confirmed_at ?? null}
         drivers={driverRows.map((d) => ({ id: d.id, name: d.full_name, plate: d.vehicle_plate, active: d.is_active }))}
         history={((histQ.data ?? []) as { to_status: string; note: string | null; created_at: string; actor_type: string }[]).map((h) => ({ to: h.to_status, at: h.created_at, note: h.note, actor: h.actor_type }))} />
       <div className="twocol">

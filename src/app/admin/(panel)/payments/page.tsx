@@ -3,7 +3,7 @@ import { fmtDate, fmtMoney } from "@/components/admin/util";
 import { adminPage } from "@/lib/admin/data";
 import { BUSINESS_TZ } from "@/lib/config";
 import { loadBookingSettings } from "@/lib/policies";
-import { stripeConfigured, webhookSecret } from "@/lib/stripe";
+import { publishableKey, stripeConfigured, webhookSecret } from "@/lib/stripe";
 import { paypalConfigured, paypalEnv, paypalWebhookId } from "@/lib/paypal";
 
 export const metadata = { title: "Payments" };
@@ -44,7 +44,9 @@ export default async function Payments() {
           <p><strong>{stripeOn ? "Available to customers" : "Not offered to customers"}</strong></p>
           <ul className="muted">
             <li>Server keys: {stripeConfigured() ? "STRIPE_SECRET_KEY set" : "STRIPE_SECRET_KEY missing"}; {webhookSecret() ? "webhook secret set" : "STRIPE_WEBHOOK_SECRET missing (payments cannot be confirmed)"}</li>
+            <li>Publishable key (needed to save cards at booking): {publishableKey() ? "set" : "STRIPE_PUBLISHABLE_KEY missing: customers cannot save a card"}</li>
             <li>Switch in Booking settings: {settings.stripeEnabled ? "on" : "off"}</li>
+            <li>Saved-card workflow: the card is saved at booking (no charge, no hold); it is charged only after you approve AND the customer confirms.</li>
           </ul>
         </div>
         <div className="panel">

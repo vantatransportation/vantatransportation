@@ -38,7 +38,7 @@ export default function ConfirmationDetails({ reference }: { reference: string }
       {saved.trackingId && (
         <div style={{ marginTop: "1rem" }}>
           <p>Your tracking ID: {trackingPath(saved.trackingId) ? <Link href={trackingPath(saved.trackingId)!} style={{ textDecoration: "underline", fontWeight: 700, letterSpacing: ".05em" }}>{saved.trackingId}</Link> : <strong style={{ letterSpacing: ".05em" }}>{saved.trackingId}</strong>}</p>
-          <p className="muted" style={{ marginTop: ".4rem" }}>Keep it private. It is also in your email. Select it, or use <Link href="/track" style={{ textDecoration: "underline" }}>Track Your Ride</Link>, to follow your request. No payment is taken now: if we approve your booking we email you a secure payment link, and it is confirmed once that payment is verified.</p>
+          <p className="muted" style={{ marginTop: ".4rem" }}>Keep it private. It is also in your email. Select it, or use <Link href="/track" style={{ textDecoration: "underline" }}>Track Your Ride</Link>, to follow your request. Nothing is charged now. If we approve your booking we email you to review and confirm it on your booking page, and it is confirmed once your payment is verified.</p>
         </div>
       )}
     </div>

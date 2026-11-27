@@ -1,10 +1,11 @@
 /**
  * Booking lifecycle. Pure. One definition used by admin, driver and customer views.
  *
- *  new_request -> (admin approves + assigns driver) -> assigned -> getting_ready -> on_the_way -> arrived -> picked_up -> completed
- *  Legacy statuses (pending_confirmation, confirmed, in_progress, no_show) stay valid for existing rows.
+ *  new_request (card saved, nothing charged) -> approved (admin approval; customer must still confirm) -> confirmed (customer confirmed AND Stripe verified
+ *  the charge) -> assigned (admin assigns a driver, only now) -> getting_ready -> on_the_way -> arrived -> picked_up -> completed
+ *  Legacy statuses (pending_confirmation, in_progress, no_show, and 'assigned' rows approved before the saved-card workflow) stay valid for existing rows.
  */
-export const STATUSES = ["new_request", "pending_confirmation", "confirmed", "assigned", "getting_ready", "on_the_way", "arrived", "picked_up", "in_progress", "completed", "cancelled", "rejected", "no_show"] as const;
+export const STATUSES = ["new_request", "pending_confirmation", "approved", "confirmed", "assigned", "getting_ready", "on_the_way", "arrived", "picked_up", "in_progress", "completed", "cancelled", "rejected", "no_show"] as const;
 export type BookingStatus = (typeof STATUSES)[number];
 export type Actor = "admin" | "driver" | "customer";
 
@@ -12,7 +13,7 @@ export type Actor = "admin" | "driver" | "customer";
 export const DRIVER_FLOW: BookingStatus[] = ["assigned", "getting_ready", "on_the_way", "arrived", "picked_up", "completed"];
 
 export const STATUS_LABEL: Record<BookingStatus, string> = {
-  new_request: "Awaiting review", pending_confirmation: "Awaiting review", confirmed: "Confirmed", assigned: "Driver assigned", getting_ready: "Driver has acknowledged your ride",
+  new_request: "Awaiting review", pending_confirmation: "Awaiting review", approved: "Approved: awaiting your confirmation", confirmed: "Confirmed", assigned: "Driver assigned", getting_ready: "Driver has acknowledged your ride",
   on_the_way: "Driver on the way", arrived: "Driver arrived", picked_up: "Passenger picked up", in_progress: "In progress", completed: "Completed",
   cancelled: "Cancelled", rejected: "Declined", no_show: "No show",
 };
@@ -32,7 +33,7 @@ const DRIVER_NEXT: Partial<Record<BookingStatus, BookingStatus[]>> = {
 
 /** Transitions an admin may make (excluding approval/assignment, which have their own checked operations). */
 const ADMIN_NEXT: Partial<Record<BookingStatus, BookingStatus[]>> = {
-  new_request: ["rejected", "cancelled"], pending_confirmation: ["rejected", "cancelled"],
+  new_request: ["rejected", "cancelled"], pending_confirmation: ["rejected", "cancelled"], approved: ["cancelled"],
   confirmed: ["cancelled", "no_show"], assigned: ["cancelled", "no_show"],
   getting_ready: ["cancelled"], on_the_way: ["cancelled"], arrived: ["cancelled", "no_show"], picked_up: ["cancelled"], in_progress: ["cancelled", "completed"],
 };
@@ -45,9 +46,21 @@ export function canTransition(actor: Actor, from: BookingStatus, to: BookingStat
 }
 
 export const canApprove = (s: BookingStatus) => AWAITING_REVIEW.includes(s);
-/** Reassignment is allowed only before the passenger is on board. */
-export const canAssign = (s: BookingStatus) => [...AWAITING_REVIEW, "confirmed", "assigned", "getting_ready"].includes(s);
+/**
+ * A driver can be assigned (or changed) only once the booking is CONFIRMED (admin approved + customer confirmed + verified payment) and only before
+ * the passenger is on board. A booking awaiting review or approval has no driver: assignment is not part of approval any more.
+ */
+export const canAssign = (s: BookingStatus) => ["confirmed", "assigned", "getting_ready"].includes(s);
 export const isOpenForDriver = (s: BookingStatus) => [...LEGACY_ACTIVE, "getting_ready", "on_the_way", "arrived", "picked_up"].includes(s);
+/** Statuses in which a booking may still BECOME confirmed (the verified payment arrives while it is approved, or a legacy approved+assigned row). */
+export const isConfirmableStatus = (s: BookingStatus) => ["approved", "assigned"].includes(s);
+/**
+ * Approved by an admin, not yet confirmed by the customer's payment: the state in which the customer is shown "Confirm Booking & Authorize Charge".
+ * `approved_at` is set by admin approval only (never by the customer), so a customer cannot approve their own booking.
+ */
+export function awaitingCustomerConfirmation(b: { status: string; approved_at?: string | null; confirmed_at?: string | null; payment_released_at?: string | null }): boolean {
+  return Boolean(b.approved_at && b.payment_released_at && !b.confirmed_at) && isConfirmableStatus(b.status as BookingStatus);
+}
 export const isTerminal = (s: BookingStatus) => ["completed", "cancelled", "rejected", "no_show"].includes(s);
 
 /** Payment states that prove money was verifiably received (set only by the provider-verified payment path). */

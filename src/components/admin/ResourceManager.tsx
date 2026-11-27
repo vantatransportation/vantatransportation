@@ -9,7 +9,7 @@ import { fmtDate, fmtMoney, getPath, label, postJson, type RefOptions, type Row 
 
 const STATUS_CLASS: Record<string, string> = {
   confirmed: "pill--ok", completed: "pill--ok", active: "pill--ok", accepted: "pill--ok", converted: "pill--ok", vip: "pill--ok",
-  new_request: "pill--warn", new: "pill--warn", pending_confirmation: "pill--warn", draft: "pill--warn", reviewing: "pill--warn", follow_up: "pill--warn", revised_sent: "pill--warn",
+  new_request: "pill--warn", approved: "pill--warn", new: "pill--warn", pending_confirmation: "pill--warn", draft: "pill--warn", reviewing: "pill--warn", follow_up: "pill--warn", revised_sent: "pill--warn",
   cancelled: "pill--bad", no_show: "pill--bad", rejected: "pill--bad", blocked: "pill--bad", not_interested: "pill--bad", archived: "pill--bad",
 };
 

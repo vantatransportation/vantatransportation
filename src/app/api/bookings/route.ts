@@ -6,14 +6,13 @@ import { zonedToUtc, formatPickup } from "@/lib/geo/time";
 import { BUSINESS_TZ } from "@/lib/config";
 import { createBooking } from "@/lib/fare/booking";
 import { notify } from "@/lib/notify";
-import { siteBase, trackingUrl } from "@/lib/tracking-url";
+import { trackingUrl } from "@/lib/tracking-url";
 import { clean, EMAIL_RE, phoneDigits } from "@/lib/validation";
 import { formatMoney } from "@/lib/pricing/engine";
 import { customerPricingOf } from "@/lib/tier-pricing";
 import { validateBookingDetails } from "@/lib/booking-details";
 import { REGION_LABEL } from "@/lib/coverage";
 import { childSeatSummary, NO_SEATS } from "@/lib/child-seats";
-import { startAuthorization } from "@/lib/payments-server";
 
 export const runtime = "nodejs";
 
@@ -54,11 +53,11 @@ export async function POST(request: Request) {
     if (!result.ok) return json({ error: result.error }, result.status);
 
     // The booking is already saved. Notifications can fail without affecting it.
-    if (!result.duplicate) {
+    // With the card step (saved-card workflow) the "request received" notice is sent when Stripe confirms the card is saved, not now.
+    if (!result.duplicate && !result.cardFlow) {
       const t = parsed.trip;
       const seatText = childSeatSummary(t.childSeats ?? NO_SEATS);
-      const site = (process.env.NEXT_PUBLIC_SITE_URL || "").replace(/\/$/, "");
-      // No payment link is created or sent at submission: payment is released only after an admin approves the booking.
+      // No payment link exists in this workflow: the card is saved at booking, and charged only after admin approval and the customer's confirmation.
       const trackUrl = trackingUrl(result.trackingCode) ?? undefined;
       const cp = result.online ? customerPricingOf(result.online) : null;
       const extrasText = [t.returnLeg ? "Round trip" : "", seatText ? `Child seats: ${seatText} (requested)` : "", result.meetGreetRequested ? "Meet & Greet requested" : ""].filter(Boolean).join(", ");
@@ -81,19 +80,12 @@ export async function POST(request: Request) {
         _customerEmail: email, _customerName: name, _trackingId: result.trackingCode ?? undefined, _trackUrl: trackUrl,
       });
     }
-    // Authorize now, capture later: the customer is sent straight to Stripe's hosted page to hold their card (nothing is charged). This also
-    // runs for a repeated submission (same submissionKey), so a double click or a retry still lands on the card step for the SAME booking.
-    // If Stripe is off or anything fails, the booking is already saved and its own page (confirmUrl) offers the card step again.
-    let authorizeUrl: string | null = null;
-    if (result.duplicate || result.online) {
-      const siteUrl = siteBase(); // the configured public https URL; never a localhost or proxy-internal address
-      const a = siteUrl ? await startAuthorization(db, result.id, siteUrl).catch(() => null) : null;
-      if (a?.ok) authorizeUrl = a.url;
-    }
+    // The customer goes straight to the card step for THIS booking: their own booking page (private token), which is also where a refresh, a retry or a
+    // repeated submission (same submissionKey) lands, so no second booking and no second card form is ever created.
     const confirmUrl = result.paymentToken ? `/book/confirmation?t=${encodeURIComponent(result.paymentToken)}` : null;
     // Customer-safe pricing only: the combined Trip fare, the selected services and the Total. No tier fee, rate or internal component.
     const pricing = result.online ? customerPricingOf(result.online) : null;
-    return json({ ok: true, reference: result.reference, pricing, currency: result.currency, trackingId: result.trackingCode, payUrl: null, authorizeUrl, confirmUrl });
+    return json({ ok: true, reference: result.reference, pricing, currency: result.currency, trackingId: result.trackingCode, cardStep: Boolean(result.cardFlow), confirmUrl });
   } catch (e) {
     console.error("[bookings] unexpected error", e);
     return json({ error: "We could not save your booking. Please try again." }, 500);

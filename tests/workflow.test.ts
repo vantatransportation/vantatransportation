@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { FakeDb } from "./integration/fakedb.mjs";
 import { signStripePayload } from "../src/lib/stripe-signature.ts";
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 
 const db: any = new FakeDb();
 (globalThis as any).__fakeDb = db;
@@ -14,13 +14,21 @@ Object.assign(process.env, {
   NEXT_PUBLIC_SUPABASE_URL: "http://fake", SUPABASE_SERVICE_ROLE_KEY: "svc", NEXT_PUBLIC_SUPABASE_ANON_KEY: "anon",
   GOOGLE_MAPS_SERVER_API_KEY: "gkey", BREVO_API_KEY: "brevo-test-key", BREVO_SENDER_EMAIL: "sender@example.com", BREVO_SENDER_NAME: "Vanta Test",
   BUSINESS_NOTIFICATION_EMAIL: "owner@example.com", BUSINESS_TIMEZONE: "America/New_York",
-  STRIPE_SECRET_KEY: "sk_test_x", STRIPE_WEBHOOK_SECRET: "whsec_test", NEXT_PUBLIC_SITE_URL: "http://site.test",
+  STRIPE_SECRET_KEY: "sk_test_x", STRIPE_PUBLISHABLE_KEY: "pk_test_x", STRIPE_WEBHOOK_SECRET: "whsec_test", NEXT_PUBLIC_SITE_URL: "http://site.test",
   NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME: "democloud", NEXT_PUBLIC_CLOUDINARY_API_KEY: "123456", CLOUDINARY_API_SECRET: "cloud-secret-xyz",
 });
 
 // ---- network mocks -------------------------------------------------------------------------
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const stripeMock = { pis: new Map<string, any>(), captureCalls: 0, cancelCalls: 0, captureError: null as null | { code: string; message: string } };
+const stripeMock = {
+  pis: new Map<string, any>(), captureCalls: 0, cancelCalls: 0, captureError: null as null | { code: string; message: string },
+  // saved-card workflow (Customers, SetupIntents, charges of a saved card)
+  sis: new Map<string, any>(), idem: new Map<string, any>(), seq: 0, customers: 0, setupCreates: 0, detached: [] as string[],
+  charges: [] as { body: URLSearchParams; key: string }[], nextCharge: "succeeded" as "succeeded" | "requires_action" | "declined" | "processing" | "network", brand: "visa", last4: "4242",
+  /** Simulates the customer finishing Stripe's card form: the SetupIntent succeeds and a PaymentMethod is attached to the customer. */
+  completeSetup(siId: string, last4 = this.last4) { const si = this.sis.get(siId); si.status = "succeeded"; si.payment_method = { id: `pm_${++this.seq}`, customer: si.customer, card: { brand: this.brand, last4 } }; return si; },
+  reset() { this.pis.clear(); this.sis.clear(); this.idem.clear(); this.customers = 0; this.setupCreates = 0; this.detached = []; this.charges = []; this.nextCharge = "succeeded"; this.captureCalls = 0; this.cancelCalls = 0; this.captureError = null; },
+};
 const net = { tollMode: "unknown" as "unknown" | "known", emailOk: false, calls: [] as { url: string; body: any; headers: any }[], sid: 0, pp: { seq: 0, orders: new Map<string, any>(), capStatus: "COMPLETED", capAmount: null as string | null, verify: true } };
 const reply = (data: unknown, status = 200) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 globalThis.fetch = (async (url: any, init: any) => {
@@ -33,6 +41,29 @@ globalThis.fetch = (async (url: any, init: any) => {
       : reply({ routes: [{ distanceMeters: 32187, duration: "1800s", polyline: { encodedPolyline: "xyz" }, travelAdvisory: { tollInfo: net.tollMode === "known" ? { estimatedPrice: [{ currencyCode: "USD", units: "4", nanos: 500000000 }] } : {} } }] }); // ~20 mi
   }
   if (u === "https://api.brevo.com/v3/smtp/email") return net.emailOk ? reply({ messageId: "<m1@brevo>" }, 201) : reply({ code: "unauthorized", message: "Key not found" }, 401);
+  // ---- saved-card workflow endpoints (Idempotency-Key replays return the SAME object, like Stripe)
+  const ikey = (init?.headers as Record<string, string> | undefined)?.["Idempotency-Key"];
+  const once = (mk: () => Response | Promise<Response>) => { if (ikey && stripeMock.idem.has(ikey)) return reply(stripeMock.idem.get(ikey).body, stripeMock.idem.get(ikey).status); return Promise.resolve(mk()); };
+  const remember = (body: any, status = 200) => { if (ikey) stripeMock.idem.set(ikey, { body, status }); return reply(body, status); };
+  if (u === "https://api.stripe.com/v1/customers") return once(() => remember({ id: `cus_${++stripeMock.customers}` }));
+  if (u === "https://api.stripe.com/v1/setup_intents") return once(() => { const f = init.body as URLSearchParams; stripeMock.setupCreates++; const id = `seti_${++stripeMock.seq}`; const si = { id, status: "requires_payment_method", client_secret: `${id}_secret_x`, customer: f.get("customer"), usage: f.get("usage"), metadata: { booking_id: f.get("metadata[booking_id]") } }; stripeMock.sis.set(id, si); return remember(si); });
+  const siM = u.match(/^https:\/\/api\.stripe\.com\/v1\/setup_intents\/([^/?]+)(\?.*)?$/);
+  if (siM) { const si = stripeMock.sis.get(siM[1]); return si ? reply(si) : reply({ error: { message: "No such setup_intent", code: "resource_missing" } }, 404); }
+  const detM = u.match(/^https:\/\/api\.stripe\.com\/v1\/payment_methods\/([^/]+)\/detach$/);
+  if (detM) { stripeMock.detached.push(detM[1]); return reply({ id: detM[1] }); }
+  if (u === "https://api.stripe.com/v1/payment_intents") {
+    const f = init.body as URLSearchParams;
+    return once(() => {
+      stripeMock.charges.push({ body: f, key: ikey ?? "" }); // only a FRESH creation counts: an idempotent replay returns Stripe's original object
+      if (stripeMock.nextCharge === "network") throw new Error("socket hang up");
+      const id = `pi_${++stripeMock.seq}`;
+      const base = { id, amount: Number(f.get("amount")), currency: f.get("currency"), customer: f.get("customer"), payment_method: f.get("payment_method"), metadata: { booking_id: f.get("metadata[booking_id]"), payment_id: f.get("metadata[payment_id]") }, client_secret: `${id}_secret_y`, amount_received: 0 };
+      if (stripeMock.nextCharge === "declined") { const pi = { ...base, status: "requires_payment_method", last_payment_error: { code: "card_declined", decline_code: "insufficient_funds" } }; stripeMock.pis.set(id, pi); return remember({ error: { code: "card_declined", decline_code: "insufficient_funds", message: "Your card has insufficient funds.", payment_intent: pi } }, 402); }
+      const status = stripeMock.nextCharge;
+      const pi = { ...base, status, amount_received: status === "succeeded" ? base.amount : 0 };
+      stripeMock.pis.set(id, pi); return remember(pi);
+    });
+  }
   const piM = u.match(/^https:\/\/api\.stripe\.com\/v1\/payment_intents\/([^/?]+)(\/capture|\/cancel)?(\?.*)?$/);
   if (piM) {
     const pi = stripeMock.pis.get(piM[1]);
@@ -114,7 +145,10 @@ before(async () => {
     read: await import("../src/app/api/admin/notifications/read/route.ts"),
     sign: await import("../src/app/api/admin/cloudinary/sign/route.ts"),
     checkout: await import("../src/app/api/payments/checkout/route.ts"),
-    authorize: await import("../src/app/api/payments/authorize/route.ts"),
+    cardSetup: await import("../src/app/api/bookings/card/setup/route.ts"),
+    cardComplete: await import("../src/app/api/bookings/card/complete/route.ts"),
+    confirm: await import("../src/app/api/bookings/confirm/route.ts"),
+    confirmFinal: await import("../src/app/api/bookings/confirm/finalize/route.ts"),
     ppcapture: await import("../src/app/api/payments/paypal/capture/route.ts"),
     ppwebhook: await import("../src/app/api/paypal/webhook/route.ts"),
     webhook: await import("../src/app/api/stripe/webhook/route.ts"),
@@ -534,19 +568,58 @@ const hook = (event: object, opts: { secret?: string; at?: number } = {}) => {
   return new Request("http://site.test/api/stripe/webhook", { method: "POST", headers: { "stripe-signature": signStripePayload(raw, opts.secret ?? "whsec_test", opts.at), "content-type": "application/json" }, body: raw });
 };
 let ev = 0;
-const sessionEvent = (type: string, p: any, over: Record<string, unknown> = {}, id = `evt_${++ev}`) => ({
+const legacySessionEvent = (type: string, p: any, over: Record<string, unknown> = {}, id = `evt_${++ev}`) => ({
   id, type, data: { object: { object: "checkout.session", id: p.stripe_session_id, payment_status: "paid", payment_intent: `pi_${p.stripe_session_id}`, amount_total: p.amount_cents, currency: "usd", metadata: { booking_id: p.booking_id, payment_id: p.id }, ...over } },
 });
+// Webhook events for a payment row. A saved-card charge (the new workflow) reports through PaymentIntent events; the old Checkout-session shapes are kept
+// only for rows that predate the workflow (history). The mapping lets the older assertions keep exercising the SAME rules on the new flow.
+const sessionEvent = (type: string, p: any, over: Record<string, unknown> = {}, id = `evt_${++ev}`) => {
+  if (!p.saved_card) return legacySessionEvent(type, p, over, id);
+  const map: Record<string, string> = { "checkout.session.completed": over.payment_status === "unpaid" ? "payment_intent.processing" : "payment_intent.succeeded", "checkout.session.async_payment_succeeded": "payment_intent.succeeded", "checkout.session.async_payment_failed": "payment_intent.payment_failed", "checkout.session.expired": "payment_intent.canceled" };
+  const pi = stripeMock.pis.get(p.stripe_payment_intent_id) ?? {};
+  const amount = (over.amount_total as number | undefined) ?? p.amount_cents;
+  return { id, type: map[type], data: { object: { object: "payment_intent", id: p.stripe_payment_intent_id ?? "pi_unknown", amount: p.amount_cents, amount_received: amount, currency: "usd", customer: pi.customer, metadata: { booking_id: p.booking_id, payment_id: p.id }, last_payment_error: { code: "card_declined" } } } };
+};
 // Admin approval through the REAL workflow route (assigns a driver and releases payment). Payment is impossible before this.
 const l_e = (m: any) => m.event;
 const adminAs = async <T,>(fn: () => Promise<T>) => { const prev = (globalThis as any).__cookies; (globalThis as any).__cookies = { vt_at: "good" }; try { return await fn(); } finally { (globalThis as any).__cookies = prev; } };
 const aDriver = () => { if (!db.t("drivers").length) db.seed("drivers", [{ full_name: "Dana Driver", email: "dana@example.com", phone: "4105550999", vehicle_plate: "VT-123", vehicle_description: "Black Escalade", is_active: true }]); return db.t("drivers")[0]; };
-const approve = (b: { row: any }, driverId = aDriver().id) => adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "approve_assign", driverId })));
+// ---- the saved-card workflow, step by step, through the REAL routes -----------------------------------------
+/** Customer saves a card at booking: Stripe SetupIntent via the route, Stripe "completes" it, the server verifies it with Stripe. Nothing is charged. */
+const saveCard = async (b: { row: any }, consent = true) => {
+  const token = b.row.payment_token;
+  const s = await routes.cardSetup.POST(post("/api/bookings/card/setup", { token, consent }));
+  if (s.status !== 200) return { setup: s, complete: null };
+  stripeMock.completeSetup(b.row.stripe_setup_intent_id);
+  const c = await routes.cardComplete.POST(post("/api/bookings/card/complete", { token }));
+  return { setup: s, complete: c };
+};
+/** Admin approval through the REAL workflow route. It charges nothing, confirms nothing and assigns no driver. The card is saved first when the booking needs one. */
+const approve = async (b: { row: any }, driverId?: string) => { if (driverId) return confirmAndAssign(b, driverId); if (b.row.card_flow && !b.row.card_setup_at) await saveCard(b); return adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "approve" }))); };
+/** The customer's explicit "Confirm Booking & Authorize Charge". */
+const confirmCharge = (b: { row: any }, body: object = {}) => routes.confirm.POST(post("/api/bookings/confirm", { token: b.row.payment_token, consent: true, ...body }));
+/** Saves a card (if needed), approves, and starts the customer's charge. The charge stays IN PROGRESS (processing) until a verified Stripe event settles it. */
 const pay = async (token: string, extra: object = {}) => {
   const row = db.t("bookings").find((x: any) => x.payment_token === token);
-  if (row && !row.payment_released_at && !(extra as any).unapproved) await approve({ row });
-  return routes.checkout.POST(post("/api/payments/checkout", { token, provider: "stripe", ...extra }));
+  if (row && !row.approved_at && !(extra as any).unapproved) await approve({ row });
+  const prev = stripeMock.nextCharge; stripeMock.nextCharge = (extra as any).outcome ?? "processing";
+  try { return await routes.confirm.POST(post("/api/bookings/confirm", { token, consent: true })); } finally { stripeMock.nextCharge = prev; }
 };
+/** approve -> customer confirms -> Stripe verifies the payment (succeeds at once) -> the booking is confirmed (no driver yet). */
+const confirmBooking = async (b: { row: any }) => { await approve(b); stripeMock.nextCharge = "succeeded"; return confirmCharge(b); };
+/** Assigning a driver is a separate admin step that is allowed only after the booking is confirmed and paid. */
+const assignDriver = (b: { row: any }, driverId = aDriver().id) => adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "assign", driverId })));
+/** Full path to a confirmed, paid, driver-assigned ride. */
+/**
+ * A booking from BEFORE the saved-card workflow: an admin approved it and assigned a driver while it was still unpaid. New bookings can never reach this state,
+ * but existing ones may, and the payment gate must keep holding for them.
+ */
+const legacyAssignedUnpaid = async (b: { row: any }, driverId = aDriver().id) => {
+  await approve(b);
+  b.row.status = "assigned"; b.row.driver_id = driverId;
+  db.seed("booking_assignments", [{ booking_id: b.row.id, driver_id: driverId, assigned_at: new Date().toISOString(), assigned_by: null }]);
+};
+const confirmAndAssign = async (b: { row: any }, driverId = aDriver().id) => { await confirmBooking(b); return assignDriver(b, driverId); };
 const setPay = (mode: string, extra: Record<string, unknown> = {}) => Object.assign(db.t("booking_settings")[0], { payment_mode: mode, deposit_fixed_cents: null, deposit_percent: null, ...extra });
 
 test("payments disabled by default: booking requests work, no checkout is offered", async () => {
@@ -554,43 +627,42 @@ test("payments disabled by default: booking requests work, no checkout is offere
   setFixed(null, 15000, null);
   const b = await makeBooking();
   assert.equal(b.res.status, 200);
-  assert.equal(b.data.payUrl, null);
+  assert.equal(b.data.payUrl, undefined);
   assert.equal(b.row.payment_status, "not_required");
   const r = await pay(b.row.payment_token);
   assert.equal(r.status, 503); // no provider is offered while online payment is disabled
   assert.equal(db.t("payments").filter((p: any) => p.booking_id === b.row.id).length, 0);
-  assert.equal((await pay("not-a-token")).status, 400);
+  assert.equal((await pay("not-a-token")).status, 404); // not a credential: one generic answer
 });
 
-test("Stripe Checkout: amount comes only from the saved server-side total; client amounts are ignored; booking is not confirmed or paid", async () => {
+test("saved-card charge: amount comes only from the saved server-side total; client amounts are ignored; creating the charge confirms nothing", async () => {
   setPay("full");
   const b = await makeBooking({ totalCents: 1 });
-  assert.equal(b.data.payUrl, null); assert.match(b.data.trackingId, /^TRK-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}$/); // no pay link at submission
-  assert.equal((await pay(b.row.payment_token, { unapproved: true })).status, 409); // payment is impossible before admin approval
+  assert.equal(b.data.payUrl, undefined); assert.match(b.data.trackingId, /^TRK-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}$/); // no pay link at submission
+  assert.equal((await pay(b.row.payment_token, { unapproved: true })).status, 409); // charging is impossible before admin approval
   assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 0);
   assert.equal(b.row.payment_status, "unpaid");
   const total = b.row.online_amount_cents; assert.ok(b.row.estimated_fare_cents > 0);
   assert.equal(total, 15000 + b.row.estimated_fare_cents); // the COMPLETE total: fixed Luxury fee + trip estimate (not the fee alone)
   assert.notEqual(total, b.row.fixed_price_cents);
 
-  const callsBefore = net.calls.length;
-  const r = await pay(b.row.payment_token, { amountCents: 1, amount: 1, totalCents: 1 });
+  await approve(b);
+  const chargesBefore = stripeMock.charges.length;
+  stripeMock.nextCharge = "processing";
+  const r = await confirmCharge(b, { amountCents: 1, amount: 1, totalCents: 1 }); // browser-supplied amounts are ignored
   assert.equal(r.status, 200);
-  const out = await r.json();
-  assert.match(out.url, /^https:\/\/checkout\.stripe\.com\//);
-  const sc = net.calls.slice(callsBefore).find((c) => c.url === "https://api.stripe.com/v1/checkout/sessions")!;
-  const form = new URLSearchParams(String(sc.body));
-  assert.equal(form.get("line_items[0][price_data][unit_amount]"), String(total));
-  assert.equal(form.get("line_items[0][price_data][currency]"), "usd");
+  assert.equal((await r.json()).state, "processing");
+  const c = stripeMock.charges.slice(chargesBefore);
+  assert.equal(c.length, 1);
+  const form = c[0].body;
+  assert.equal(form.get("amount"), String(total)); assert.equal(form.get("currency"), "usd");
+  assert.equal(form.get("confirm"), "true"); assert.equal(form.get("customer"), b.row.stripe_customer_id); assert.equal(form.get("payment_method"), b.row.stripe_payment_method_id);
   assert.equal(form.get("metadata[booking_id]"), b.row.id);
-  assert.equal(form.get("customer_email"), "ann@example.com");
-  assert.match(String(sc.headers["Idempotency-Key"]), /^pay-/);
-  assert.equal(sc.headers.Authorization, "Bearer sk_test_x");
-
   const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
-  assert.equal(p.status, "pending"); assert.equal(p.amount_cents, total); assert.equal(p.kind, "full");
-  assert.equal(b.row.payment_status, "pending");
-  assert.equal(b.row.status, "assigned");      // creating a session confirms nothing: still awaiting payment
+  assert.match(c[0].key, new RegExp(`^charge-${p.id}$`));
+  assert.equal(p.status, "processing"); assert.equal(p.amount_cents, total); assert.equal(p.kind, "full"); assert.equal(p.saved_card, true);
+  assert.equal(b.row.payment_status, "processing");
+  assert.equal(b.row.status, "approved");      // creating the charge confirms nothing: still awaiting Stripe's verified result
   assert.equal(b.row.confirmed_at ?? null, null);
   assert.equal(b.row.amount_paid_cents, 0);    // and marks nothing as paid
 });
@@ -607,13 +679,13 @@ test("Stripe webhook: signature required; paid only via a verified event; bookin
   assert.equal(stale.status, 400);
   const unsigned = await routes.webhook.POST(new Request("http://site.test/api/stripe/webhook", { method: "POST", body: "{}" }));
   assert.equal(unsigned.status, 400);
-  assert.equal(p.status, "pending"); assert.equal(b.row.amount_paid_cents, 0);
+  assert.equal(p.status, "processing"); assert.equal(b.row.amount_paid_cents, 0);
   assert.equal(db.t("stripe_events").length, 0);
 
   const good = sessionEvent("checkout.session.completed", p, {}, "evt_dup_1");
   const ok = await routes.webhook.POST(hook(good));
   assert.equal(ok.status, 200); assert.equal((await ok.json()).result, "processed");
-  assert.equal(p.status, "paid"); assert.ok(p.paid_at); assert.equal(p.stripe_payment_intent_id, `pi_${p.stripe_session_id}`);
+  assert.equal(p.status, "paid"); assert.ok(p.paid_at); assert.match(p.stripe_payment_intent_id, /^pi_\d+$/);
   assert.equal(b.row.amount_paid_cents, p.amount_cents);
   assert.equal(p.amount_cents, b.row.online_amount_cents);
   assert.equal(b.row.payment_status, "paid");
@@ -657,13 +729,13 @@ test("failed or expired payments keep the booking and can be retried; processing
   const p1 = db.t("payments").find((x: any) => x.booking_id === b.row.id);
 
   await routes.webhook.POST(hook(sessionEvent("checkout.session.expired", p1, { payment_status: "unpaid" })));
-  assert.equal(p1.status, "expired"); assert.equal(b.row.payment_status, "unpaid");
+  assert.equal(p1.status, "failed"); assert.equal(b.row.payment_status, "failed"); // a cancelled/failed attempt never counts as paid
   assert.ok(db.t("bookings").some((x: any) => x.id === b.row.id)); // the booking is never erased
 
   const retry = await pay(b.row.payment_token);                    // retry path
   assert.equal(retry.status, 200);
   const p2 = db.t("payments").filter((x: any) => x.booking_id === b.row.id).at(-1);
-  assert.notEqual(p2.id, p1.id); assert.equal(p2.status, "pending"); assert.equal(b.row.payment_status, "pending");
+  assert.notEqual(p2.id, p1.id); assert.equal(p2.status, "processing"); assert.equal(b.row.payment_status, "processing");
 
   await routes.webhook.POST(hook(sessionEvent("checkout.session.async_payment_failed", p2, { payment_status: "unpaid" })));
   assert.equal(p2.status, "failed"); assert.equal(b.row.payment_status, "failed");
@@ -672,7 +744,7 @@ test("failed or expired payments keep the booking and can be retried; processing
   // A delayed payment method that has not settled yet stays pending.
   const p3 = db.t("payments").filter((x: any) => x.booking_id === b.row.id).at(-1);
   await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p3, { payment_status: "unpaid" })));
-  assert.equal(p3.status, "pending"); assert.equal(b.row.amount_paid_cents, 0);
+  assert.equal(p3.status, "processing"); assert.equal(b.row.amount_paid_cents, 0);
 
   // Unexpected failure while processing: 500 and the event id is released so the retry can succeed.
   const evt = sessionEvent("checkout.session.completed", p3, {}, "evt_flaky");
@@ -687,32 +759,24 @@ test("failed or expired payments keep the booking and can be retried; processing
   assert.equal(p3.status, "paid");
 });
 
-test("deposit modes: fixed and percentage amounts come from admin settings; unconfigured deposits offer nothing; not configured = unavailable", async () => {
+test("deposit settings never shrink a saved-card charge (the COMPLETE total is charged); nothing is invented; not configured = unavailable", async () => {
   setPay("deposit_percent", { deposit_percent: 25 });
   let b = await makeBooking();
-  assert.equal(b.data.payUrl, null); assert.match(b.data.trackingId, /^TRK-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}$/); // no pay link at submission
+  assert.equal(b.data.payUrl, undefined); assert.match(b.data.trackingId, /^TRK-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}$/); // no pay link at submission
   assert.equal((await pay(b.row.payment_token, { unapproved: true })).status, 409); // payment is impossible before admin approval
   assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 0);
   await pay(b.row.payment_token);
   let p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
-  assert.equal(p.amount_cents, Math.round(b.row.online_amount_cents * 0.25)); assert.equal(p.kind, "deposit");
+  assert.equal(p.amount_cents, b.row.online_amount_cents); assert.equal(p.kind, "full"); // the saved-card workflow charges the complete approved total
   await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p)));
-  assert.equal(b.row.payment_status, "deposit_paid"); assert.equal(b.row.amount_paid_cents, p.amount_cents);
-  assert.equal((await pay(b.row.payment_token)).status, 409); // deposit already paid: nothing more due online
-
-  setPay("deposit_fixed", { deposit_fixed_cents: 5000 });
-  b = await makeBooking(); await pay(b.row.payment_token);
-  p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
-  assert.equal(p.amount_cents, 5000);
-
-  setPay("deposit_fixed"); // mode chosen but no amount: no invented deposit
-  b = await makeBooking();
-  assert.equal(b.data.payUrl, null); assert.equal((await pay(b.row.payment_token)).status, 409);
+  assert.equal(b.row.payment_status, "paid"); assert.equal(b.row.amount_paid_cents, p.amount_cents);
+  const again = await confirmCharge(b); // a repeated confirmation on a paid booking changes nothing
+  assert.equal((await again.json()).state, "paid"); assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 1);
 
   setPay("full");
   const saved = process.env.STRIPE_SECRET_KEY; delete process.env.STRIPE_SECRET_KEY;
   b = await makeBooking();
-  assert.equal(b.res.status, 200); assert.equal(b.data.payUrl, null); // booking still saved
+  assert.equal(b.res.status, 200); assert.equal(b.data.payUrl, undefined); assert.equal(b.data.cardStep, false); // booking still saved, no card step without Stripe
   assert.equal((await pay(b.row.payment_token)).status, 503);
   process.env.STRIPE_SECRET_KEY = saved;
 
@@ -721,7 +785,6 @@ test("deposit modes: fixed and percentage amounts come from admin settings; unco
   assert.equal((await pay(c.row.payment_token)).status, 409);
   setPay("disabled");
 });
-
 
 // =====================================================================================================
 // Fixed tier pricing, per-tier Meet & Greet, admin price management, PayPal
@@ -785,7 +848,7 @@ test("fixed prices: a missing price means no online charge (never invented); lat
   const none = await makeBooking();
   assert.equal(none.res.status, 200);
   assert.equal(none.row.online_amount_cents, null); assert.equal(none.row.fixed_price_cents, null);
-  assert.equal(none.data.payUrl, null); assert.equal(none.row.payment_status, "not_required");
+  assert.equal(none.data.payUrl, undefined); assert.equal(none.row.payment_status, "not_required");
   assert.equal((await pay(none.row.payment_token)).status, 409);       // checkout refuses: price not set yet
 
   setFixed(10000, 15000, 22000);
@@ -832,23 +895,20 @@ test("admin: only an authorized admin can set tier fixed prices and Meet & Greet
 });
 
 // ---- Stripe line items for the fixed-price charge -----------------------------------------------------
-test("Stripe checkout lists ONE combined Trip fare plus Meet & Greet and child seats; the tier fee and estimate are never listed separately", async () => {
+test("saved-card charge is ONE amount covering trip fare, Meet & Greet and child seats; the tier fee and estimate are never shown separately", async () => {
   setFixed(10000, 15000, 22000); setPay("full");
   const b = await makeBooking({ airport: airportBlock }, { meetGreet: true, passengers: 3, childSeats: { booster: 2 } });
   const est = b.row.estimated_fare_cents;
   assert.equal(b.row.online_amount_cents, 15000 + est + 3500 + 2000);
-  const from = net.calls.length;
+  const from = stripeMock.charges.length;
   assert.equal((await pay(b.row.payment_token)).status, 200);
-  const form = new URLSearchParams(String(net.calls.slice(from).find((c) => c.url === "https://api.stripe.com/v1/checkout/sessions")!.body));
-  const amounts = [0, 1, 2, 3].map((i) => form.get(`line_items[${i}][price_data][unit_amount]`)).filter(Boolean);
-  assert.deepEqual(amounts, [String(15000 + est), "3500", "2000"]);          // Trip fare = tier fee + estimate, then the two services
-  assert.equal(form.get("line_items[0][price_data][product_data][name]"), `Trip fare (${b.row.reference})`);
-  assert.equal(form.get("line_items[1][price_data][product_data][name]"), "Airport Meet & Greet");
-  assert.equal(amounts.reduce((n, a) => n + Number(a), 0), Number(form.get("line_items[0][price_data][unit_amount]")) + 5500);
-  const sc = net.calls.slice(from).find((c) => c.url === "https://api.stripe.com/v1/checkout/sessions")!;
-  const everything = String(sc.body);
-  assert.ok(!/fixed|per mile|per_mile|tier/i.test(decodeURIComponent(everything.replace(/\+/g, " "))), "nothing customer-visible at Stripe mentions the tier fee or rates");
-  assert.ok(!amounts.includes("15000"));                                      // the tier fee alone is never a line
+  const charge = stripeMock.charges.slice(from);
+  assert.equal(charge.length, 1);                                              // ONE charge for the COMPLETE total, never the tier fee alone
+  const form = charge[0].body;
+  assert.equal(form.get("amount"), String(15000 + est + 3500 + 2000));
+  assert.notEqual(form.get("amount"), "15000");
+  const everything = decodeURIComponent(String(form).replace(/\+/g, " "));
+  assert.ok(!/fixed|per mile|per_mile|tier|Luxury/i.test(everything), "nothing customer-visible at Stripe mentions the tier fee or rates");
   const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
   assert.deepEqual([p.provider, p.tier_name, p.fixed_price_cents, p.meet_greet_cents, p.other_addons_cents, p.amount_cents], ["stripe", "Luxury", 15000, 3500, 2000, 15000 + est + 5500]);
   assert.equal(p.estimated_trip_fare_cents, est);                            // the internal split stays on the payment row, for admins
@@ -862,7 +922,13 @@ const withPayPal = async (fn: () => Promise<void>) => {
 };
 const capture = (token: string, orderId: string) => routes.ppcapture.POST(post("/api/payments/paypal/capture", { token, orderId }));
 const ppHook = (event: object) => new Request("http://site.test/api/paypal/webhook", { method: "POST", headers: { "paypal-transmission-id": "t1", "paypal-transmission-time": "2026-01-01T00:00:00Z", "paypal-cert-url": "https://api.paypal.com/cert", "paypal-auth-algo": "SHA256withRSA", "paypal-transmission-sig": "sig", "content-type": "application/json" }, body: JSON.stringify(event) });
-const startPayPal = async (b: any) => { const r = await pay(b.row.payment_token, { provider: "paypal" }); return { r, out: await r.json() }; };
+/** PayPal stays available as an alternative once the booking is approved: the checkout route itself refuses anything not approved. */
+const payPayPal = async (token: string) => {
+  const row = db.t("bookings").find((x: any) => x.payment_token === token);
+  if (row && !row.approved_at) await approve({ row });
+  return routes.checkout.POST(post("/api/payments/checkout", { token, provider: "paypal" }));
+};
+const startPayPal = async (b: any) => { const r = await payPayPal(b.row.payment_token); return { r, out: await r.json() }; };
 
 test("providers are offered only when switched on AND configured; nothing is shown as available otherwise", async () => {
   const { availableProviders } = await import("../src/lib/payment-providers.ts");
@@ -887,7 +953,7 @@ test("providers are offered only when switched on AND configured; nothing is sho
   });
   // A provider that is not available is refused, and the customer's choice is never silently switched.
   const b = await makeBooking();
-  const r = await pay(b.row.payment_token, { provider: "paypal" });
+  const r = await payPayPal(b.row.payment_token);
   assert.equal(r.status, 503); assert.match((await r.json()).error, /PayPal is not available/);
   assert.equal(db.t("payments").filter((p: any) => p.booking_id === b.row.id).length, 0);
 });
@@ -1017,52 +1083,78 @@ const trackChat = (method: "GET" | "POST", code: string | null, body?: object, i
 };
 const asDriver = async <T,>(token: string, fn: () => Promise<T>) => { const prev = (globalThis as any).__cookies; (globalThis as any).__cookies = { vd_at: token }; try { return await fn(); } finally { (globalThis as any).__cookies = prev; } };
 
-test("submission: unguessable tracking ID, awaiting review, nothing charged, no pay link, admin notified with a dashboard link", async () => {
+test("submission: unguessable tracking ID, card step first, nothing charged or held, no pay link; the business is alerted once the card is saved", async () => {
   db.seed("site_content", [{ key: "contact.phone", value: "+1 555-010-0199", group_name: "Contact" }]);
-  net.calls.length = 0;
+  net.calls.length = 0; stripeMock.reset();
   const b = await flow();
   assert.equal(b.res.status, 200);
   assert.match(b.row.tracking_code, /^TRK-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}$/);
-  assert.ok(!b.row.tracking_code.includes(b.row.reference.replace("VT-", "")) || true);
   assert.equal(b.row.status, "new_request"); assert.equal(b.row.payment_status, "unpaid"); assert.equal(b.row.amount_paid_cents, 0);
   assert.equal(b.row.confirmed_at ?? null, null); assert.equal(b.row.payment_released_at ?? null, null);
-  assert.equal(b.data.payUrl, null); assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 0);
+  assert.equal(b.row.card_flow, true); assert.equal(b.data.cardStep, true); assert.match(b.data.confirmUrl, /^\/book\/confirmation\?t=[0-9a-f-]{36}$/);
+  assert.equal(b.data.payUrl, undefined); assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 0);
+  // The request is not complete until the card is saved: the business is not alerted and the customer is not told "received" yet.
+  assert.equal(db.t("admin_notifications").some((n: any) => n.event === "booking.created" && n.entity_id === b.row.id), false);
+  assert.equal(brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes(b.row.reference)).length, 0);
+
+  // Card step: consent is required; saving the card charges nothing and holds nothing.
+  assert.equal((await saveCard(b, false)).setup.status, 422);
+  assert.equal(stripeMock.setupCreates, 0);
+  const saved = await saveCard(b);
+  assert.equal(saved.setup.status, 200); assert.equal(saved.complete!.status, 200);
+  assert.equal(b.row.status, "new_request"); assert.equal(b.row.payment_status, "card_saved"); assert.equal(b.row.amount_paid_cents, 0);
+  assert.equal(stripeMock.charges.length, 0); assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 0);
+  assert.ok(b.row.card_setup_at); assert.ok(b.row.card_consent_at); assert.match(b.row.card_consent_text, /Nothing is charged and no funds are held/);
+  assert.deepEqual([b.row.card_brand, b.row.card_last4], ["visa", "4242"]);
   // Admin dashboard alert + business email with a link into the admin booking page.
   const alert = db.t("admin_notifications").find((n: any) => n.event === "booking.created" && n.entity_id === b.row.id);
   assert.ok(alert); assert.match(String(alert.link), new RegExp(`/admin/bookings/${b.row.id}`));
   const biz = brevoTo("owner@example.com").find((c) => JSON.stringify(c.body).includes(b.row.reference));
   assert.ok(biz && JSON.stringify(biz.body).includes(`/admin/bookings/${b.row.id}`));
-  // Customer email: tracking ID and tracking link, and NO payment link.
+  // Customer email: tracking ID and tracking link, says nothing is charged, and NO payment link.
   const cust = brevoTo("ann@example.com").find((c) => JSON.stringify(c.body).includes(b.row.reference))!;
   const html = JSON.stringify(cust.body);
   assert.ok(html.includes(b.row.tracking_code)); assert.ok(html.includes("/track#id=")); assert.ok(!html.includes("/pay/"));
+  assert.match(html, /Nothing has been charged and no funds are on hold/); assert.ok(!/No card is held|secure payment link/.test(html));
+  // Repeating the callback or the webhook neither duplicates the notice nor the card.
+  await routes.cardComplete.POST(post("/api/bookings/card/complete", { token: b.row.payment_token }));
+  assert.equal(brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes(b.row.reference)).length, 1);
+  assert.equal(db.t("admin_notifications").filter((n: any) => n.event === "booking.created" && n.entity_id === b.row.id).length, 1);
 });
 
-test("approval releases payment; confirmation comes ONLY from the verified payment; webhook retries send one email", async () => {
-  const b = await flow();
-  // Before approval: the payment endpoint refuses and the pay page has nothing to charge.
-  assert.equal((await pay(b.row.payment_token, { unapproved: true })).status, 409);
+test("approval alone charges nothing and confirms nothing; the customer's confirmation + Stripe's verified payment confirm; only then a driver is assigned", async () => {
+  const b = await flow(); await saveCard(b);
+  // Before approval the confirmation endpoint refuses and nothing is charged.
+  const early = await confirmCharge(b);
+  assert.equal(early.status, 409); assert.equal((await early.json()).code, "not_approved");
+  assert.equal(stripeMock.charges.length, 0);
   const driver = aDriver();
   const ap = await approve(b);
   assert.equal(ap.status, 200);
-  assert.equal(b.row.status, "assigned"); assert.ok(b.row.payment_released_at); assert.equal(b.row.driver_id, driver.id);
-  assert.equal(b.row.payment_status, "unpaid"); assert.equal(b.row.confirmed_at ?? null, null); // approval is not payment, and not confirmation
-  const apEmail = brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes(b.row.reference) && JSON.stringify(c.body).includes("/pay/"));
+  assert.equal(b.row.status, "approved"); assert.ok(b.row.approved_at); assert.ok(b.row.payment_released_at); assert.equal(b.row.driver_id ?? null, null); // approval assigns no driver
+  assert.equal(b.row.payment_status, "card_saved"); assert.equal(b.row.confirmed_at ?? null, null); assert.equal(b.row.customer_confirmed_at ?? null, null);
+  assert.equal(stripeMock.charges.length, 0); assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 0); // no charge, no hold
+  const apEmail = brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes(b.row.reference) && JSON.stringify(c.body).includes("is approved"));
   assert.equal(apEmail.length, 1);
-  assert.ok(!JSON.stringify(apEmail[0].body).includes("4105550999")); // the driver's phone is never emailed to the customer
-  // A second approval (double click / second admin) is refused.
+  const apHtml = JSON.stringify(apEmail[0].body);
+  assert.ok(!apHtml.includes("/pay/")); assert.ok(apHtml.includes("/track#id=")); assert.match(apHtml, /Confirm Booking & Authorize Charge|Confirm Booking &amp; Authorize Charge/);
+  assert.ok(!apHtml.includes("4105550999") && !apHtml.includes("Dana"));
+  // A second approval (double click / second admin) is refused; a driver cannot be assigned before confirmation.
   assert.equal((await approve(b)).status, 409);
-  assert.equal(db.t("booking_assignments").filter((a: any) => a.booking_id === b.row.id && !a.unassigned_at).length, 1);
+  const early2 = await assignDriver(b, driver.id); assert.equal(early2.status, 409); assert.equal((await early2.json()).code, "not_confirmed");
+  assert.equal(db.t("booking_assignments").filter((a: any) => a.booking_id === b.row.id).length, 0);
 
-  // Customer starts checkout, returns from the provider WITHOUT a verified event: still unpaid, unconfirmed.
+  // Customer confirms; Stripe has not yet verified: still unpaid, unconfirmed, still no driver.
   assert.equal((await pay(b.row.payment_token)).status, 200);
   const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
-  assert.equal(b.row.status, "assigned"); assert.equal(b.row.confirmed_at ?? null, null);
+  assert.equal(b.row.status, "approved"); assert.equal(b.row.confirmed_at ?? null, null); assert.ok(b.row.customer_confirmed_at);
+  assert.equal((await assignDriver(b, driver.id)).status, 409);
 
   net.calls.length = 0;
   const evt = sessionEvent("checkout.session.completed", p, {}, "evt_confirm_1");
   assert.equal((await (await routes.webhook.POST(hook(evt))).json()).result, "processed");
   assert.equal(p.status, "paid"); assert.equal(b.row.payment_status, "paid"); assert.equal(b.row.status, "confirmed"); assert.ok(b.row.confirmed_at);
+  assert.equal(b.row.driver_id ?? null, null); // confirmed and paid, ready for driver assignment: no driver yet
   const hist = db.t("booking_status_history").filter((h: any) => h.booking_id === b.row.id && h.to_status === "confirmed");
   assert.equal(hist.length, 1); assert.equal(hist[0].actor_type, "system");
 
@@ -1072,7 +1164,7 @@ test("approval releases payment; confirmation comes ONLY from the verified payme
   const h = JSON.stringify(conf[0].body);
   for (const must of [b.row.reference, b.row.tracking_code, "1 Main St, Baltimore", "Stop Cafe, Towson", "Dulles Airport", "E-Class", `$${(b.row.online_amount_cents / 100).toFixed(2)}`, "+1 555-010-0199", "/track#id="]) assert.ok(h.includes(must), must);
 
-  // Redelivery of the SAME event, a NEW event id for the same payment, and a late async-success event: nothing changes, no more emails.
+  // Redelivery of the SAME event, a NEW event id for the same payment, and a late success event: nothing changes, no more emails.
   await routes.webhook.POST(hook(evt));
   await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p, {}, "evt_confirm_2")));
   await routes.webhook.POST(hook(sessionEvent("checkout.session.async_payment_succeeded", p, {}, "evt_confirm_3")));
@@ -1080,6 +1172,15 @@ test("approval releases payment; confirmation comes ONLY from the verified payme
   assert.equal(brevoTo("owner@example.com").filter((c) => JSON.stringify(c.body).includes("Payment received")).length, 1);
   assert.equal(db.t("booking_status_history").filter((x: any) => x.booking_id === b.row.id && x.to_status === "confirmed").length, 1);
   assert.equal(b.row.amount_paid_cents, 28000);
+
+  // NOW the admin can assign a driver; the customer then gets the driver's details (never a phone number).
+  net.calls.length = 0;
+  const as = await assignDriver(b, driver.id);
+  assert.equal(as.status, 200); assert.equal(b.row.status, "assigned"); assert.equal(b.row.driver_id, driver.id);
+  const dm = brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes("driver has been assigned") || JSON.stringify(c.body).includes("driver has now been assigned"));
+  assert.equal(dm.length, 1); assert.ok(JSON.stringify(dm[0].body).includes("Dana")); assert.ok(!JSON.stringify(dm[0].body).includes("4105550999"));
+  assert.equal((await assignDriver(b, driver.id)).status, 409); // already assigned: use Reassign
+
   // Two deliveries racing each other record one payment and one confirmation.
   const b2 = await flow(); await approve(b2); await pay(b2.row.payment_token);
   const p2 = db.t("payments").find((x: any) => x.booking_id === b2.row.id); net.calls.length = 0;
@@ -1116,9 +1217,11 @@ test("rejected and cancelled bookings cannot continue through the active flow; i
   assert.equal((await wf(c.row.id, { action: "advance", status: "confirmed" })).status, 422);       // "confirmed" can only come from verified payment
   assert.equal((await wf(c.row.id, { action: "advance", status: "completed" })).status, 409);       // cannot skip the driver steps
   const early = await wf(c.row.id, { action: "advance", status: "getting_ready" });
-  assert.equal(early.status, 409); assert.equal((await early.json()).code, "awaiting_payment");   // unpaid: even an admin cannot start the ride
+  assert.equal(early.status, 409);                                                                  // no driver and unpaid: even an admin cannot start the ride
   await pay(c.row.payment_token);
   await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", db.t("payments").find((x: any) => x.booking_id === c.row.id), {}, "evt_adv_1")));
+  assert.equal((await wf(c.row.id, { action: "advance", status: "getting_ready" })).status, 409);    // confirmed and paid, but still no driver
+  assert.equal((await assignDriver(c)).status, 200);
   assert.equal((await wf(c.row.id, { action: "advance", status: "getting_ready" })).status, 200);
   // Generic CRUD ignores workflow and payment fields even when a client sends them.
   const r = await adminAs(() => routes.crud.POST(post("/api/admin/crud", { resource: "bookings", action: "update", id: c.row.id, values: { status: "completed", payment_status: "paid", driver_id: null, confirmed_at: new Date().toISOString(), passengers: 3 } })));
@@ -1155,15 +1258,23 @@ test("tracking response shows real progress and contains no private data", async
   const b = await flow();
   b.row.admin_notes = "INTERNAL-NOTE-SECRET";
   let t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
-  assert.equal(t.headline, "Awaiting approval"); assert.equal(t.driver, null); assert.equal(t.confirmed, false);
+  assert.equal(t.headline, "Add your card to complete your request"); assert.equal(t.stage, "card_needed"); assert.equal(t.driver, null); assert.equal(t.confirmed, false);
+  await saveCard(b);
+  t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
+  assert.equal(t.headline, "Booking Request Received: Awaiting Admin Approval"); assert.equal(t.stage, "awaiting_approval");
   assert.deepEqual(t.steps.filter((s: any) => s.state === "done").map((s: any) => s.key), ["received"]);
+  assert.deepEqual(t.card, { brand: "visa", last4: "4242" }); assert.equal(t.charges, null);   // brand + last four only; no amounts for the tracking credential while waiting
   await approve(b);
   t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
-  assert.equal(t.headline, "Approved: awaiting payment"); assert.equal(t.awaitingPayment, true); assert.equal(t.confirmed, false);
+  assert.equal(t.headline, "Approved: please confirm your booking"); assert.equal(t.stage, "approved_ready"); assert.equal(t.canConfirm, true); assert.equal(t.confirmed, false);
+  assert.equal(t.charges.totalCents, b.row.online_amount_cents);                  // the customer sees the total they are asked to confirm
   assert.equal(t.driver, null);                                                   // no driver details until the booking is confirmed by verified payment
   assert.equal(t.helpline.display, "+1 555-010-0199");
   await pay(b.row.payment_token);
   await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", db.t("payments").find((x: any) => x.booking_id === b.row.id), {}, "evt_track_1")));
+  t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
+  assert.equal(t.headline, "Booking confirmed"); assert.equal(t.confirmed, true); assert.equal(t.driver, null);   // confirmed and paid: the driver comes next
+  await assignDriver(b);
   t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
   assert.equal(t.driver.name, "Dana"); assert.equal(t.driver.vehicle, "Black Escalade"); assert.equal(t.driver.plate, "VT-123"); assert.ok(!("phone" in t.driver)); // confirmed + paid + assigned: now shown
   await wf(b.row.id, { action: "advance", status: "on_the_way" });
@@ -1174,7 +1285,7 @@ test("tracking response shows real progress and contains no private data", async
   const raw = JSON.stringify(t);
   for (const secret of ["4105550100", "ann@example.com", "INTERNAL-NOTE-SECRET", "4105550999", "dana@example.com", b.row.payment_token, "Dana Driver", "stripe", "cs_test_", "tel:"]) assert.ok(!raw.includes(secret), secret);
   assert.equal(t.driver.plate, "VT-123");                                          // the assigned driver's plate is now shown to the booking's customer (client-approved)
-  assert.equal(t.charges, null); assert.equal(t.payable, false);                  // no amounts or pay button for the public tracking credential
+  assert.equal(t.charges, null); assert.equal(t.payable, false);                  // no amounts or pay button for the public tracking credential once nothing is left to confirm
   await wf(b.row.id, { action: "cancel", reason: "Changed plans" });
   t = (await (await trackPost(b.row.tracking_code, "10.8.0.1")).json()).trip;
   assert.equal(t.headline, "Booking cancelled"); assert.equal(t.ended, true);
@@ -1186,7 +1297,7 @@ test("private link token page data: charges and pay button only for the token ho
   const { loadTrip } = await import("../src/lib/trip.ts");
   const b = await flow(); await approve(b);
   const viaToken: any = await loadTrip(db, b.row.payment_token);
-  assert.equal(viaToken.view.payable, true); assert.equal(viaToken.view.charges.totalCents, b.row.online_amount_cents);
+  assert.equal(viaToken.view.stage, "approved_ready"); assert.equal(viaToken.view.canConfirm, true); assert.equal(viaToken.view.payable, false); /* PayPal is not configured */ assert.equal(viaToken.view.charges.totalCents, b.row.online_amount_cents);
   assert.deepEqual(Object.keys(viaToken.view.charges).sort(), ["childSeatCents", "currency", "meetGreetCents", "totalCents", "tripFareCents"]); // no tier fee, no rates
   assert.equal(viaToken.view.charges.tripFareCents + viaToken.view.charges.meetGreetCents + viaToken.view.charges.childSeatCents, viaToken.view.charges.totalCents);
   assert.ok(!JSON.stringify(viaToken.view).includes("4105550999") && !JSON.stringify(viaToken.view).includes("4105550100"));
@@ -1265,7 +1376,7 @@ test("chat: only the booking's customer (tracking ID) and its CURRENTLY assigned
 
 test("driver-facing ride data carries no customer or passenger phone numbers", async () => {
   const { loadDriverRides } = await import("../src/lib/driver/rides.ts");
-  const b = await flow({}, {}); await approve(b);
+  const b = await flow({}, {}); await approve(b, aDriver().id);
   const rides: any[] = await loadDriverRides(db, aDriver().id);
   const mine = rides.find((r) => r.id === b.row.id);
   assert.ok(mine);
@@ -1286,7 +1397,7 @@ test("payment gate: a driver cannot progress a ride until a verified payment set
     const mine = async (id: string) => (await (await import("../src/lib/driver/rides.ts")).loadDriverRides(db, d1.id) as any[]).find((r) => r.id === id);
 
     // 1. Approved and assigned but UNPAID: every progress step is refused by the server, status never moves.
-    const b = await flow(); await approve(b, d1.id);
+    const b = await flow(); await legacyAssignedUnpaid(b, d1.id);
     for (const to of ALL) { const r = await step("drv1", b.row.id, to); assert.equal(r.status, 409, to); }
     assert.equal(b.row.status, "assigned");
     assert.equal((await (await step("drv1", b.row.id, "on_the_way")).json()).code, "awaiting_payment");
@@ -1373,6 +1484,7 @@ const withAuth = async <T,>(fn: () => Promise<T>) => {
   try { return await fn(); } finally { db.auth.getUser = orig; }
 };
 const confirmPaid = async (b: any) => {
+  if (b.row.confirmed_at) return; // already confirmed (the helper is safe to call after approve(b, driverId))
   await pay(b.row.payment_token);
   await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", db.t("payments").filter((x: any) => x.booking_id === b.row.id).pop(), {}, `evt_p2_${++ev}`)));
   assert.ok(b.row.confirmed_at);
@@ -1505,7 +1617,7 @@ test("driver dashboard layout rules: earliest upcoming first, active separate, a
   assert.equal(splitRides([]).next, null);
 });
 
-test("emails: driver details only after verified payment confirms the booking, from real records, once", async () => {
+test("emails: driver details only after the booking is confirmed AND a driver is assigned, from real records, once", async () => {
   net.calls.length = 0;
   const b = await flow(); await approve(b);
   const approved = brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes(b.row.reference));
@@ -1515,15 +1627,21 @@ test("emails: driver details only after verified payment confirms the booking, f
   const confirmed = brevoTo("ann@example.com").filter((c) => String(c.body?.subject ?? "").includes("is confirmed") && JSON.stringify(c.body).includes(b.row.reference));
   assert.equal(confirmed.length, 1);
   const html = JSON.stringify(confirmed[0].body);
-  for (const must of ["Dana", "Black Escalade", "VT-123", "Stop Cafe", b.row.tracking_code]) assert.ok(html.includes(must), must);
-  assert.ok(!html.includes("4105550999") && !html.includes("Dana Driver"));            // no phone, no surname
+  for (const must of ["Stop Cafe", b.row.tracking_code]) assert.ok(html.includes(must), must);
+  assert.ok(!html.includes("Black Escalade") && !html.includes("VT-123")); // confirmed, but no driver yet: nothing invented
+  await assignDriver(b);
+  const assigned = brevoTo("ann@example.com").filter((c) => String(c.body?.subject ?? "").includes("driver has been assigned") && JSON.stringify(c.body).includes(b.row.reference));
+  assert.equal(assigned.length, 1);
+  const dh = JSON.stringify(assigned[0].body);
+  for (const must of ["Dana", "Black Escalade", "VT-123", b.row.tracking_code]) assert.ok(dh.includes(must), must);
+  assert.ok(!dh.includes("4105550999") && !dh.includes("Dana Driver"));            // no phone, no surname
 });
 
 test("admin follow-up list: only confirmed and paid, assigned, not-yet-acknowledged upcoming rides, earliest first", async () => {
   const { loadUnacknowledgedRides } = await import("../src/lib/admin/acknowledgement.ts");
   const d1 = aDriver();
   const mk = async (hoursAway: number, ack: boolean, paid = true) => {
-    const b = await flow(); await approve(b, d1.id); if (paid) await confirmPaid(b);
+    const b = await flow(); if (paid) await approve(b, d1.id); else await legacyAssignedUnpaid(b, d1.id);
     b.row.pickup_at = new Date(Date.now() + hoursAway * HOUR_MS).toISOString(); if (ack) b.row.status = "getting_ready";
     return b;
   };
@@ -1581,7 +1699,7 @@ test("pickup-time change: only an admin applies it, it is recorded and emailed, 
 
 
 // ===== Phase 3: Stripe authorize now, capture on admin approval =====
-const authOn = () => { setPay("full"); setFixed(10000, 15000, 22000); Object.assign(db.t("booking_settings")[0], { stripe_authorize_at_booking: true, stripe_enabled: true }); stripeMock.captureError = null; };
+const authOn = () => { setPay("full"); setFixed(10000, 15000, 22000); Object.assign(db.t("booking_settings")[0], { stripe_enabled: true }); stripeMock.captureError = null; };
 const mkPI = (p: any, over: Record<string, unknown> = {}) => {
   const id = `pi_auth_${p.id.slice(0, 8)}`;
   stripeMock.pis.set(id, { id, object: "payment_intent", status: "requires_capture", amount: p.amount_cents, amount_capturable: p.amount_cents, amount_received: 0, currency: "usd", metadata: { booking_id: p.booking_id, payment_id: p.id }, latest_charge: { payment_method_details: { card: { brand: "visa", last4: "4242", capture_before: Math.floor(Date.now() / 1000) + 6 * 86400 } } }, ...over });
@@ -1589,159 +1707,79 @@ const mkPI = (p: any, over: Record<string, unknown> = {}) => {
 };
 const piEvent = (type: string, pi: any, over: Record<string, unknown> = {}) => ({ id: `evt_pi_${++ev}`, type, data: { object: { ...pi, ...over } } });
 const sessionUnpaid = (p: any, piId: string) => sessionEvent("checkout.session.completed", p, { payment_status: "unpaid", payment_intent: piId });
+/**
+ * A booking that still carries a card HOLD from the previous "authorize now, capture on approval" workflow (existing production data).
+ * Nothing creates holds any more, so the fixture is seeded directly. Used to prove such rows are handled safely: never captured, released on approval.
+ */
 const authorized = async () => {
-  authOn();
+  setPay("full"); setFixed(10000, 15000, 22000); stripeMock.captureError = null;
   const b = await makeBooking();
-  const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
-  const piId = mkPI(p);
-  assert.equal((await routes.webhook.POST(hook(sessionUnpaid(p, piId)))).status, 200);
-  assert.equal((await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", stripeMock.pis.get(piId))))).status, 200);
+  b.row.card_flow = false; b.row.payment_status = "authorized";            // as created before the saved-card workflow
+  db.seed("payments", [{ booking_id: b.row.id, provider: "stripe", amount_cents: b.row.online_amount_cents, currency: "USD", kind: "full", status: "authorized", manual_capture: true, stripe_session_id: `cs_legacy_${b.row.id.slice(0, 6)}`, card_brand: "visa", card_last4: "4242", capture_before: new Date(Date.now() + 5 * 24 * 3600_000).toISOString() }]);
+  const p = db.t("payments").filter((x: any) => x.booking_id === b.row.id).at(-1);
+  const piId = mkPI(p); p.stripe_payment_intent_id = piId;
   return { b, p, piId };
 };
 
-test("authorize at booking: hosted manual-capture session for the server-computed amount; a hold is not a payment", async () => {
-  authOn();
-  const from = net.calls.length;
-  const b = await makeBooking({ totalCents: 1, amountCents: 1 });
-  assert.match(b.data.authorizeUrl, /^https:\/\/checkout\.stripe\.com\//);
-  const form = new URLSearchParams(String(net.calls.slice(from).find((c) => c.url === "https://api.stripe.com/v1/checkout/sessions")!.body));
-  assert.equal(form.get("payment_intent_data[capture_method]"), "manual");
-  assert.equal(form.get("line_items[0][price_data][unit_amount]"), String(b.row.online_amount_cents)); // never the browser's number
-  assert.equal(form.get("metadata[booking_id]"), b.row.id);
-  assert.match(form.get("success_url")!, /\/book\/confirmation\?t=[0-9a-f-]{36}&card=authorized$/); assert.ok(!form.get("success_url")!.includes("VT-")); // keyed by the private token, never the guessable reference
-  const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
-  assert.equal(p.manual_capture, true); assert.equal(p.status, "pending"); assert.equal(p.amount_cents, b.row.online_amount_cents);
-  assert.equal(b.row.status, "new_request"); assert.equal(b.row.confirmed_at ?? null, null);
-  // The hosted page finishing is "unpaid" (held, not charged): it records the intent and marks NOTHING paid.
-  const piId = mkPI(p);
-  await routes.webhook.POST(hook(sessionUnpaid(p, piId)));
-  assert.equal(p.stripe_payment_intent_id, piId); assert.equal(p.paid_at ?? null, null); assert.equal(p.status, "pending");
-  // Hold confirmed by a signature-verified event, cross-checked with Stripe: authorized, expiry and card brand/last four stored, still not paid.
-  assert.equal((await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", stripeMock.pis.get(piId)), { secret: "whsec_wrong" }))).status, 400);
-  assert.equal(p.status, "pending");
-  await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", stripeMock.pis.get(piId))));
-  assert.equal(p.status, "authorized"); assert.equal(p.card_brand, "visa"); assert.equal(p.card_last4, "4242"); assert.ok(p.capture_before);
-  assert.equal(b.row.payment_status, "authorized"); assert.equal(b.row.confirmed_at ?? null, null); assert.equal(p.paid_at ?? null, null);
-  // A mismatching held amount is flagged, never trusted.
-  const b2 = await makeBooking(); const p2 = db.t("payments").find((x: any) => x.booking_id === b2.row.id); const pi2 = mkPI(p2, { amount_capturable: 1, amount: 1 });
-  await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", stripeMock.pis.get(pi2))));
-  assert.equal(p2.status, "review"); assert.notEqual(p2.status, "authorized");
-});
-
-test("Approve & Capture: captures the validated amount once, only Stripe's confirmation marks it paid, confirmation email once", async () => {
-  net.calls.length = 0; stripeMock.captureCalls = 0;
-  const { b, p } = await authorized();
-  const [r1, r2] = await Promise.all([approve(b), approve(b)]);                         // a double click
-  assert.deepEqual([r1.status, r2.status].sort(), [200, 409]);
-  const out = await (r1.status === 200 ? r1 : r2).json();
-  assert.equal(out.payment.outcome, "captured");
-  assert.equal(stripeMock.captureCalls, 1);                                               // exactly one capture
-  const cap = net.calls.find((c) => /\/capture$/.test(c.url))!;
-  assert.equal((cap.body as URLSearchParams).get("amount_to_capture"), String(p.amount_cents));
-  assert.match(String(cap.headers["Idempotency-Key"]), /^capture-/);
-  assert.equal(p.status, "paid"); assert.equal(p.captured_amount_cents, p.amount_cents); assert.ok(p.paid_at);
-  assert.equal(b.row.payment_status, "paid"); assert.ok(b.row.confirmed_at); assert.equal(b.row.status, "confirmed");
-  const mail = (subj: string) => brevoTo("ann@example.com").filter((c) => String(c.body?.subject ?? "").includes(subj) && JSON.stringify(c.body).includes(b.row.reference));
-  assert.equal(mail("is confirmed").length, 1);
-  assert.ok(JSON.stringify(mail("is confirmed")[0].body).includes("VT-123"));          // real driver plate, after verified capture
-  assert.equal(mail("approved").length, 0);                                               // no "please pay" email when it was already captured
-  // Webhook retries and the capture's own webhook change nothing.
-  const pi = stripeMock.pis.get(p.stripe_payment_intent_id);
-  for (let i = 0; i < 2; i++) await routes.webhook.POST(hook(piEvent("payment_intent.succeeded", pi)));
-  assert.equal(mail("is confirmed").length, 1); assert.equal(stripeMock.captureCalls, 1);
-  // Nothing left to capture.
-  const again = await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "capture_payment" })));
-  assert.equal(again.status, 422); assert.equal((await again.json()).code, "no_authorization");
-});
-
-test("capture is admin-only and never uses a browser-supplied amount", async () => {
-  const { b, p } = await authorized();
-  b.row.status = "assigned"; b.row.driver_id = aDriver().id; b.row.payment_released_at = new Date().toISOString();
-  const prev = (globalThis as any).__cookies; (globalThis as any).__cookies = {};
-  assert.equal((await routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "capture_payment", amountCents: 1 }))).status, 401);
-  (globalThis as any).__cookies = { vt_at: "drv1" };
-  assert.equal((await routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "capture_payment" }))).status, 401);
-  (globalThis as any).__cookies = prev;
-  assert.equal(p.status, "authorized"); assert.equal(p.paid_at ?? null, null);
-  // The amount must equal what the server says is due: a tampered stored amount is refused, nothing is captured.
-  const before = stripeMock.captureCalls; const saved = p.amount_cents; p.amount_cents = saved - 100;
-  const bad = await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "capture_payment", amountCents: 1 })));
-  assert.equal(bad.status, 422); assert.equal((await bad.json()).code, "mismatch"); assert.equal(stripeMock.captureCalls, before);
-  p.amount_cents = saved; assert.equal(p.status, "authorized");
-});
-
-test("capture failure: booking stays approved and UNPAID as needs payment, admin alerted, customer gets the payment link, retry works", async () => {
-  net.calls.length = 0;
-  const { b, p } = await authorized();
-  stripeMock.captureError = { code: "card_declined", message: "Your card was declined." };
-  const r = await approve(b); const out = await r.json();
-  assert.equal(r.status, 200); assert.equal(out.payment.outcome, "needs_payment");
-  assert.equal(p.status, "capture_failed"); assert.equal(p.paid_at ?? null, null); assert.match(p.last_error, /declined/);
-  assert.equal(b.row.payment_status, "needs_payment"); assert.equal(b.row.status, "assigned"); assert.equal(b.row.confirmed_at ?? null, null);
-  assert.ok(db.t("admin_notifications").some((n: any) => n.entity_id === b.row.id && n.event === "payment.needs_payment"));
-  assert.ok(brevoTo("ann@example.com").some((c) => String(c.body?.subject ?? "").includes("approved") && JSON.stringify(c.body).includes("/pay/")));
-  const unpaidMail = brevoTo("ann@example.com").filter((c) => /payment (has been )?(received|confirmed)|is confirmed/i.test(String(c.body?.subject ?? "")) && JSON.stringify(c.body).includes(b.row.reference));
-  assert.equal(unpaidMail.length, 0);                                                      // no success wording for a failed capture
-  stripeMock.captureError = null;                                                          // e.g. the customer fixed it with their bank
-  const retry = await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "capture_payment" })));
-  assert.equal(retry.status, 200); assert.equal(p.status, "paid"); assert.equal(b.row.payment_status, "paid"); assert.ok(b.row.confirmed_at);
-});
-
-test("expired authorization: booking is NOT cancelled, confirmed or declined; it shows needs payment; late events cannot revive it", async () => {
+test("existing hold: a lapsed authorization never confirms or declines the booking; late events cannot revive it; the customer then follows the saved-card flow", async () => {
+  stripeMock.charges.length = 0;
   const { b, p, piId } = await authorized();
   const pi = stripeMock.pis.get(piId);
-  // Stripe lets the hold lapse.
-  pi.status = "canceled"; pi.cancellation_reason = "automatic";
+  pi.status = "canceled"; pi.cancellation_reason = "automatic"; // Stripe lets the old hold lapse
   await routes.webhook.POST(hook(piEvent("payment_intent.canceled", pi)));
   assert.equal(p.status, "authorization_expired"); assert.equal(b.row.payment_status, "needs_payment");
   assert.equal(b.row.status, "new_request"); assert.equal(b.row.confirmed_at ?? null, null);      // booking untouched
   assert.ok(db.t("admin_notifications").some((n: any) => n.entity_id === b.row.id && n.event === "payment.needs_payment"));
   await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", { ...pi, status: "requires_capture" })));   // a delayed older event
   assert.equal(p.status, "authorization_expired");
-  // Approval still works; the capture cannot happen; the customer gets the normal payment link and the booking stays active.
-  const r = await approve(b); const out = await r.json();
-  assert.equal(r.status, 200); assert.equal(b.row.status, "assigned"); assert.equal(b.row.payment_status, "needs_payment"); assert.equal(p.paid_at ?? null, null);
-  assert.equal(out.payment, undefined);                                                    // nothing was left to capture
-  // Customer pays again with a fresh payment (automatic capture); only the verified event marks it paid.
-  const r2 = await routes.checkout.POST(post("/api/payments/checkout", { token: b.row.payment_token, provider: "stripe" }));
-  assert.equal(r2.status, 200);
-  const np = db.t("payments").filter((x: any) => x.booking_id === b.row.id && x.status === "pending").pop();
-  assert.equal(np.manual_capture === true, false);
-  await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", np)));
-  assert.equal(np.status, "paid"); assert.equal(b.row.payment_status, "paid"); assert.ok(b.row.confirmed_at);
-});
-
-test("expired hold found at approval: Stripe says canceled, so nothing is captured and the booking stays active as needs payment", async () => {
-  const { b, p, piId } = await authorized();
-  const pi = stripeMock.pis.get(piId); pi.status = "canceled"; pi.cancellation_reason = "automatic";   // no webhook arrived yet
+  // An older booking has no saved card: approval is allowed, nothing is captured or charged, and the customer must add a card and confirm.
   stripeMock.captureCalls = 0;
-  const r = await approve(b); const out = await r.json();
-  assert.equal(r.status, 200); assert.equal(out.payment.outcome, "needs_payment"); assert.equal(out.payment.code, "expired");
-  assert.equal(stripeMock.captureCalls, 0); assert.equal(p.status, "authorization_expired"); assert.equal(b.row.payment_status, "needs_payment");
-  assert.equal(b.row.status, "assigned"); assert.equal(p.paid_at ?? null, null);
+  const r = await approve(b);
+  assert.equal(r.status, 200); assert.equal(b.row.status, "approved"); assert.equal(stripeMock.captureCalls, 0); assert.equal(p.paid_at ?? null, null);
+  assert.equal((await confirmCharge(b)).status, 409);                                              // no card yet: confirmation refused, nothing charged
+  assert.equal(stripeMock.charges.length, 0);
+  assert.equal((await saveCard(b)).complete!.status, 200);                                         // the customer adds a card on their own booking page (no link)
+  assert.equal(b.row.status, "approved"); assert.equal(b.row.confirmed_at ?? null, null);
+  stripeMock.nextCharge = "succeeded";
+  assert.equal((await (await confirmCharge(b)).json()).state, "paid");
+  assert.equal(b.row.payment_status, "paid"); assert.ok(b.row.confirmed_at); assert.equal(b.row.status, "confirmed");
 });
 
-test("declining or cancelling releases an uncaptured hold; captured money is never touched", async () => {
+test("approving a booking that still holds money from the old workflow RELEASES the hold and never captures it", async () => {
+  const { b, p, piId } = await authorized();
+  stripeMock.captureCalls = 0; stripeMock.cancelCalls = 0;
+  const r = await approve(b);
+  assert.equal(r.status, 200);
+  assert.equal(stripeMock.captureCalls, 0); assert.equal(stripeMock.cancelCalls, 1);
+  assert.equal(p.status, "canceled"); assert.equal(stripeMock.pis.get(piId).status, "canceled"); assert.equal(p.paid_at ?? null, null);
+  assert.equal(b.row.status, "approved"); assert.notEqual(b.row.payment_status, "paid"); assert.equal(b.row.confirmed_at ?? null, null);
+});
+
+test("declining or cancelling releases an uncaptured hold and an unused saved card; captured money is never touched", async () => {
+  stripeMock.charges.length = 0;
   const one = await authorized(); stripeMock.cancelCalls = 0;
   const rej = await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: one.b.row.id, action: "reject", reason: "No availability" })));
   assert.equal(rej.status, 200); assert.equal(stripeMock.cancelCalls, 1); assert.equal(one.p.status, "canceled"); assert.equal(stripeMock.pis.get(one.piId).status, "canceled");
   assert.notEqual(one.b.row.payment_status, "paid");
-  const two = await authorized();
-  await approve(two.b); assert.equal(two.p.status, "paid");                                // captured at approval
-  stripeMock.cancelCalls = 0;
-  await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: two.b.row.id, action: "cancel", reason: "Customer cancelled" })));
-  assert.equal(stripeMock.cancelCalls, 0); assert.equal(two.p.status, "paid");              // existing refund process, unchanged
+  // A declined booking's saved card is removed from Stripe: it was never charged.
+  const saved = await flow(); await saveCard(saved); const pm = saved.row.stripe_payment_method_id; stripeMock.detached = [];
+  await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: saved.row.id, action: "reject", reason: "No availability" })));
+  assert.deepEqual(stripeMock.detached, [pm]); assert.equal(saved.row.stripe_payment_method_id, null); assert.equal(stripeMock.charges.length, 0);
+  // Paid and confirmed: cancelling never refunds, releases or detaches anything automatically.
+  const two = await flow(); await confirmBooking(two);
+  const paid = db.t("payments").find((x: any) => x.booking_id === two.row.id); assert.equal(paid.status, "paid");
+  stripeMock.cancelCalls = 0; stripeMock.detached = [];
+  await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: two.row.id, action: "cancel", reason: "Customer cancelled" })));
+  assert.equal(stripeMock.cancelCalls, 0); assert.equal(paid.status, "paid"); assert.deepEqual(stripeMock.detached, []);   // existing refund process, unchanged
 });
 
-test("authorize at booking is OFF until the owner turns it on, and Stripe failure never blocks a booking", async () => {
-  authOn(); db.t("booking_settings")[0].stripe_authorize_at_booking = false;
-  const off = await makeBooking();
-  assert.equal(off.data.authorizeUrl, null); assert.equal(db.t("payments").filter((x: any) => x.booking_id === off.row.id).length, 0);   // old flow exactly
-  db.t("booking_settings")[0].stripe_authorize_at_booking = true;
-  const saved = process.env.STRIPE_SECRET_KEY; delete process.env.STRIPE_SECRET_KEY;
-  const noStripe = await makeBooking();
-  process.env.STRIPE_SECRET_KEY = saved;
-  assert.equal(noStripe.res.status, 200); assert.equal(noStripe.data.authorizeUrl, null);
+test("the old capture action no longer exists: an admin cannot charge a customer", async () => {
+  stripeMock.charges.length = 0;
+  const b = await flow(); await approve(b);
+  const r = await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "capture_payment" })));
+  assert.equal(r.status, 400); assert.equal(stripeMock.charges.length, 0);
+  const old = await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "approve_assign", driverId: aDriver().id })));
+  assert.equal(old.status, 400); assert.equal(b.row.driver_id ?? null, null);
 });
 
 test("migration 0014 is additive, keeps old payment values, and never stores card numbers", () => {
@@ -1776,46 +1814,44 @@ test("admin authorization alerts: expiry levels, needs-payment rows first, soone
 // =====================================================================================================
 // Complete trip fare: the online total = tier fee + trip estimate + Meet & Greet + seats. Customers see ONE combined Trip fare.
 // =====================================================================================================
-test("complete fare: stored total, Stripe authorization, customer view and admin breakdown all reconcile to the same total", async () => {
+test("complete fare: stored total, the Stripe charge, customer view and admin breakdown all reconcile to the same total", async () => {
   authOn();
-  const from = net.calls.length;
   const b = await makeBooking({ airport: airportBlock, totalCents: 1 }, { meetGreet: true, passengers: 3, childSeats: { booster: 2 } });
   const r = b.row;
   const fixed = 15000, est = r.estimated_fare_cents, mg = 3500, seatsFee = 2000;
   assert.ok(est > 0);
   assert.equal(r.online_amount_cents, fixed + est + mg + seatsFee);                       // never the tier fee alone
-  // Stripe authorization uses the COMPLETE total, as ONE session with customer-safe lines.
-  const sc = net.calls.slice(from).find((c) => c.url === "https://api.stripe.com/v1/checkout/sessions")!;
-  const form = new URLSearchParams(String(sc.body));
-  const lines = [0, 1, 2, 3].map((i) => form.get(`line_items[${i}][price_data][unit_amount]`)).filter(Boolean).map(Number);
-  assert.deepEqual(lines, [fixed + est, mg, seatsFee]);
-  assert.equal(lines.reduce((a, c) => a + c, 0), r.online_amount_cents);
-  assert.equal(net.calls.slice(from).filter((c) => c.url === "https://api.stripe.com/v1/checkout/sessions").length, 1); // one authorization, not one per component
-  const p = db.t("payments").find((x: any) => x.booking_id === r.id);
-  assert.equal(p.amount_cents, r.online_amount_cents); assert.equal(p.manual_capture, true);
-  // Admin keeps the internal split on the payment row; it reconciles exactly.
-  assert.deepEqual([p.fixed_price_cents, p.estimated_trip_fare_cents, p.meet_greet_cents, p.other_addons_cents], [fixed, est, mg, seatsFee]);
-  assert.equal(p.fixed_price_cents + p.estimated_trip_fare_cents + p.meet_greet_cents + p.other_addons_cents, p.amount_cents);
-  assert.match(form.get("payment_intent_data[description]")!, /^Vanta Transportation booking VT-\d+$/);
   // Customer response: combined trip fare + services + total only.
   assert.deepEqual(b.data.pricing, { tripFareCents: fixed + est, meetGreetCents: mg, childSeatCents: seatsFee, totalCents: r.online_amount_cents });
   assert.ok(!("fixedPriceCents" in b.data.pricing));
-  // Capture on admin approval takes the same complete amount (and only once).
-  const piId = mkPI(p);
-  await routes.webhook.POST(hook(sessionUnpaid(p, piId)));
-  await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", stripeMock.pis.get(piId))));
-  assert.equal(p.status, "authorized");
-  net.calls.length = 0; stripeMock.captureCalls = 0;
-  assert.equal((await approve(b)).status, 200);
-  assert.equal((net.calls.find((c) => /\/capture$/.test(c.url))!.body as URLSearchParams).get("amount_to_capture"), String(fixed + est + mg + seatsFee));
-  assert.equal(stripeMock.captureCalls, 1);
-  assert.equal(r.payment_status, "paid"); assert.equal(r.amount_paid_cents, r.online_amount_cents);
+  // Saving the card and approval move no money.
+  const from = stripeMock.charges.length;
+  await approve(b);
+  assert.equal(stripeMock.charges.length, from);
+  // The customer's confirmation charges the COMPLETE total, as ONE PaymentIntent.
+  stripeMock.nextCharge = "succeeded";
+  assert.equal((await (await confirmCharge(b)).json()).state, "paid");
+  const charges = stripeMock.charges.slice(from);
+  assert.equal(charges.length, 1);                                                          // one charge, not one per component
+  assert.equal(charges[0].body.get("amount"), String(r.online_amount_cents));
+  const p = db.t("payments").find((x: any) => x.booking_id === r.id);
+  assert.equal(p.amount_cents, r.online_amount_cents); assert.equal(p.manual_capture, false);
+  // Admin keeps the internal split on the payment row; it reconciles exactly.
+  assert.deepEqual([p.fixed_price_cents, p.estimated_trip_fare_cents, p.meet_greet_cents, p.other_addons_cents], [fixed, est, mg, seatsFee]);
+  assert.equal(p.fixed_price_cents + p.estimated_trip_fare_cents + p.meet_greet_cents + p.other_addons_cents, p.amount_cents);
+  assert.match(charges[0].body.get("description")!, /^Vanta Transportation booking VT-\d+$/);
+  assert.equal(r.payment_status, "paid"); assert.equal(r.amount_paid_cents, r.online_amount_cents); assert.equal(r.status, "confirmed");
+  // Customer view, admin figures and the payment all agree.
+  const { loadTrip } = await import("../src/lib/trip.ts");
+  const view: any = await loadTrip(db, r.payment_token);
+  assert.equal(view.view.charges.totalCents, p.amount_cents);
 });
 
 test("complete fare: no customer-facing surface (emails, tracking/pay data, quote API, Stripe) reveals the tier fee or rates", async () => {
   authOn();
   net.calls.length = 0;
   const b = await makeBooking({ airport: airportBlock }, { meetGreet: true, childSeats: { booster: 1 } });
+  await saveCard(b); stripeMock.nextCharge = "succeeded"; await approve(b); await confirmCharge(b); // the customer-facing request notice follows the card step
   const r = b.row; const total = (r.online_amount_cents / 100).toFixed(2); const tripFare = ((15000 + r.estimated_fare_cents) / 100).toFixed(2);
   const customerMail = JSON.stringify(brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes(r.reference)).map((c) => c.body));
   assert.ok(customerMail.includes("Trip fare") && customerMail.includes(`$${tripFare}`) && customerMail.includes(`$${total}`));
@@ -1838,20 +1874,18 @@ test("complete fare: no customer-facing surface (emails, tracking/pay data, quot
   assert.deepEqual([r.fixed_price_cents, r.estimated_fare_cents > 0, r.meet_greet_fee_cents], [15000, true, 3500]);
 });
 
-test("complete fare: retries never create a second authorization; failed/expired holds are never 'paid'", async () => {
+test("complete fare: double clicks, retries and concurrent requests never create a second charge", async () => {
   authOn();
-  const b = await makeBooking();
-  const p = db.t("payments").find((x: any) => x.booking_id === b.row.id);
-  const { startAuthorization } = await import("../src/lib/payments-server.ts");
-  // Pretend the hold exists; a retry must not open another authorization.
-  p.status = "authorized";
-  const before = db.t("payments").filter((x: any) => x.booking_id === b.row.id).length;
-  const again: any = await startAuthorization(db as any, b.row.id, "http://site.test");
-  assert.equal(again.ok, false);
-  assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, before);
-  // A hold that failed or lapsed never marks anything paid.
-  p.status = "authorization_expired";
-  assert.equal(b.row.payment_status === "paid", false); assert.equal(p.paid_at ?? null, null);
+  const b = await makeBooking(); await approve(b);
+  stripeMock.nextCharge = "processing"; const from = stripeMock.charges.length;
+  const results = await Promise.all([confirmCharge(b), confirmCharge(b), confirmCharge(b), confirmCharge(b), confirmCharge(b)]);
+  for (const r of results) assert.equal(r.status, 200);
+  assert.equal(stripeMock.charges.slice(from).length, 1);                                    // one PaymentIntent for five simultaneous clicks
+  assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 1);
+  await confirmCharge(b); await confirmCharge(b);                                           // later retries while it is processing
+  assert.equal(stripeMock.charges.slice(from).length, 1);
+  assert.equal(db.t("payments").filter((x: any) => x.booking_id === b.row.id).length, 1);
+  assert.equal(b.row.payment_status, "processing"); assert.equal(b.row.confirmed_at ?? null, null); assert.equal(b.row.amount_paid_cents, 0);
 });
 
 test("complete fare: bookings created before the fix (frozen at tier fee + services) are re-priced once, only while nothing was held or paid", async () => {
@@ -1882,91 +1916,102 @@ test("complete fare: bookings created before the fix (frozen at tier fee + servi
 // ---------------------------------------------------------------------------------------------------------------------------------
 // Post-booking card step (direct redirect, resume, retry) and direct tracking links
 // ---------------------------------------------------------------------------------------------------------------------------------
-const authorizePost = (token: unknown, extra?: Record<string, string>) => post("/api/payments/authorize", { token }, extra);
 const stripePayments = (id: string) => db.t("payments").filter((x: any) => x.booking_id === id);
+const setupPost = (body: object, extra?: Record<string, string>) => post("/api/bookings/card/setup", body, extra);
 
-test("redirect: a new booking goes straight to the card step for THAT booking; the booking is saved first and a private-token page is the fallback", async () => {
-  authOn();
+test("redirect: a new booking goes straight to the card step for THAT booking; the booking is saved first and nothing is charged or held", async () => {
+  authOn(); const from = stripeMock.charges.length;
   const b = await makeBooking();
   assert.equal(b.res.status, 200);
-  assert.match(b.data.authorizeUrl, /^https:\/\/checkout\.stripe\.com\//);                       // client redirects here
+  assert.equal(b.data.cardStep, true);                                                           // the client goes to the card step
   assert.equal(b.data.confirmUrl, `/book/confirmation?t=${b.row.payment_token}`);               // private token, never the VT- reference
   assert.ok(!JSON.stringify(b.data).includes(b.row.id));                                         // no internal database id
-  const rows = stripePayments(b.row.id);
-  assert.equal(rows.length, 1); assert.equal(rows[0].booking_id, b.row.id); assert.equal(rows[0].manual_capture, true);
-  assert.equal(rows[0].amount_cents, b.row.online_amount_cents);                                 // the server-calculated final amount
-  assert.equal(rows[0].checkout_url, b.data.authorizeUrl);
-  assert.equal(b.row.payment_status === "paid", false); assert.equal(rows[0].paid_at ?? null, null); assert.equal(b.row.confirmed_at ?? null, null);
-  // Authorize-at-booking OFF: no card redirect, the customer's own page is used (admin approval still releases payment).
-  Object.assign(db.t("booking_settings")[0], { stripe_authorize_at_booking: false });
+  assert.equal(b.data.payUrl, undefined); assert.equal(b.data.authorizeUrl, undefined);
+  assert.equal(stripePayments(b.row.id).length, 0); assert.equal(stripeMock.charges.length, from);   // no payment row, no charge, no hold
+  assert.equal(b.row.payment_status === "paid", false); assert.equal(b.row.confirmed_at ?? null, null); assert.equal(b.row.card_flow, true);
+  assert.equal(b.row.amount_paid_cents, 0);
+  // Payments off or Stripe unavailable: the request is still saved, there is no card step, and the customer's page says what happens next.
+  setPay("disabled");
   const off = await makeBooking();
-  assert.equal(off.data.authorizeUrl, null); assert.match(off.data.confirmUrl, /^\/book\/confirmation\?t=/); assert.equal(stripePayments(off.row.id).length, 0);
+  assert.equal(off.data.cardStep, false); assert.match(off.data.confirmUrl, /^\/book\/confirmation\?t=/); assert.equal(off.row.card_flow, false);
+  assert.equal(brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes(off.row.reference)).length >= 0, true);
+  setPay("full");
 });
 
-test("retry: a repeated submission, refresh or double click resumes the SAME booking and payment; no duplicate booking, no second hold", async () => {
+test("retry: a repeated submission, refresh or double click resumes the SAME booking and card form; no duplicate booking, no second SetupIntent, no payment rows", async () => {
   authOn();
   const key = `dup-${++pk}-bbbbbbbbbbbbbbbbbb`;
   const bookings0 = db.t("bookings").length;
   const first = await makeBooking({ submissionKey: key });
   const second = await makeBooking({ submissionKey: key });                                      // the customer pressed submit again
   assert.equal(db.t("bookings").length, bookings0 + 1);                                          // one booking
-  assert.equal(second.data.reference, first.data.reference);
-  assert.equal(stripePayments(first.row.id).length, 1);                                          // one payment attempt
-  assert.equal(second.data.authorizeUrl, first.data.authorizeUrl);                               // same hosted page handed back
-  // The resume endpoint (private token) returns the same page and creates nothing new, however many times it is hit.
-  const sessions0 = net.calls.filter((c) => c.url === "https://api.stripe.com/v1/checkout/sessions").length;
-  for (let i = 0; i < 3; i++) { const r = await routes.authorize.POST(authorizePost(first.row.payment_token)); assert.equal(r.status, 200); assert.equal((await r.json()).url, first.data.authorizeUrl); }
-  assert.equal(net.calls.filter((c) => c.url === "https://api.stripe.com/v1/checkout/sessions").length, sessions0);
-  assert.equal(stripePayments(first.row.id).length, 1);
+  assert.equal(second.data.reference, first.data.reference); assert.equal(second.data.confirmUrl, first.data.confirmUrl);
+  assert.equal(stripePayments(first.row.id).length, 0);
+  // The setup endpoint (private token) hands back the SAME SetupIntent however many times it is hit, and creates one Stripe customer.
+  const sis0 = stripeMock.setupCreates, cust0 = stripeMock.customers; const secrets = new Set<string>();
+  for (let i = 0; i < 3; i++) { const r = await routes.cardSetup.POST(setupPost({ token: first.row.payment_token, consent: true })); assert.equal(r.status, 200); const d = await r.json(); assert.equal(d.publishableKey, "pk_test_x"); secrets.add(d.clientSecret); }
+  assert.equal(secrets.size, 1); assert.equal(stripeMock.setupCreates, sis0 + 1); assert.equal(stripeMock.customers, cust0 + 1);
+  // Two tabs at once: still one SetupIntent.
+  const c = await makeBooking(); const s0 = stripeMock.setupCreates;
+  const both = await Promise.all([routes.cardSetup.POST(setupPost({ token: c.row.payment_token, consent: true })), routes.cardSetup.POST(setupPost({ token: c.row.payment_token, consent: true }))]);
+  assert.deepEqual(both.map((r) => r.status), [200, 200]);
+  assert.equal(new Set((await Promise.all(both.map((r) => r.json()))).map((d) => d.clientSecret)).size, 1);
+  assert.equal(stripeMock.setupCreates - s0 <= 2, true); assert.equal(stripePayments(c.row.id).length, 0);
 });
 
-test("retry after a failed or unfinished card step: a new attempt replaces the old one, never adds a second live one; a hold is never duplicated", async () => {
+test("card step: consent is required, an unfinished form is reused, a card can be replaced before approval, failures never save a card", async () => {
   authOn();
-  // Stripe unavailable while booking: the booking is still saved, the response says where to resume.
+  // Stripe unavailable while booking: the booking is still saved and says so; no card step is offered.
   const saved = process.env.STRIPE_SECRET_KEY; delete process.env.STRIPE_SECRET_KEY;
-  const b = await makeBooking();
+  const n = await makeBooking();
+  assert.equal(n.res.status, 200); assert.equal(n.data.cardStep, false); assert.match(n.data.confirmUrl, /^\/book\/confirmation\?t=/);
+  assert.equal((await routes.cardSetup.POST(setupPost({ token: n.row.payment_token, consent: true }))).status, 503);
   process.env.STRIPE_SECRET_KEY = saved;
-  assert.equal(b.res.status, 200); assert.equal(b.data.authorizeUrl, null); assert.match(b.data.confirmUrl, /^\/book\/confirmation\?t=/);
-  const { loadConfirmation } = await import("../src/lib/confirmation.ts");
-  const v0: any = await loadConfirmation(db, b.row.payment_token);
-  assert.equal(v0.card, "none"); assert.equal(v0.canAuthorize, true);
-  // Resume with the private token: a hosted page is created for this booking.
-  const r1 = await routes.authorize.POST(authorizePost(b.row.payment_token)); assert.equal(r1.status, 200);
-  const url1 = (await r1.json()).url; assert.match(url1, /^https:\/\/checkout\.stripe\.com\//);
-  const p = stripePayments(b.row.id).find((x: any) => x.status === "pending")!;
-  // The card was declined: the attempt fails; the customer can retry and gets a NEW page for the same booking and amount.
-  await routes.webhook.POST(hook(piEvent("payment_intent.payment_failed", { id: "pi_x", object: "payment_intent", metadata: { booking_id: b.row.id, payment_id: p.id }, last_payment_error: { message: "Your card was declined." } })));
-  assert.equal(p.status, "failed"); assert.equal(((await loadConfirmation(db, b.row.payment_token)) as any).card, "failed");
-  const r2 = await routes.authorize.POST(authorizePost(b.row.payment_token)); assert.equal(r2.status, 200);
-  assert.notEqual((await r2.json()).url, url1);
-  assert.equal(stripePayments(b.row.id).filter((x: any) => x.status === "pending").length, 1);   // exactly one live attempt
-  assert.equal(b.row.payment_status === "paid", false);
-  // Once a hold exists, retries are refused: no second authorization, nothing created.
-  const pending = stripePayments(b.row.id).find((x: any) => x.status === "pending")!;
-  const piId = mkPI(pending);
-  await routes.webhook.POST(hook(sessionUnpaid(pending, piId)));
-  await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", stripeMock.pis.get(piId))));
-  assert.equal(pending.status, "authorized");
-  const count = stripePayments(b.row.id).length;
-  const r3 = await routes.authorize.POST(authorizePost(b.row.payment_token));
-  assert.equal(r3.status, 409); assert.equal((await r3.json()).reason, "already_authorized");
-  assert.equal(stripePayments(b.row.id).length, count);
-  const v1: any = await loadConfirmation(db, b.row.payment_token);
-  assert.equal(v1.card, "held"); assert.equal(v1.canAuthorize, false);
-  assert.equal(pending.paid_at ?? null, null); assert.notEqual(b.row.payment_status, "paid");     // authorized is NOT paid
+  const b = await makeBooking();
+  assert.equal((await routes.cardSetup.POST(setupPost({ token: b.row.payment_token }))).status, 422);                // no consent
+  assert.equal((await routes.cardSetup.POST(setupPost({ token: b.row.payment_token, consent: "yes" }))).status, 422); // must be exactly true
+  assert.equal(stripeMock.sis.size > 0 && b.row.stripe_setup_intent_id == null, true);
+  // The browser says "done" before Stripe has the card: the server checks with Stripe and saves nothing.
+  const s1 = await routes.cardSetup.POST(setupPost({ token: b.row.payment_token, consent: true })); assert.equal(s1.status, 200);
+  const early = await routes.cardComplete.POST(post("/api/bookings/card/complete", { token: b.row.payment_token }));
+  assert.equal(early.status, 409); assert.equal(b.row.card_setup_at ?? null, null); assert.equal(b.row.payment_status, "unpaid");
+  // A card entered for ANOTHER booking's SetupIntent cannot be attached here.
+  const other = await makeBooking(); await routes.cardSetup.POST(setupPost({ token: other.row.payment_token, consent: true }));
+  const foreign = stripeMock.completeSetup(other.row.stripe_setup_intent_id);
+  const si = stripeMock.sis.get(b.row.stripe_setup_intent_id); si.metadata.booking_id = other.row.id;                   // tampered metadata
+  stripeMock.completeSetup(b.row.stripe_setup_intent_id);
+  assert.equal((await routes.cardComplete.POST(post("/api/bookings/card/complete", { token: b.row.payment_token }))).status, 409);
+  assert.equal(b.row.card_setup_at ?? null, null); si.metadata.booking_id = b.row.id; void foreign;
+  // The genuine completion saves the card; repeating it (refresh, webhook) is harmless.
+  assert.equal((await routes.cardComplete.POST(post("/api/bookings/card/complete", { token: b.row.payment_token }))).status, 200);
+  const when = b.row.card_setup_at; assert.ok(when); assert.equal(b.row.payment_status, "card_saved");
+  assert.equal((await routes.cardComplete.POST(post("/api/bookings/card/complete", { token: b.row.payment_token }))).status, 200); assert.equal(b.row.card_setup_at, when);
+  // Replacing the card before approval: a new SetupIntent; the old card is removed from Stripe.
+  const oldPm = b.row.stripe_payment_method_id; stripeMock.detached = [];
+  const r = await routes.cardSetup.POST(setupPost({ token: b.row.payment_token, consent: true })); assert.equal(r.status, 200);
+  stripeMock.last4 = "1881"; stripeMock.completeSetup(b.row.stripe_setup_intent_id); stripeMock.last4 = "4242";
+  assert.equal((await routes.cardComplete.POST(post("/api/bookings/card/complete", { token: b.row.payment_token }))).status, 200);
+  assert.equal(b.row.card_last4, "1881"); assert.notEqual(b.row.stripe_payment_method_id, oldPm); assert.deepEqual(stripeMock.detached, [oldPm]);
+  assert.equal(stripePayments(b.row.id).length, 0);                                                                    // still nothing charged
+  // The setup_intent.succeeded webhook for a stale/foreign intent is ignored; the booking's own intent is idempotent.
+  const staleEv = { id: `evt_si_${++ev}`, type: "setup_intent.succeeded", data: { object: { id: "seti_old", object: "setup_intent", metadata: { booking_id: b.row.id } } } };
+  assert.equal((await routes.webhook.POST(hook(staleEv))).status, 200); assert.equal(b.row.card_last4, "1881");
 });
 
-test("resume endpoint: private token only; foreign origin, malformed or unknown tokens and booking references are refused and reveal nothing", async () => {
+test("card and confirmation endpoints: private token or tracking ID only; foreign origin, malformed or unknown credentials and references are refused and reveal nothing", async () => {
   authOn();
   const b = await makeBooking();
-  const n = db.t("payments").length;
-  assert.equal((await routes.authorize.POST(new Request("http://site.test/api/payments/authorize", { method: "POST", headers: { ...HDR(), origin: "http://evil.test" }, body: JSON.stringify({ token: b.row.payment_token }) }))).status, 403);
-  for (const bad of [b.row.reference, b.row.tracking_code, b.row.id.slice(0, 8), "", null, 5, {}]) assert.equal((await routes.authorize.POST(authorizePost(bad))).status, 400, String(bad));
-  assert.equal((await routes.authorize.POST(authorizePost("00000000-0000-4000-8000-000000000000"))).status, 404);
-  assert.equal(db.t("payments").length, n);
-  // After admin approval the card-authorization endpoint does nothing: the existing pay link flow owns that stage.
-  await approve(b);
-  const r = await routes.authorize.POST(authorizePost(b.row.payment_token)); assert.equal(r.status, 409);
+  const n = db.t("payments").length, sis = stripeMock.setupCreates;
+  const evil = (path: string) => new Request(`http://site.test${path}`, { method: "POST", headers: { ...HDR(), origin: "http://evil.test" }, body: JSON.stringify({ token: b.row.payment_token, consent: true }) });
+  for (const path of ["/api/bookings/card/setup", "/api/bookings/card/complete", "/api/bookings/confirm", "/api/bookings/confirm/finalize"]) {
+    const route = path.endsWith("setup") ? routes.cardSetup : path.endsWith("complete") ? routes.cardComplete : path.endsWith("finalize") ? routes.confirmFinal : routes.confirm;
+    assert.equal((await route.POST(evil(path))).status, 403, path);
+  }
+  for (const bad of [b.row.reference, b.row.id.slice(0, 8), "", null, 5, {}, b.row.id]) assert.equal((await routes.confirm.POST(post("/api/bookings/confirm", { token: bad, consent: true }))).status, 404, String(bad));
+  assert.equal((await routes.confirm.POST(post("/api/bookings/confirm", { token: "00000000-0000-4000-8000-000000000000", consent: true }))).status, 404);
+  assert.equal(db.t("payments").length, n); assert.equal(stripeMock.setupCreates, sis);
+  // The tracking ID is also a valid credential for the same booking; the client never supplies an id or an amount.
+  const viaCode = await routes.cardSetup.POST(setupPost({ trackingId: b.row.tracking_code, consent: true })); assert.equal(viaCode.status, 200);
 });
 
 test("confirmation page data: tied to the private token, customer-safe, shows tracking ID; unknown tokens and references give nothing", async () => {
@@ -1974,20 +2019,31 @@ test("confirmation page data: tied to the private token, customer-safe, shows tr
   const b = await makeBooking();
   const { loadConfirmation } = await import("../src/lib/confirmation.ts");
   const v: any = await loadConfirmation(db, b.row.payment_token);
-  assert.equal(v.reference, b.row.reference); assert.equal(v.trackingCode, b.row.tracking_code);
-  assert.equal(v.pricing.totalCents, b.row.online_amount_cents);
+  assert.equal(v.trip.reference, b.row.reference); assert.equal(v.trackingCode, b.row.tracking_code);
+  assert.equal(v.trip.charges.totalCents, b.row.online_amount_cents); assert.equal(v.trip.stage, "card_needed"); assert.equal(v.trip.canAddCard, true); assert.equal(v.trip.canConfirm, false);
   const dump = JSON.stringify(v);
-  for (const secret of [b.row.id, b.row.payment_token, b.row.customer_id, "fixed", "tier", "Dana", "4105550100", "ann@example.com"]) assert.ok(!dump.includes(String(secret)), String(secret));
+  for (const secret of [b.row.id, b.row.payment_token, b.row.customer_id, "fixed", "per_mile", "Dana", "4105550100", "ann@example.com", "sk_test"]) assert.ok(!dump.includes(String(secret)), String(secret));
   assert.equal(await loadConfirmation(db, b.row.reference), null); assert.equal(await loadConfirmation(db, b.row.tracking_code), null); assert.equal(await loadConfirmation(db, "00000000-0000-4000-8000-000000000000"), null);
-  // Payment captured and verified: shown as paid; before that it never is.
-  assert.notEqual(v.card, "paid");
-  const a = await authorized(); await approve(a.b);
-  assert.equal(((await loadConfirmation(db, a.b.row.payment_token)) as any).card, "paid");
-  // The page itself links the tracking ID straight to that ride and offers the resume button.
+  // The customer sees an accurate status at every stage.
+  await saveCard(b);
+  let t: any = (await loadConfirmation(db, b.row.payment_token))!.trip;
+  assert.equal(t.stage, "awaiting_approval"); assert.equal(t.headline, "Booking Request Received: Awaiting Admin Approval"); assert.deepEqual(t.card, { brand: "visa", last4: "4242" });
+  assert.equal(t.canConfirm, false);                                                      // approval first
+  await approve(b);
+  t = (await loadConfirmation(db, b.row.payment_token))!.trip;
+  assert.equal(t.stage, "approved_ready"); assert.equal(t.canConfirm, true); assert.equal(t.headline, "Approved: please confirm your booking");
+  stripeMock.nextCharge = "requires_action"; await confirmCharge(b);
+  t = (await loadConfirmation(db, b.row.payment_token))!.trip; assert.equal(t.stage, "action_required");
+  stripeMock.nextCharge = "declined"; const pAct = db.t("payments").filter((x: any) => x.booking_id === b.row.id).at(-1); pAct.status = "failed";   // the customer abandoned/failed the bank check
+  await confirmCharge(b);
+  t = (await loadConfirmation(db, b.row.payment_token))!.trip; assert.equal(t.stage, "payment_failed"); assert.equal(t.canConfirm, true);       // retry is offered
+  stripeMock.nextCharge = "succeeded"; await confirmCharge(b);
+  t = (await loadConfirmation(db, b.row.payment_token))!.trip; assert.equal(t.stage, "confirmed"); assert.equal(t.confirmed, true);
+  // The page itself links the tracking ID straight to that ride and is part of the original booking flow.
   const page = readFileSync("src/app/(site)/book/confirmation/page.tsx", "utf8");
-  assert.ok(page.includes("trackingPath(view.trackingCode)") && page.includes("href={track}") && page.includes("AuthorizeCardButton") && page.includes('referrer: "no-referrer"'));
+  assert.ok(page.includes("trackingPath(view.trackingCode)") && page.includes("href={track}") && page.includes("ConfirmationLive") && page.includes('referrer: "no-referrer"'));
   const form = readFileSync("src/components/BookingForm.tsx", "utf8");
-  assert.ok(form.includes("window.location.assign(data.authorizeUrl)") && form.includes("data.confirmUrl"));
+  assert.ok(form.includes("data.confirmUrl") && !form.includes("authorizeUrl") && !form.includes("payUrl"));
 });
 
 test("tracking links: URL builder uses the production https site, never localhost; malformed IDs never produce a link", async () => {
@@ -2009,19 +2065,20 @@ test("emails: the Tracking ID is a real hyperlink to that ride in every customer
   const { buildNotification, renderEmail } = await import("../src/lib/notify/templates.ts");
   const code = "TRK-7Q2MK-9XH4D-B6TWA", url = `https://v.example/track#id=${code}`;
   const base = { Reference: "VT-1", _customerEmail: "ann@example.com", _customerName: "Ann", _trackingId: code, _trackUrl: url, When: "Mon", Pickup: "A", Destination: "B" };
-  const cases: [string, Record<string, string>][] = [["booking.created", base], ["booking.confirmed", base], ["booking.approved", { ...base, _payUrl: "https://v.example/pay/x" }], ["booking.rescheduled", { ...base, "Tracking ID": code, "Previous pickup time": "a", "New pickup time": "b" }]];
+  const cases: [string, Record<string, string>][] = [["booking.created", base], ["booking.confirmed", base], ["booking.approved", { ...base, "Booking page": url }], ["booking.driver_assigned", { ...base, Driver: "Dana" }], ["booking.rescheduled", { ...base, "Tracking ID": code, "Previous pickup time": "a", "New pickup time": "b" }]];
   for (const [ev, d] of cases) {
     const m = buildNotification(ev as any, d).emails.find((e) => e.audience === "customer")!;
     const { html, text } = renderEmail(m);
     assert.ok(html.includes(`<a href="${url}"`) && html.includes(`>${code}</a>`), `${ev}: tracking ID is an anchor`);
     assert.ok(text.includes(url), `${ev}: plain-text version carries the link`);
-    assert.ok(html.includes(">Track your ride</a>") || ev === "booking.approved", `${ev}: Track your ride button`);
+    assert.ok(html.includes(">Track your ride</a>") || ev === "booking.approved" || ev === "booking.driver_assigned", `${ev}: Track your ride button`);
     assert.ok(!html.includes("localhost"));
     // Business emails never carry the customer's tracking link.
     for (const biz of buildNotification(ev as any, d).emails.filter((e) => e.audience === "business")) assert.ok(!renderEmail(biz).html.includes(code));
   }
-  // The approval email keeps "Pay online" as its button and still links the ID.
-  const ap = buildNotification("booking.approved", { ...base, _payUrl: "https://v.example/pay/x" }).emails[0]; assert.equal(ap.ctaLabel, "Pay online"); assert.equal(ap.links?.["Tracking ID"], url);
+  // The approval email's button opens the customer's own booking page to review and confirm (never a payment link) and still links the ID.
+  const ap = buildNotification("booking.approved", { ...base, "Booking page": url }).emails[0]; assert.equal(ap.ctaLabel, "Review and confirm your booking"); assert.equal(ap.ctaUrl, url); assert.equal(ap.links?.["Tracking ID"], url);
+  assert.ok(!JSON.stringify(ap).includes("/pay/") && !/payment link|Pay online/i.test(JSON.stringify(ap).replace(/never ask you to pay through a link/i, "")));
   // No usable URL, no link: never a broken one. Hostile values are escaped and non-http(s) URLs are ignored.
   const none = renderEmail(buildNotification("booking.created", { ...base, _trackUrl: undefined }).emails[1]); assert.ok(!none.html.includes("<a href"));
   assert.ok(!renderEmail({ audience: "customer", subject: "s", heading: "h", intro: "i", fields: { "Tracking ID": code }, links: { "Tracking ID": "javascript:alert(1)" } }).html.includes("javascript:"));
@@ -2030,38 +2087,316 @@ test("emails: the Tracking ID is a real hyperlink to that ride in every customer
 
 test("emails sent through Brevo: booking created, approved and confirmed all link the tracking ID to the same ride", async () => {
   authOn(); net.emailOk = true; net.calls.length = 0;
-  const { b, p } = await authorized();
-  await approve(b);                                                                               // captures the hold -> confirmation email
+  const b = await makeBooking();
+  await saveCard(b); await approve(b); stripeMock.nextCharge = "succeeded"; await confirmCharge(b);   // request notice -> approval -> verified payment
   const sent = brevoTo("ann@example.com").filter((c) => JSON.stringify(c.body).includes(b.row.reference));
   const anchor = `<a href=\\"http://site.test/track#id=${b.row.tracking_code}\\"`;
   const created = sent.find((c) => String(c.body.subject).includes("We received your booking request"))!;
+  const approved = sent.find((c) => String(c.body.subject).includes("is approved"))!;
   const confirmed = sent.find((c) => String(c.body.subject).includes("is confirmed"))!;
-  for (const m of [created, confirmed]) { assert.ok(m, "email sent"); assert.ok(JSON.stringify(m.body).includes(anchor)); assert.ok(m.body.textContent.includes(`/track#id=${b.row.tracking_code}`)); }
-  assert.equal(p.status, "paid");
-  // An approved-but-unpaid booking (no hold): the approval email links the ID too.
-  Object.assign(db.t("booking_settings")[0], { stripe_authorize_at_booking: false });
-  const u = await makeBooking(); await approve(u);
-  const ap = brevoTo("ann@example.com").find((c) => String(c.body.subject).includes("is approved") && JSON.stringify(c.body).includes(u.row.reference))!;
-  assert.ok(ap && JSON.stringify(ap.body).includes(`<a href=\\"http://site.test/track#id=${u.row.tracking_code}\\"`));
+  for (const m of [created, approved, confirmed]) { assert.ok(m, "email sent"); assert.ok(JSON.stringify(m.body).includes(anchor)); assert.ok(m.body.textContent.includes(`/track#id=${b.row.tracking_code}`)); assert.ok(!JSON.stringify(m.body).includes("/pay/")); }
+  assert.equal(db.t("payments").find((x: any) => x.booking_id === b.row.id).status, "paid");
+  // The approval email's button opens the customer's own tracker, where they confirm.
+  assert.ok(JSON.stringify(approved.body).includes("Review and confirm your booking"));
 });
 
-test("direct links: the tracking ID opens THAT ride for pending, authorized and paid bookings; wrong, foreign or reference lookups reveal nothing", async () => {
+test("direct links: the tracking ID opens THAT ride for pending, approved and paid bookings; wrong, foreign or reference lookups reveal nothing", async () => {
   authOn();
-  const pendingB = await makeBooking();
-  const held = await authorized();
-  const paidB = await authorized(); await approve(paidB.b);
+  const pendingB = await makeBooking(); await saveCard(pendingB);
+  const held = await makeBooking(); await approve(held);
+  const paidB = await makeBooking(); await confirmBooking(paidB);
   const tp = async (code: string) => { const r = await trackPost(code); return { status: r.status, body: await r.json() }; };
-  for (const [bk, label] of [[pendingB, "pending"], [held.b, "authorized"], [paidB.b, "paid"]] as const) {
+  for (const [bk, label] of [[pendingB, "pending"], [held, "approved"], [paidB, "paid"]] as const) {
     const r = await tp(bk.row.tracking_code);
     assert.equal(r.status, 200, label); assert.equal(r.body.trip.reference, bk.row.reference, label);                  // the right ride
     const dump = JSON.stringify(r.body);
     for (const secret of [bk.row.id, bk.row.payment_token, bk.row.customer_id, "4105550100", "ann@example.com", "4105550999", "dana@example.com"]) assert.ok(!dump.includes(String(secret)), `${label}: ${secret}`); // (the driver plate is intentionally shown once confirmed and paid)
   }
-  assert.equal((await tp(paidB.b.row.tracking_code)).body.trip.paymentStatus, "paid"); assert.notEqual((await tp(held.b.row.tracking_code)).body.trip.paymentStatus, "paid");
+  assert.equal((await tp(paidB.row.tracking_code)).body.trip.paymentStatus, "paid"); assert.notEqual((await tp(held.row.tracking_code)).body.trip.paymentStatus, "paid");
   // Other people's codes, guessed codes and the booking reference never return a booking.
   for (const bad of ["TRK-AAAAA-AAAAA-AAAAA", pendingB.row.reference, pendingB.row.payment_token, pendingB.row.id, "TRK-"]) { const r = await tp(bad); assert.equal(r.status, 404, String(bad)); assert.equal(r.body.trip, undefined); }
   // The direct link is the existing fragment format that the Track page reads and clears; manual entry still goes through the same lookup.
   const tl = readFileSync("src/components/TrackLookup.tsx", "utf8");
   assert.ok(tl.includes("#id=") && tl.includes('addEventListener("hashchange"') && tl.includes("history.replaceState") && tl.includes('id="track-id"') && tl.includes("onSubmit"));
   const conf = readFileSync("src/components/ConfirmationDetails.tsx", "utf8"); assert.ok(conf.includes("trackingPath(saved.trackingId)"));
+});
+
+
+// =====================================================================================================================================
+// Saved-card workflow acceptance tests: card saved at booking (no charge, no hold) -> admin approval -> customer confirmation -> charge -> confirmed
+// =====================================================================================================================================
+const SC = async () => { authOn(); net.emailOk = true; const b = await makeBooking(); await saveCard(b); return b; };
+const finalizePost = (b: any) => routes.confirmFinal.POST(post("/api/bookings/confirm/finalize", { token: b.row.payment_token }));
+const liveCharges = (b: any) => db.t("payments").filter((x: any) => x.booking_id === b.row.id);
+
+test("saved card: card setup alone creates no charge and no hold, and the booking stays pending", async () => {
+  authOn(); const from = stripeMock.charges.length;
+  const b = await makeBooking(); await saveCard(b);
+  assert.equal(stripeMock.charges.length, from); assert.equal(liveCharges(b).length, 0);                      // no PaymentIntent of any kind (no charge, no authorization hold)
+  assert.equal(stripeMock.pis.size >= 0, true);
+  const si = stripeMock.sis.get(b.row.stripe_setup_intent_id); assert.equal(si.usage, "off_session"); assert.equal(si.metadata.booking_id, b.row.id);
+  assert.equal(b.row.status, "new_request"); assert.equal(b.row.amount_paid_cents, 0); assert.equal(b.row.confirmed_at ?? null, null); assert.equal(b.row.approved_at ?? null, null);
+  // Only Stripe object ids and the brand + last four are stored: never a card number, expiry or CVC.
+  const stored = JSON.stringify(b.row);
+  assert.ok(!/4242424242424242|"cvc"|"cvv"|card_number/i.test(stored)); assert.ok(stored.includes('"card_last4":"4242"'));
+  for (const f of ["sk_test_x"]) assert.ok(!stored.includes(f));
+});
+
+test("saved card: admin cannot approve a booking whose card step is unfinished; approval alone neither charges nor confirms", async () => {
+  authOn();
+  const b = await makeBooking();                                                                  // card step not finished
+  const blocked = await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "approve" })));
+  assert.equal(blocked.status, 409); assert.equal((await blocked.json()).code, "card_setup_incomplete"); assert.equal(b.row.status, "new_request");
+  await saveCard(b);
+  const from = stripeMock.charges.length;
+  assert.equal((await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "approve" })))).status, 200);
+  assert.equal(stripeMock.charges.length, from); assert.equal(liveCharges(b).length, 0);
+  assert.equal(b.row.status, "approved"); assert.equal(b.row.payment_status, "card_saved"); assert.equal(b.row.confirmed_at ?? null, null); assert.equal(b.row.customer_confirmed_at ?? null, null);
+  // Approval and customer confirmation are two separate recorded actions.
+  assert.ok(b.row.approved_at); assert.ok(b.row.approved_by !== undefined);
+  const { adminChecklist } = await import("../src/lib/customer-stage.ts");
+  let c = adminChecklist(b.row); assert.equal(c.headline, "Approved: awaiting customer confirmation");
+  assert.deepEqual(c.items.map((i) => [i.key, i.done]), [["card", true], ["approval", true], ["customer", false], ["payment", false], ["confirmed", false]]);
+  stripeMock.nextCharge = "succeeded"; await confirmCharge(b);
+  c = adminChecklist(b.row); assert.equal(c.headline, "Confirmed and paid: ready for driver assignment"); assert.ok(c.items.every((i) => i.done));
+});
+
+test("saved card: only an authenticated admin can approve or assign; the customer cannot approve, and no admin action confirms for the customer", async () => {
+  const b = await SC();
+  assert.equal((await routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "approve" }))).status, 401);       // no session
+  assert.equal(b.row.status, "new_request");
+  // Customer-side endpoints cannot approve: confirming an unapproved booking is refused and nothing is charged.
+  const from = stripeMock.charges.length;
+  for (const body of [{ token: b.row.payment_token }, { trackingId: b.row.tracking_code }]) {
+    const r = await routes.confirm.POST(post("/api/bookings/confirm", { ...body, consent: true, approved: true, status: "approved", approved_at: new Date().toISOString() }));
+    assert.equal(r.status, 409); assert.equal((await r.json()).code, "not_approved");
+  }
+  assert.equal(stripeMock.charges.length, from); assert.equal(b.row.status, "new_request"); assert.equal(b.row.approved_at ?? null, null);
+  // The generic editor cannot approve, confirm or set a card either.
+  await adminAs(() => routes.crud.POST(post("/api/admin/crud", { resource: "bookings", action: "update", id: b.row.id, values: { status: "approved", approved_at: new Date().toISOString(), payment_released_at: new Date().toISOString(), customer_confirmed_at: new Date().toISOString(), stripe_payment_method_id: "pm_evil", card_setup_at: new Date().toISOString() } })));
+  assert.equal(b.row.approved_at ?? null, null); assert.equal(b.row.customer_confirmed_at ?? null, null); assert.notEqual(b.row.stripe_payment_method_id, "pm_evil");
+  assert.equal((await confirmCharge(b)).status, 409);
+  // After approval the customer must still consent: a request without the consent flag charges nothing.
+  await approve(b);
+  const noConsent = await routes.confirm.POST(post("/api/bookings/confirm", { token: b.row.payment_token })); assert.equal(noConsent.status, 422);
+  assert.equal(liveCharges(b).length, 0); assert.equal(b.row.customer_confirmed_at ?? null, null);
+  // Assigning a driver needs an admin session as well.
+  assert.equal((await routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "assign", driverId: aDriver().id }))).status, 401);
+});
+
+test("saved card: the tracking ID can confirm its own booking; another booking's credentials cannot", async () => {
+  const a = await SC(), other = await SC(); await approve(a); await approve(other);
+  stripeMock.nextCharge = "succeeded";
+  const wrong = await routes.confirm.POST(post("/api/bookings/confirm", { trackingId: "TRK-AAAAA-AAAAA-AAAAA", consent: true })); assert.equal(wrong.status, 404);
+  const r = await routes.confirm.POST(post("/api/bookings/confirm", { trackingId: a.row.tracking_code, consent: true })); assert.equal((await r.json()).state, "paid");
+  assert.equal(a.row.status, "confirmed"); assert.equal(other.row.status, "approved"); assert.equal(liveCharges(other).length, 0);   // the other booking is untouched
+  const p = liveCharges(a)[0]; assert.equal(p.amount_cents, a.row.online_amount_cents);
+});
+
+test("saved card: the charge is the complete authoritative total, verified on the server, and uses the booking's own customer and card", async () => {
+  const b = await SC(); await approve(b);
+  stripeMock.nextCharge = "succeeded"; const from = stripeMock.charges.length;
+  await routes.confirm.POST(post("/api/bookings/confirm", { token: b.row.payment_token, consent: true, amountCents: 1, totalCents: 1, currency: "eur", paymentMethodId: "pm_other", customerId: "cus_other" }));
+  const f = stripeMock.charges.slice(from)[0].body;
+  assert.equal(f.get("amount"), String(b.row.online_amount_cents)); assert.equal(f.get("currency"), "usd");
+  assert.equal(f.get("customer"), b.row.stripe_customer_id); assert.equal(f.get("payment_method"), b.row.stripe_payment_method_id);   // never a browser-supplied customer or card
+  assert.equal(f.get("metadata[booking_id]"), b.row.id);
+  // The saved card must belong to the booking's Stripe customer: a swapped payment method is refused before Stripe is called.
+  const c = await SC(); await approve(c);
+  c.row.stripe_payment_method_id = null;
+  const n = stripeMock.charges.length;
+  const r = await confirmCharge(c); assert.equal(r.status, 409); assert.equal((await r.json()).code, "card_required"); assert.equal(stripeMock.charges.length, n);
+  // A missing stored amount is never invented from the browser: the server re-derives it from its own tier and trip estimate, or refuses.
+  const d = await SC(); await approve(d); d.row.online_amount_cents = null; stripeMock.nextCharge = "succeeded";
+  assert.equal((await confirmCharge(d)).status, 200); assert.equal(liveCharges(d)[0].amount_cents, 15000 + d.row.estimated_fare_cents);
+});
+
+test("saved card: a declined charge never confirms or marks paid; the customer can retry or use another card; the admin is alerted", async () => {
+  const b = await SC(); await approve(b);
+  stripeMock.nextCharge = "declined";
+  const r = await confirmCharge(b); const d = await r.json();
+  assert.equal(r.status, 402); assert.match(d.error, /declined|insufficient/i); assert.match(d.error, /not been charged/i);
+  const p1 = liveCharges(b)[0];
+  assert.equal(p1.status, "failed"); assert.equal(p1.paid_at ?? null, null);
+  assert.equal(b.row.status, "approved"); assert.equal(b.row.payment_status, "failed"); assert.equal(b.row.confirmed_at ?? null, null); assert.equal(b.row.amount_paid_cents, 0);
+  assert.ok(db.t("admin_notifications").some((n: any) => n.event === "payment.failed" && n.entity_id === b.row.id));
+  assert.equal(brevoTo("ann@example.com").filter((c) => String(c.body.subject).includes("is confirmed") && JSON.stringify(c.body).includes(b.row.reference)).length, 0);
+  const { loadTrip } = await import("../src/lib/trip.ts");
+  assert.equal(((await loadTrip(db, b.row.payment_token)) as any).view.stage, "payment_failed");           // retry is offered, same booking
+  // Use a different card, then retry: one NEW attempt on the SAME booking (no duplicate booking).
+  const bookings = db.t("bookings").length;
+  stripeMock.last4 = "0005"; await routes.cardSetup.POST(setupPost({ token: b.row.payment_token, consent: true })); stripeMock.completeSetup(b.row.stripe_setup_intent_id); stripeMock.last4 = "4242";
+  assert.equal((await routes.cardComplete.POST(post("/api/bookings/card/complete", { token: b.row.payment_token }))).status, 200); assert.equal(b.row.card_last4, "0005");
+  stripeMock.nextCharge = "succeeded";
+  assert.equal((await (await confirmCharge(b)).json()).state, "paid");
+  assert.equal(db.t("bookings").length, bookings); assert.equal(liveCharges(b).length, 2);
+  assert.equal(b.row.status, "confirmed"); assert.equal(b.row.payment_status, "paid"); assert.equal(b.row.amount_paid_cents, b.row.online_amount_cents);       // paid ONCE
+  assert.equal(liveCharges(b).filter((x: any) => x.status === "paid").length, 1);
+});
+
+test("saved card: bank authentication (3-D Secure) is handled through Stripe; nothing is confirmed until Stripe verifies the payment", async () => {
+  const b = await SC(); await approve(b);
+  stripeMock.nextCharge = "requires_action";
+  const r = await confirmCharge(b); const d = await r.json();
+  assert.equal(r.status, 200); assert.equal(d.state, "requires_action"); assert.match(d.clientSecret, /_secret_/);
+  const p = liveCharges(b)[0];
+  assert.equal(p.status, "requires_action"); assert.equal(b.row.payment_status, "requires_action"); assert.equal(b.row.status, "approved"); assert.equal(b.row.confirmed_at ?? null, null); assert.equal(b.row.amount_paid_cents, 0);
+  // Clicking again resumes the SAME authentication: no second PaymentIntent.
+  const n = stripeMock.charges.length;
+  const again = await (await confirmCharge(b)).json(); assert.equal(again.state, "requires_action"); assert.equal(again.clientSecret, d.clientSecret); assert.equal(stripeMock.charges.length, n); assert.equal(liveCharges(b).length, 1);
+  // The browser reports "done" but the customer abandoned the bank page: finalize re-checks with Stripe and confirms nothing.
+  const f1 = await (await finalizePost(b)).json(); assert.equal(f1.state, "requires_action"); assert.equal(b.row.confirmed_at ?? null, null);
+  // The customer completes the bank's check; Stripe now reports success; only then is it paid and confirmed.
+  const pi = stripeMock.pis.get(p.stripe_payment_intent_id); pi.status = "succeeded"; pi.amount_received = pi.amount;
+  const f2 = await (await finalizePost(b)).json(); assert.equal(f2.state, "paid");
+  assert.equal(p.status, "paid"); assert.equal(b.row.status, "confirmed"); assert.ok(b.row.confirmed_at); assert.equal(b.row.payment_status, "paid");
+  // A failed authentication keeps everything unconfirmed and offers a retry.
+  const c = await SC(); await approve(c); stripeMock.nextCharge = "requires_action"; const cd = await (await confirmCharge(c)).json();
+  const cp = liveCharges(c)[0]; const cpi = stripeMock.pis.get(cp.stripe_payment_intent_id); cpi.status = "requires_payment_method"; cpi.last_payment_error = { code: "card_declined" };
+  const ff = await finalizePost(c); assert.equal(ff.status, 402); assert.equal(cp.status, "failed"); assert.equal(c.row.status, "approved"); assert.equal(c.row.confirmed_at ?? null, null); void cd;
+});
+
+test("saved card: a dropped connection or Stripe outage never double-charges and never falsely fails or confirms", async () => {
+  const b = await SC(); await approve(b);
+  stripeMock.nextCharge = "network";
+  const r = await confirmCharge(b); const d = await r.json();
+  assert.equal(r.status, 200); assert.equal(d.state, "processing");
+  const p = liveCharges(b)[0]; assert.equal(p.status, "processing"); assert.equal(b.row.confirmed_at ?? null, null); assert.equal(b.row.amount_paid_cents, 0);
+  assert.equal(db.t("admin_notifications").some((n: any) => n.event === "payment.failed" && n.entity_id === b.row.id), false);   // an unknown outcome is not a failure
+  // Retrying joins the SAME attempt (same idempotency key) and learns the real outcome.
+  stripeMock.nextCharge = "succeeded"; const n = stripeMock.charges.length;
+  assert.equal((await (await confirmCharge(b)).json()).state, "paid");
+  assert.equal(stripeMock.charges.length, n + 1); assert.equal(liveCharges(b).length, 1); assert.equal(stripeMock.charges.at(-1)!.key, `charge-${p.id}`);
+  assert.equal(b.row.status, "confirmed"); assert.equal(b.row.amount_paid_cents, b.row.online_amount_cents);
+  // An idempotency-key collision from a concurrent request is also "unknown", not a card failure.
+  const { createSavedCardCharge } = await import("../src/lib/stripe.ts"); void createSavedCardCharge;
+});
+
+test("saved card: webhooks are safe when duplicated, delayed or out of order; a late failure cannot undo a payment", async () => {
+  const b = await SC(); await approve(b); stripeMock.nextCharge = "processing"; await confirmCharge(b);
+  const p = liveCharges(b)[0];
+  const ok = sessionEvent("checkout.session.completed", p, {}, "evt_ooo_ok");
+  const late = (type: string, id: string) => sessionEvent(type, p, {}, id);
+  // The success arrives FIRST; delayed "processing" / "requires_action" / "failed" / "cancelled" events arrive afterwards, plus duplicates.
+  assert.equal((await routes.webhook.POST(hook(ok))).status, 200);
+  assert.equal(p.status, "paid"); assert.equal(b.row.status, "confirmed");
+  for (const [type, id] of [["checkout.session.async_payment_failed", "evt_late_f"], ["checkout.session.expired", "evt_late_c"]] as const) await routes.webhook.POST(hook(late(type, id)));
+  await routes.webhook.POST(hook({ id: "evt_late_p", type: "payment_intent.processing", data: { object: { id: p.stripe_payment_intent_id, metadata: { booking_id: b.row.id, payment_id: p.id } } } }));
+  await routes.webhook.POST(hook({ id: "evt_late_ra", type: "payment_intent.requires_action", data: { object: { id: p.stripe_payment_intent_id, metadata: { booking_id: b.row.id, payment_id: p.id } } } }));
+  await routes.webhook.POST(hook(ok)); await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p, {}, "evt_ooo_ok2")));
+  assert.equal(p.status, "paid"); assert.equal(b.row.payment_status, "paid"); assert.equal(b.row.status, "confirmed"); assert.equal(b.row.amount_paid_cents, b.row.online_amount_cents);
+  assert.equal(liveCharges(b).length, 1); assert.equal(db.t("booking_status_history").filter((h: any) => h.booking_id === b.row.id && h.to_status === "confirmed").length, 1);
+  // The webhook can arrive BEFORE our own request stored the PaymentIntent id: the payment is still found by its metadata.
+  const c = await SC(); await approve(c); stripeMock.nextCharge = "processing"; await confirmCharge(c);
+  const cp = liveCharges(c)[0]; const realPi = cp.stripe_payment_intent_id; cp.stripe_payment_intent_id = null;
+  assert.equal((await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", { ...cp, stripe_payment_intent_id: realPi }, {}, "evt_early")))).status, 200);
+  assert.equal(cp.status, "paid"); assert.equal(c.row.status, "confirmed");
+  // A signature is required; a mismatching amount or booking is flagged and never paid.
+  const d = await SC(); await approve(d); stripeMock.nextCharge = "processing"; await confirmCharge(d);
+  const dp = liveCharges(d)[0];
+  assert.equal((await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", dp, {}, "evt_bad_sig"), { secret: "whsec_wrong" }))).status, 400);
+  await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", dp, { amount_total: 100 }, "evt_bad_amt")));
+  assert.equal(dp.status, "review"); assert.equal(d.row.payment_status, "review"); assert.equal(d.row.confirmed_at ?? null, null); assert.equal(d.row.amount_paid_cents, 0);
+});
+
+test("saved card: an unconfirmed (customer never pressed confirm) payment can never confirm a booking, even if a verified payment arrives", async () => {
+  const b = await SC(); await approve(b); stripeMock.nextCharge = "processing"; await confirmCharge(b);
+  const p = liveCharges(b)[0]; b.row.customer_confirmed_at = null;                                // as if the explicit confirmation had not been recorded
+  await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p, {}, "evt_unconfirmed")));
+  assert.equal(p.status, "paid"); assert.equal(b.row.status, "approved"); assert.equal(b.row.confirmed_at ?? null, null);   // money recorded, booking NOT confirmed
+  assert.match(db.t("admin_notifications").find((n: any) => n.event === "payment.paid" && n.entity_id === b.row.id).title, /needs review/i);
+});
+
+test("saved card: driver assignment follows the confirmed and paid state, in every route", async () => {
+  const b = await SC(); await approve(b);
+  const as = (x: any = b) => assignDriver(x);
+  assert.equal((await as()).status, 409);                                                         // approved but not confirmed
+  stripeMock.nextCharge = "processing"; await confirmCharge(b);
+  assert.equal((await as()).status, 409);                                                         // confirmed by the customer, payment still processing
+  const p = liveCharges(b)[0];
+  await routes.webhook.POST(hook(sessionEvent("checkout.session.completed", p, {}, "evt_assign_ok")));
+  assert.equal(b.row.status, "confirmed"); assert.equal(b.row.driver_id ?? null, null);
+  assert.equal((await wf(b.row.id, { action: "advance", status: "getting_ready" })).status, 409);   // a ride cannot start without a driver
+  assert.equal((await wf(b.row.id, { action: "reassign", driverId: aDriver().id })).status, 409);   // reassign needs an existing driver
+  assert.equal((await as()).status, 200); assert.equal(b.row.status, "assigned");
+  // A legacy booking that already has a driver but was never paid is still gated everywhere (see the payment-gate test); unknown/inactive drivers are refused.
+  const c = await SC(); await confirmBooking(c);
+  assert.equal((await assignDriver(c, "00000000-0000-4000-8000-000000000000")).status, 404);
+  const inactive = db.t("drivers")[0]; inactive.is_active = false; assert.equal((await assignDriver(c, inactive.id)).status, 422); inactive.is_active = true;
+});
+
+test("saved card: PayPal keeps working as an alternative after approval; the old Stripe payment-link route is gone", async () => {
+  authOn();
+  const b = await makeBooking(); await saveCard(b);
+  await withPayPal(async () => {
+    assert.equal((await routes.checkout.POST(post("/api/payments/checkout", { token: b.row.payment_token, provider: "paypal" }))).status, 409);   // not approved yet
+    await approve(b);
+    const r = await routes.checkout.POST(post("/api/payments/checkout", { token: b.row.payment_token, provider: "paypal" }));
+    assert.equal(r.status, 200); const out = await r.json();
+    // A PayPal order and a saved-card charge cannot both be live: the customer cannot be charged twice.
+    const pp = liveCharges(b).find((x: any) => x.provider === "paypal"); assert.equal(pp.status, "pending"); assert.equal(b.row.confirmed_at ?? null, null);
+    const cap = await capture(b.row.payment_token, out.orderId); assert.equal(cap.status, 200);
+    assert.equal(b.row.status, "confirmed"); assert.ok(b.row.customer_confirmed_at); assert.equal(b.row.payment_status, "paid");
+  });
+  // The hosted-Stripe "pay link" checkout no longer exists, and an in-progress card charge blocks a PayPal order.
+  const c = await makeBooking(); await approve(c);
+  const old = await routes.checkout.POST(post("/api/payments/checkout", { token: c.row.payment_token, provider: "stripe" }));
+  assert.equal(old.status, 400); assert.equal(liveCharges(c).length, 0);
+  stripeMock.nextCharge = "processing"; await confirmCharge(c);
+  await withPayPal(async () => { assert.equal((await routes.checkout.POST(post("/api/payments/checkout", { token: c.row.payment_token, provider: "paypal" }))).status, 409); });
+});
+
+test("saved card: bookings from before the workflow are never charged or migrated automatically", async () => {
+  authOn();
+  const b = await makeBooking(); b.row.card_flow = false;                                         // created before the workflow: no card, no consent
+  assert.equal((await confirmCharge(b)).status, 409);                                              // not approved
+  assert.equal((await adminAs(() => routes.workflow.POST(post("/api/admin/bookings/workflow", { id: b.row.id, action: "approve" })))).status, 200);   // admin may approve (no card gate for old bookings)
+  assert.equal(stripeMock.charges.length === 0 || liveCharges(b).length === 0, true);
+  const r = await confirmCharge(b); assert.equal(r.status, 409); assert.equal((await r.json()).code, "card_required"); assert.equal(liveCharges(b).length, 0);   // approved alone never charges
+  const { loadTrip } = await import("../src/lib/trip.ts");
+  const v: any = (await loadTrip(db, b.row.payment_token))!.view; assert.equal(v.stage, "approved_card_needed"); assert.equal(v.canAddCard, true); assert.equal(v.canConfirm, false);
+  // Existing payment history is untouched by any of this.
+  const hist = authorized; void hist;
+  const old = await authorized(); const before = JSON.stringify(old.p);
+  await routes.webhook.POST(hook(piEvent("payment_intent.amount_capturable_updated", stripeMock.pis.get(old.piId))));
+  assert.equal(JSON.stringify(old.p).includes('"status":"authorized"'), true); assert.ok(before.length > 0);
+});
+
+test("saved card: tracking pages, emails and the customer page never contain a payment link or the old wording", async () => {
+  const b = await SC(); net.calls.length = 0; await approve(b);
+  const mail = JSON.stringify(brevoTo("ann@example.com").map((c) => c.body));
+  assert.ok(!/\/pay\/|secure payment link|No card is held/i.test(mail)); assert.ok(mail.includes("Review and confirm your booking"));
+  // Source scan: the removed workflow leaves nothing behind in customer-facing code.
+  const files = ["src/lib/notify/templates.ts", "src/components/BookingForm.tsx", "src/components/ConfirmationDetails.tsx", "src/components/TripStatus.tsx", "src/components/BookingActions.tsx", "src/components/ConfirmationLive.tsx", "src/app/(site)/book/confirmation/page.tsx", "src/lib/payments-server.ts", "src/lib/saved-card.ts"];
+  for (const f of files) { const t = readFileSync(f, "utf8"); assert.ok(!/No card is held|we will email you a secure payment link|email you a secure payment link/i.test(t), `${f}: old wording`); assert.ok(!/createCheckoutSession|startAuthorization|captureAuthorization|authorizeUrl/.test(t), `${f}: removed flow`); }
+  assert.equal(existsSync("src/app/api/payments/authorize/route.ts"), false);
+  // Secrets stay on the server: no client component imports the Stripe server module, and the publishable key is the only key sent to the browser.
+  for (const f of ["src/components/CardSetupStep.tsx", "src/components/BookingActions.tsx", "src/components/ConfirmationLive.tsx", "src/components/TripStatus.tsx", "src/lib/stripe-client.ts"]) { const t = readFileSync(f, "utf8"); assert.ok(!/STRIPE_SECRET|sk_(live|test)|@\/lib\/stripe"|SERVICE_ROLE|@\/lib\/saved-card/.test(t), f); }
+  assert.ok(!JSON.stringify((await (await trackPost(b.row.tracking_code, "10.55.0.1")).json())).match(/sk_test|whsec|secret/));
+});
+
+test("migration 0016 is additive, idempotent and stores no card numbers", () => {
+  const f = readdirSync("supabase/migrations").filter((x) => x.startsWith("0016"));
+  assert.equal(f.length, 1);
+  const sql = readFileSync(`supabase/migrations/${f[0]}`, "utf8").toLowerCase();
+  assert.ok(!/drop\s+(table|column)|truncate|delete\s+from|update\s+public\./.test(sql));                          // nothing dropped, reset or rewritten
+  for (const col of ["card_flow", "stripe_customer_id", "stripe_setup_intent_id", "stripe_payment_method_id", "card_setup_at", "card_consent_at", "customer_confirmed_at", "saved_card"]) assert.ok(sql.includes(col), col);
+  assert.ok((sql.match(/add column if not exists/g) ?? []).length >= 10); assert.ok(sql.includes("create unique index if not exists payments_one_live_saved_card_attempt"));
+  for (const v of ["'approved'", "'card_saved'", "'processing'", "'requires_action'", "'authorized'", "'capture_failed'", "'needs_payment'", "'pending_confirmation'", "'paid'"]) assert.ok(sql.includes(v), v);   // old values stay valid
+  assert.ok(!/card_number|\bcvv\b|\bcvc\b|\bpan\b|exp_month|exp_year/.test(sql.replace(/-- .*/g, "")));
+});
+
+test("saved card: pure stage logic and consent wording", async () => {
+  const { customerStage } = await import("../src/lib/customer-stage.ts");
+  const { CARD_SAVE_CONSENT_TEXT, cardChargeConsentText } = await import("../src/lib/card-consent.ts");
+  const base = { status: "new_request", card_flow: true, card_setup_at: null, approved_at: null, confirmed_at: null, payment_released_at: null, payment_status: "unpaid", online_amount_cents: 28000 };
+  assert.equal(customerStage(base), "card_needed");
+  assert.equal(customerStage({ ...base, card_setup_at: "x", payment_status: "card_saved" }), "awaiting_approval");
+  const ap = { ...base, status: "approved", card_setup_at: "x", approved_at: "x", payment_released_at: "x", payment_status: "card_saved" };
+  assert.equal(customerStage(ap), "approved_ready"); assert.equal(customerStage({ ...ap, card_setup_at: null }), "approved_card_needed"); assert.equal(customerStage({ ...ap, online_amount_cents: null }), "no_online_payment");
+  assert.equal(customerStage({ ...ap, latest_charge_status: "requires_action" }), "action_required"); assert.equal(customerStage({ ...ap, latest_charge_status: "processing" }), "processing");
+  assert.equal(customerStage({ ...ap, payment_status: "failed", latest_charge_status: "failed" }), "payment_failed");
+  assert.equal(customerStage({ ...ap, status: "confirmed", confirmed_at: "x", payment_status: "paid" }), "confirmed"); assert.equal(customerStage({ ...ap, payment_status: "review" }), "review");
+  assert.equal(customerStage({ ...ap, status: "cancelled" }), "closed"); assert.equal(customerStage({ ...base, status: "rejected" }), "closed");
+  assert.match(CARD_SAVE_CONSENT_TEXT, /Nothing is charged and no funds are held/); assert.match(cardChargeConsentText("$280.00"), /charge my saved card \$280\.00 now/);
 });

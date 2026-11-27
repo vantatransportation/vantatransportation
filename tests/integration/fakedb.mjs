@@ -14,6 +14,9 @@ const REL = {
 const UNIQUE_SETS = { vehicle_tier_assignments: [["vehicle_id", "tier_id"]] };
 const UNIQUE = { customers: ["email_normalized"], bookings: ["submission_key", "reference"], quote_requests: ["submission_key", "access_token"], notification_logs: ["dedupe_key"], admin_notifications: ["dedupe_key"], stripe_events: ["id"], paypal_events: ["id"], payments: ["stripe_session_id"], booking_messages: ["dedupe_key"] };
 
+// Partial unique indexes (mirrors migration 0016): at most ONE live saved-card charge attempt per booking.
+const UNIQUE_PARTIAL = { payments: [{ cols: ["booking_id"], where: (r) => r.saved_card === true && ["pending", "processing", "requires_action"].includes(r.status) }] };
+
 function splitTop(s) { const out = []; let d = 0, cur = ""; for (const ch of s) { if (ch === "(") d++; if (ch === ")") d--; if (ch === "," && d === 0) { out.push(cur.trim()); cur = ""; } else cur += ch; } if (cur.trim()) out.push(cur.trim()); return out; }
 
 export class FakeDb {
@@ -88,6 +91,8 @@ class Query {
         if (this.table === "notification_logs") { row.attempts ??= 0; }
         const dup = (UNIQUE[this.table] ?? []).find((c) => row[c] != null && rows.some((x) => x[c] === row[c]))
           ?? (UNIQUE_SETS[this.table] ?? []).find((cols) => rows.some((x) => cols.every((c) => x[c] === row[c])))?.join("+");
+        const dupPartial = (UNIQUE_PARTIAL[this.table] ?? []).find((u) => u.where(row) && rows.some((x) => u.where(x) && u.cols.every((c) => x[c] === row[c])));
+        if (!dup && dupPartial) { error = { code: "23505", message: "duplicate live attempt" }; result = null; break; }
         if (dup) { error = { code: "23505", message: "duplicate " + dup }; result = null; break; }
         rows.push(row); result.push(row);
       }

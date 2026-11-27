@@ -7,6 +7,7 @@
  *    tracking page and its chat. Everything else the customer can see is looked up by it on the server.
  */
 import { AWAITING_REVIEW, STATUS_LABEL, type BookingStatus } from "@/lib/booking-status";
+import { STAGE_HEADLINE, type CustomerStage } from "@/lib/customer-stage";
 
 /** No 0/1/O/I/L, so a code read aloud or from a screenshot is hard to mistype. Database-generated codes are upper-case hex (a subset of 0-9, A-F). */
 const ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
@@ -41,6 +42,8 @@ export interface TimelineStep { key: string; label: string; state: StepState; en
 
 export interface TimelineFacts {
   status: BookingStatus; hasDriver: boolean; released: boolean; paid: boolean; confirmed: boolean;
+  /** Saved-card workflow stage (customer-stage.ts). Optional so older callers keep their previous headlines. */
+  stage?: CustomerStage;
 }
 
 const RIDE_RANK: Partial<Record<BookingStatus, number>> = { getting_ready: 1, on_the_way: 2, arrived: 3, picked_up: 4, in_progress: 4, completed: 5 };
@@ -56,9 +59,9 @@ export function buildTimeline(f: TimelineFacts): { steps: TimelineStep[]; headli
   const defs: [string, string, boolean][] = [
     ["received", "Booking request received", true],
     ["approved", reviewed && approvedBeforeEnd ? "Approved" : "Awaiting approval", reviewed && approvedBeforeEnd],
-    ["driver", "Driver assigned", f.hasDriver],
-    ["payment", f.paid ? "Payment received" : "Awaiting payment", f.paid],
+    ["payment", f.paid ? "Payment received" : "Awaiting your confirmation and payment", f.paid],
     ["confirmed", "Booking confirmed", f.confirmed],
+    ["driver", "Driver assigned", f.hasDriver],
     ["getting_ready", "Driver getting ready", rank >= 1],
     ["on_the_way", "Driver on the way", rank >= 2],
     ["arrived", "Driver arrived", rank >= 3],
@@ -80,6 +83,7 @@ export function buildTimeline(f: TimelineFacts): { steps: TimelineStep[]; headli
   const headline = rank === 5 ? "Ride completed"
     : rank >= 1 ? ({ 1: "Your driver is getting ready", 2: "Your driver is on the way", 3: "Your driver has arrived", 4: "Ride in progress" } as Record<number, string>)[rank]
     : f.confirmed ? "Booking confirmed"
+    : f.stage ? STAGE_HEADLINE[f.stage]
     : !reviewed ? "Awaiting approval"
     : f.paid ? "Payment received"
     : f.released ? "Approved: awaiting payment"

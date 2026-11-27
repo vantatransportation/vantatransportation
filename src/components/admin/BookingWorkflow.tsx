@@ -7,12 +7,12 @@ import { isoToLocalInput, localInputToIso, postJson } from "./util";
 export interface DriverOption { id: string; name: string; plate: string | null; active: boolean }
 interface Props {
   id: string; status: string; driverId: string | null; driverName: string | null; paymentReleased: boolean;
-  /** The latest card authorization (authorize-now / capture-on-approval), if the customer made one. */
-  authorization: { status: string; amount: string; card: string | null; captureBefore: string | null; error: string | null } | null;
+  /** Saved-card workflow facts (all recorded separately: card, admin approval, customer confirmation, verified payment). */
+  checklist: { key: string; label: string; done: boolean; at: string | null; note?: string }[]; stageHeadline: string; cardFlow: boolean; cardSaved: boolean; paid: boolean;
   pickupAt: string; tz: string; nextSteps: string[]; confirmedAt: string | null; drivers: DriverOption[]; history: { to: string; at: string; note: string | null; actor: string }[];
 }
 const AWAITING = ["new_request", "pending_confirmation"];
-const REASSIGNABLE = ["confirmed", "assigned", "getting_ready"];
+const REASSIGNABLE = ["assigned", "getting_ready"];
 
 /** Approve and assign, reassign, decline and cancel. Each action is a checked server operation; this component only calls them. */
 export default function BookingWorkflow(p: Props) {
@@ -22,6 +22,7 @@ export default function BookingWorkflow(p: Props) {
   const [driver, setDriver] = useState(p.drivers.find((d) => d.active && d.id !== p.driverId)?.id ?? "");
   const awaiting = AWAITING.includes(p.status);
   const canReassign = REASSIGNABLE.includes(p.status) && Boolean(p.driverId);
+  const canAssignFirst = p.status === "confirmed" && !p.driverId && p.paid;
   const canCancel = !["completed", "cancelled", "rejected", "no_show", "picked_up"].includes(p.status);
   const canReschedule = !["picked_up", "in_progress", "completed", "cancelled", "rejected", "no_show"].includes(p.status);
   const [newTime, setNewTime] = useState(isoToLocalInput(p.pickupAt, p.tz));
@@ -33,9 +34,6 @@ export default function BookingWorkflow(p: Props) {
     const { ok, data } = await postJson("/api/admin/bookings/workflow", { id: p.id, action, ...extra });
     setBusy("");
     if (!ok) return setMsg({ kind: "error", text: (data as { error?: string }).error ?? "That did not work. Please try again." });
-    const pay = (data as { payment?: { outcome: string; message?: string } }).payment;
-    if (pay?.outcome === "needs_payment") { router.refresh(); return setMsg({ kind: "error", text: `Approved and the driver is assigned, but the payment was NOT captured and the booking is NOT paid. ${pay.message ?? ""} The customer was emailed a secure payment link.` }); }
-    if (pay?.outcome === "captured") { router.refresh(); return setMsg({ kind: "ok", text: "Approved. The card payment was captured and Stripe confirmed it; the booking is confirmed." }); }
     const refund = (data as { refundReviewNeeded?: boolean }).refundReviewNeeded;
     setMsg({ kind: "ok", text: refund ? "Cancelled. A payment was received: review whether a refund applies and issue it in Stripe or PayPal yourself. Nothing was refunded automatically." : "Done." });
     router.refresh();
@@ -44,34 +42,34 @@ export default function BookingWorkflow(p: Props) {
 
   return (
     <div className="panel">
-      <h3>Review and driver</h3>
+      <h3>Review, approval and driver</h3>
+      <p><strong>{p.stageHeadline}</strong></p>
+      <ol className="checklist" aria-label="Booking and payment progress" style={{ margin: ".5rem 0 .75rem 1.1rem" }}>
+        {p.checklist.map((c) => <li key={c.key}>{c.done ? "✓" : "○"} {c.label}{c.at ? ` · ${new Date(c.at).toLocaleString()}` : ""}{c.note ? ` · ${c.note}` : ""}</li>)}
+      </ol>
       <p className="muted">
-        {awaiting ? "This request is awaiting review. The customer has not been charged and has no payment link. Approving assigns a driver and releases the payment link to the customer. The booking becomes Confirmed only after the payment provider verifies the payment."
-          : p.driverName ? `Assigned driver: ${p.driverName}. Payment ${p.paymentReleased ? "released to the customer" : "not released"}. ${p.confirmedAt ? `Confirmed after verified payment on ${new Date(p.confirmedAt).toLocaleString()}.` : "Not confirmed yet: waiting for a verified payment."}` : "No driver assigned."}
+        {awaiting ? "Approving does NOT charge the customer, does NOT confirm the ride and assigns no driver. The customer then reviews the booking and confirms it themselves; only then is their saved card charged. The booking becomes Confirmed only after the payment provider verifies the payment, and only then can you assign a driver."
+          : p.status === "approved" ? "Approved. Waiting for the customer to confirm and for the payment to be verified. You cannot assign a driver yet."
+          : p.driverName ? `Assigned driver: ${p.driverName}.` : p.status === "confirmed" ? "Confirmed and paid. Assign a driver below." : "No driver assigned."}
       </p>
-      {(awaiting || canReassign) && (
+      {awaiting && p.cardFlow && !p.cardSaved && <p className="notice notice--error" role="status">The customer has not finished adding a card, so this booking cannot be approved yet. Nothing has been charged.</p>}
+      {(awaiting || canAssignFirst || canReassign) && (
         <div className="form-grid" style={{ marginTop: ".75rem" }}>
-          <div className="field full">
-            <label htmlFor="wf-driver">{awaiting ? "Assign a driver" : "Reassign to"}</label>
-            <select id="wf-driver" value={driver} onChange={(e) => setDriver(e.target.value)}>
-              <option value="">Choose a driver…</option>
-              {active.map((d) => <option key={d.id} value={d.id}>{d.name}{d.plate ? ` · ${d.plate}` : ""}</option>)}
-            </select>
-            {active.length === 0 && <span className="help muted">No active drivers. Add one under Drivers first.</span>}
-          </div>
-          {p.authorization && (
-            <p className={`notice ${["capture_failed", "authorization_expired"].includes(p.authorization.status) ? "notice--error" : ""}`} role="status">
-              Card authorization: <strong>{p.authorization.status.replace(/_/g, " ")}</strong> · {p.authorization.amount}{p.authorization.card ? ` · ${p.authorization.card}` : ""}
-              {p.authorization.status === "authorized" && p.authorization.captureBefore ? ` · hold expires ${new Date(p.authorization.captureBefore).toLocaleString("en-US", { timeZone: p.tz, dateStyle: "medium", timeStyle: "short" })}` : ""}
-              {p.authorization.error ? ` · ${p.authorization.error}` : ""}
-              {["capture_failed", "authorization_expired"].includes(p.authorization.status) ? " · Needs payment: the booking stays active and unpaid. Contact the customer or have them use their payment link." : ""}
-            </p>
+          {(canAssignFirst || canReassign) && (
+            <div className="field full">
+              <label htmlFor="wf-driver">{canAssignFirst ? "Assign a driver" : "Reassign to"}</label>
+              <select id="wf-driver" value={driver} onChange={(e) => setDriver(e.target.value)}>
+                <option value="">Choose a driver…</option>
+                {active.map((d) => <option key={d.id} value={d.id}>{d.name}{d.plate ? ` · ${d.plate}` : ""}</option>)}
+              </select>
+              {active.length === 0 && <span className="help muted">No active drivers. Add one under Drivers first.</span>}
+            </div>
           )}
           <div className="full" style={{ display: "flex", gap: ".75rem", flexWrap: "wrap" }}>
-            {awaiting && <button type="button" className="btn btn--primary" disabled={!driver || !!busy} onClick={() => run("approve_assign", { driverId: driver }, p.authorization?.status === "authorized" ? `Approve this booking, assign the driver and CAPTURE the customer's authorized card payment of ${p.authorization.amount}? It is marked paid only when Stripe confirms the capture.` : "Approve this booking, assign the driver and email the customer their payment link?")}>{busy === "approve_assign" ? "Approving…" : p.authorization?.status === "authorized" ? "Approve & Capture Payment" : "Approve & assign driver"}</button>}
-            {!awaiting && p.authorization && ["authorized", "capture_failed"].includes(p.authorization.status) && p.driverId && <button type="button" className="btn btn--primary" disabled={!!busy} onClick={() => run("capture_payment", {}, `Capture the authorized card payment of ${p.authorization!.amount} now?`)}>{busy === "capture_payment" ? "Capturing…" : "Retry capture payment"}</button>}
+            {awaiting && <button type="button" className="btn btn--primary" disabled={!!busy || (p.cardFlow && !p.cardSaved)} onClick={() => run("approve", {}, "Approve this booking? The customer is NOT charged and the ride is NOT confirmed. They will be asked to review and confirm, and only then is their saved card charged.")}>{busy === "approve" ? "Approving…" : "Approve booking"}</button>}
+            {canAssignFirst && <button type="button" className="btn btn--primary" disabled={!driver || !!busy} onClick={() => run("assign", { driverId: driver }, "Assign this driver? The customer is emailed the driver's details.")}>{busy === "assign" ? "Assigning…" : "Assign driver"}</button>}
             {canReassign && <button type="button" className="btn btn--primary" disabled={!driver || !!busy} onClick={() => run("reassign", { driverId: driver }, "Reassign this ride? The current driver loses access immediately and everyone is notified.")}>{busy === "reassign" ? "Reassigning…" : "Reassign driver"}</button>}
-            {awaiting && <button type="button" className="btn btn--ghost" disabled={!!busy} onClick={() => { const r = reason("Reason for declining (sent to the customer):"); if (r) run("reject", { reason: r }, "Decline this request and email the customer?"); }}>Decline request</button>}
+            {awaiting && <button type="button" className="btn btn--ghost" disabled={!!busy} onClick={() => { const r = reason("Reason for declining (sent to the customer):"); if (r) run("reject", { reason: r }, "Decline this request and email the customer? Their card is not charged."); }}>Decline request</button>}
           </div>
         </div>
       )}

@@ -11,12 +11,13 @@ export interface ConfigWarning { channel: "email" | "maps" | "database" | "payme
 export function configWarnings(): ConfigWarning[] {
   const w: ConfigWarning[] = [];
   if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) w.push({ channel: "database", message: "Supabase URL or service-role key is missing. Submissions cannot be stored." });
-  if (!siteBase()) w.push({ channel: "email", message: "NEXT_PUBLIC_SITE_URL is missing or points at localhost. Tracking and payment links in emails are left out until it is set to the public https:// address of the site." });
+  if (!siteBase()) w.push({ channel: "email", message: "NEXT_PUBLIC_SITE_URL is missing or points at localhost. Tracking links in emails are left out until it is set to the public https:// address of the site." });
   if (!process.env.BREVO_API_KEY) w.push({ channel: "email", message: "Email is not configured. Set BREVO_API_KEY. Emails are skipped until then (bookings and inquiries are still saved)." });
   if (!process.env.BREVO_SENDER_EMAIL) w.push({ channel: "email", message: "BREVO_SENDER_EMAIL is not set. It must be a sender or domain you have verified in Brevo." });
   if (!process.env.GOOGLE_MAPS_SERVER_API_KEY) w.push({ channel: "maps", message: "GOOGLE_MAPS_SERVER_API_KEY is missing. The fare calculator cannot route or autocomplete." });
   if (!process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY) w.push({ channel: "maps", message: "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY is missing. The route map will not display." });
   if (!process.env.STRIPE_SECRET_KEY || !process.env.STRIPE_WEBHOOK_SECRET) w.push({ channel: "payments", message: "Online payments are off until STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set. Booking requests still work." });
+  else if (!process.env.STRIPE_PUBLISHABLE_KEY && !process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY) w.push({ channel: "payments", message: "STRIPE_PUBLISHABLE_KEY is missing. Customers cannot save a card at booking until it is set (the saved-card workflow needs Stripe's publishable key as well as the secret key)." });
   if (!process.env.NEXT_PUBLIC_CLOUDINARY_CLOUD_NAME || !process.env.NEXT_PUBLIC_CLOUDINARY_API_KEY || !process.env.CLOUDINARY_API_SECRET) w.push({ channel: "photos", message: "Vehicle photo uploads are disabled until the three CLOUDINARY variables are set. The website shows branded placeholders meanwhile." });
   return w;
 }

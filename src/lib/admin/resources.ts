@@ -55,7 +55,7 @@ export interface Resource {
 
 export type ClientResource = Omit<Resource, "refLabel" | "select" | "orderBy" | "table">;
 
-export const BOOKING_STATUSES = ["new_request", "pending_confirmation", "confirmed", "assigned", "getting_ready", "on_the_way", "arrived", "picked_up", "in_progress", "completed", "cancelled", "rejected", "no_show"];
+export const BOOKING_STATUSES = ["new_request", "pending_confirmation", "approved", "confirmed", "assigned", "getting_ready", "on_the_way", "arrived", "picked_up", "in_progress", "completed", "cancelled", "rejected", "no_show"];
 export const LEAD_STATUSES = ["new", "contacted", "follow_up", "converted", "not_interested", "closed"];
 export const QUOTE_STATUSES = ["new", "reviewing", "revised_sent", "accepted", "rejected", "closed"];
 
@@ -297,9 +297,8 @@ export const resources: Record<string, Resource> = {
       { name: "child_seat_one_way_cents", label: "Child car seat price, one way ($ per seat)", type: "money", help: "Initial value from the client: $10. Applied per seat." },
       { name: "child_seat_round_trip_cents", label: "Child car seat price, round trip ($ per seat)", type: "money", help: "Initial value from the client: $15. Charged once per seat for the whole round trip, not per leg." },
       { name: "child_seat_max", label: "Maximum child seats per booking", type: "number" },
-      { name: "payment_mode", label: "Online payment", type: "select", options: ["disabled", "full", "deposit_fixed", "deposit_percent"], help: "disabled = booking requests only. full = the online amount (fixed tier price + Meet & Greet + child seats). Deposits are a fixed amount or a percent of that online amount." },
+      { name: "payment_mode", label: "Online payment", type: "select", options: ["disabled", "full", "deposit_fixed", "deposit_percent"], help: "disabled = booking requests only (no card is collected). Any other value turns on the saved-card workflow: the card is saved at booking (no charge, no hold), and after you approve and the customer confirms, the card is charged the COMPLETE booking total (fixed tier price + trip estimate + Meet & Greet + child seats). Deposit modes apply only to PayPal payments." },
       { name: "stripe_enabled", label: "Offer card payment (Stripe)", type: "bool", help: "Also needs the Stripe keys on the server." },
-      { name: "stripe_authorize_at_booking", label: "Authorize the card at booking, capture on approval", type: "bool", help: "OFF by default. Turn on only after you have tested in Stripe test mode. The customer holds their card at booking; nothing is charged until you approve the booking." },
       { name: "paypal_enabled", label: "Offer PayPal", type: "bool", help: "Also needs the PayPal credentials on the server." },
       { name: "deposit_fixed_cents", label: "Deposit: fixed amount ($)", type: "money", help: "Used when Online payment is deposit_fixed. Leave blank until approved." },
       { name: "deposit_percent", label: "Deposit: percent of the total", type: "number", step: 0.01, help: "Used when Online payment is deposit_percent (1 to 100)." },

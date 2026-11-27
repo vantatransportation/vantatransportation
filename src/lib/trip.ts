@@ -6,6 +6,10 @@ import { buildTimeline, firstName, normalizeTrackingCode, type TimelineStep } fr
 import { getHelpline, type Helpline } from "@/lib/helpline";
 import { driverDisplayName } from "@/lib/driver/profile";
 import { customerPricing, type CustomerPricing } from "@/lib/tier-pricing";
+import { customerStage, type CustomerStage } from "@/lib/customer-stage";
+import { loadBookingSettings } from "@/lib/policies";
+import { availableProviders } from "@/lib/payment-providers";
+import { publishableKey } from "@/lib/stripe";
 
 /**
  * What a customer may see about ONE booking, reached with that booking's secret: the tracking ID (public Track page) or the
@@ -26,12 +30,18 @@ export interface TripView {
   helpline: Helpline | null;
   /** Token (private link) credential only: the customer-safe price (combined Trip fare, optional services, Total) and whether the Pay button should show. */
   charges: (CustomerPricing & { currency: string }) | null;
+  /** PayPal is offered as an alternative to the saved card on the token page (never a payment link). */
   payable: boolean;
+  /**
+   * The saved-card workflow as the customer sees it. `stage` is derived from stored facts only (see customer-stage.ts). `card` is the brand and last four digits Stripe
+   * reports for the card saved on THIS booking (never a card number). `canAddCard`/`canConfirm` say which button the page shows; the server re-checks everything when it is pressed.
+   */
+  stage: CustomerStage; card: { brand: string | null; last4: string } | null; cardAvailable: boolean; /** Stripe's publishable key (public by design); null when the card step is unavailable. */ publicKey: string | null; canAddCard: boolean; canConfirm: boolean;
 }
 
 export type Credential = { kind: "token"; token: unknown } | { kind: "code"; code: unknown };
 
-const COLS = "id,reference,status,pickup_at,pickup_address,dropoff_address,passengers,driver_id,payment_status,payment_released_at,confirmed_at,tier_name,online_amount_cents,meet_greet_selected,meet_greet_fee_cents,child_seat_fee_cents,currency,rejection_reason,cancellation_reason,vehicles(name,vehicle_categories(name))";
+const COLS = "id,reference,status,approved_at,customer_confirmed_at,card_flow,card_setup_at,card_brand,card_last4,pickup_at,pickup_address,dropoff_address,passengers,driver_id,payment_status,payment_released_at,confirmed_at,tier_name,online_amount_cents,meet_greet_selected,meet_greet_fee_cents,child_seat_fee_cents,currency,rejection_reason,cancellation_reason,vehicles(name,vehicle_categories(name))";
 const PAID = ["paid", "deposit_paid", "partially_refunded", "refunded"];
 
 export async function loadTrip(db: SupabaseClient, cred: Credential | string): Promise<{ id: string; view: TripView; driverId: string | null } | null> {
@@ -63,10 +73,15 @@ export async function loadTrip(db: SupabaseClient, cred: Credential | string): P
   const stops = await db.from("booking_stops").select("position,address").eq("booking_id", b.id).order("position");
   const released = Boolean(b.payment_released_at && b.driver_id);
   const paid = PAID.includes(String(b.payment_status));
-  const settled = ["paid", "refunded", "partially_refunded"].includes(String(b.payment_status));
   const confirmed = Boolean(b.confirmed_at) || b.status === "confirmed"; // "confirmed" as a status is only ever set by the verified-payment path (or legacy rows)
   const hasAmount = b.online_amount_cents != null; // the tier fee and other internal components are not even read here
-  const tl = buildTimeline({ status, hasDriver: Boolean(b.driver_id), released, paid, confirmed });
+  const { data: lastCharge } = await db.from("payments").select("status").eq("booking_id", b.id).eq("saved_card", true).order("created_at", { ascending: false }).limit(1).maybeSingle();
+  const stage = customerStage({ ...b, latest_charge_status: lastCharge?.status ?? null });
+  const settings = await loadBookingSettings(db);
+  const cardAvailable = availableProviders(settings).includes("stripe") && Boolean(publishableKey()) && hasAmount;
+  const paypalAvailable = availableProviders(settings).includes("paypal");
+  const decide = ["approved_ready", "approved_card_needed", "payment_failed", "action_required", "processing"].includes(stage);
+  const tl = buildTimeline({ status, hasDriver: Boolean(b.driver_id), released, paid, confirmed, stage });
   const veh = b.vehicles as { name?: string; vehicle_categories?: { name?: string } | null } | null;
   return {
     id: b.id, driverId: b.driver_id ?? null,
@@ -75,12 +90,15 @@ export async function loadTrip(db: SupabaseClient, cred: Credential | string): P
       pickupAt: b.pickup_at, pickup: b.pickup_address, dropoff: b.dropoff_address ?? null,
       stops: (stops.data ?? []).map((s: Record<string, unknown>) => String(s.address)), passengers: b.passengers,
       vehicle: veh?.name ?? null, vehicleCategory: veh?.vehicle_categories?.name ?? null, tier: b.tier_name ?? null, driver, rating: { canRate, rated },
-      confirmed, paymentStatus: String(b.payment_status), awaitingPayment: released && open && !settled && !confirmed,
+      confirmed, paymentStatus: String(b.payment_status), awaitingPayment: decide,
       chatOpen: chatOpen(b), chatAvailable: chatOpen(b),
       terminalNote: status === "rejected" ? (b.rejection_reason ?? "We were unable to accept this request.") : status === "cancelled" ? (b.cancellation_reason ?? "This booking was cancelled.") : null,
       helpline: await getHelpline(db),
-      charges: c.kind === "token" && hasAmount ? { ...customerPricing(b.online_amount_cents, b.meet_greet_selected ? b.meet_greet_fee_cents : 0, b.child_seat_fee_cents), currency: b.currency ?? "USD" } : null,
-      payable: c.kind === "token" && released && open && hasAmount && !settled,
+      charges: (c.kind === "token" || decide || stage === "card_needed") && hasAmount ? { ...customerPricing(b.online_amount_cents, b.meet_greet_selected ? b.meet_greet_fee_cents : 0, b.child_seat_fee_cents), currency: b.currency ?? "USD" } : null,
+      payable: c.kind === "token" && paypalAvailable && ["approved_ready", "approved_card_needed", "payment_failed"].includes(stage),
+      stage, card: b.card_setup_at && b.card_last4 ? { brand: b.card_brand ?? null, last4: String(b.card_last4) } : null, cardAvailable, publicKey: cardAvailable ? publishableKey() : null,
+      canAddCard: cardAvailable && ["card_needed", "approved_card_needed", "payment_failed"].includes(stage),
+      canConfirm: cardAvailable && ["approved_ready", "payment_failed"].includes(stage) && Boolean(b.card_setup_at),
     },
   };
 }

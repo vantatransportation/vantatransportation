@@ -5,6 +5,7 @@ import { getAdminClient } from "@/lib/supabase/admin";
 import { loadBookingSettings } from "@/lib/policies";
 import { paymentPlan } from "@/lib/payments";
 import { availableProviders } from "@/lib/payment-providers";
+import { awaitingCustomerConfirmation } from "@/lib/booking-status";
 import { chargeForBooking } from "@/lib/payments-server";
 import { customerPricingOf } from "@/lib/tier-pricing";
 import { paypalClientId } from "@/lib/paypal";
@@ -19,7 +20,7 @@ export const dynamic = "force-dynamic";
 const STATUS_TEXT: Record<string, string> = {
   not_required: "No online payment is requested for this booking.", unpaid: "Not paid yet.", pending: "Payment started. Waiting for confirmation from our payment provider.",
   deposit_paid: "Deposit received.", paid: "Paid in full.", failed: "The last payment attempt did not go through.", refunded: "Refunded.",
-  partially_refunded: "Partially refunded.", review: "Our team is reviewing a payment on this booking. We will contact you.",
+  partially_refunded: "Partially refunded.", card_saved: "Card saved. Nothing has been charged.", processing: "Payment processing.", requires_action: "Waiting for your bank to authenticate the payment.", review: "Our team is reviewing a payment on this booking. We will contact you.",
 };
 
 export default async function PayPage({ params, searchParams }: { params: Promise<{ token: string }>; searchParams: Promise<Record<string, string | string[] | undefined>> }) {
@@ -27,20 +28,20 @@ export default async function PayPage({ params, searchParams }: { params: Promis
   const sp = await searchParams;
   const back = Array.isArray(sp.checkout) ? sp.checkout[0] : sp.checkout;
   const db = validToken(token) ? getAdminClient() : null;
-  const { data: b } = db ? await db.from("bookings").select("id,reference,status,driver_id,payment_released_at,confirmed_at,pickup_at,estimated_fare_cents,currency,amount_paid_cents,payment_status,child_seat_fee_cents,source_quote_request_id,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,online_amount_cents").eq("payment_token", token).maybeSingle() : { data: null };
+  const { data: b } = db ? await db.from("bookings").select("id,reference,status,driver_id,approved_at,payment_released_at,confirmed_at,pickup_at,estimated_fare_cents,currency,amount_paid_cents,payment_status,child_seat_fee_cents,source_quote_request_id,tier_id,tier_name,fixed_price_cents,meet_greet_selected,meet_greet_fee_cents,online_amount_cents").eq("payment_token", token).maybeSingle() : { data: null };
 
   if (!db || !b) {
     return (
-      <section className="page-head"><div className="container"><h1>Payment link not found</h1><p className="lede">This link is not valid. Please use the link in your booking email, or <Link href="/contact" style={{ textDecoration: "underline" }}>contact us</Link>.</p></div></section>
+      <section className="page-head"><div className="container"><h1>Booking link not found</h1><p className="lede">This link is not valid. Please use the link in your booking email, or <Link href="/contact" style={{ textDecoration: "underline" }}>contact us</Link>.</p></div></section>
     );
   }
   const settings = await loadBookingSettings(db);
-  const providers = availableProviders(settings);
+  const providers = availableProviders(settings).filter((x) => x === "paypal"); // card payments are made on the booking page with the saved card; this page is PayPal only
   const c = await chargeForBooking(db, b); // the same server calculation the payment endpoints use
   const charge = c.ok ? c.charge : null;
   const shown = charge ? customerPricingOf(charge) : null; // customer-safe: combined Trip fare, services, Total. The tier fee is never rendered.
   const closed = ["cancelled", "no_show", "rejected", "completed"].includes(b.status);
-  const released = Boolean(b.payment_released_at && b.driver_id) && !closed;
+  const released = awaitingCustomerConfirmation(b as never) && !closed;
   const plan = released && charge && providers.length ? paymentPlan(settings.payment, charge.totalCents, b.amount_paid_cents ?? 0) : null;
   const status = String(b.payment_status);
   const retry = status === "failed" || status === "unpaid" || status === "pending";
@@ -49,7 +50,7 @@ export default async function PayPage({ params, searchParams }: { params: Promis
     <>
       <section className="page-head">
         <div className="container">
-          <h1>Pay for your booking</h1>
+          <h1>Confirm and pay with PayPal</h1>
           <p className="lede">Reference <strong>{b.reference}</strong>{b.pickup_at ? ` · pickup ${formatPickup(b.pickup_at, BUSINESS_TZ)}` : ""}</p>
         </div>
       </section>
@@ -79,7 +80,7 @@ export default async function PayPage({ params, searchParams }: { params: Promis
               <div style={{ marginTop: "1.5rem" }}>
                 <p style={{ marginBottom: "1rem" }}>{plan.kind === "deposit" ? "Deposit due now: " : "Amount due now: "}<strong>{formatMoney(plan.amountCents, b.currency)}</strong></p>
                 <PaymentChoice token={token} available={providers} paypalClientId={paypalClientId()} amountLabel={formatMoney(plan.amountCents, b.currency)} retry={status === "failed" || back === "cancelled"} />
-                <p className="muted" style={{ marginTop: "1rem" }}>Your booking is confirmed when your payment is received and verified by our payment provider, not when you return to this page. We then email you a confirmation with your tracking ID.</p>
+                <p className="muted" style={{ marginTop: "1rem" }}>Approving the PayPal payment is your confirmation of this booking. Your booking is confirmed when your payment is received and verified, not when you return to this page. We then email you a confirmation with your tracking ID. To use your saved card instead, go back to your booking page.</p>
               </div>
             ) : !plan && status !== "paid" && status !== "deposit_paid" ? <div className="notice">Online payment is not available for this booking right now. We will arrange payment with you directly.</div> : null}
           <p style={{ marginTop: "2rem" }}><Link href="/" className="btn btn--ghost">Back to home</Link></p>

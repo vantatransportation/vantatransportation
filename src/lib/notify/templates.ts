@@ -4,7 +4,7 @@
  */
 export type NotifyEvent =
   | "booking.created" | "lead.created" | "quote.created" | "quote.responded" | "quote.revised_sent" | "booking.status_changed" | "payment.paid"
-  | "booking.approved" | "booking.confirmed" | "booking.reassigned" | "booking.rescheduled" | "booking.rejected" | "driver.assigned" | "driver.unassigned";
+  | "booking.approved" | "booking.confirmed" | "booking.driver_assigned" | "booking.reassigned" | "booking.rescheduled" | "booking.rejected" | "driver.assigned" | "driver.unassigned";
 
 export interface EmailMessage {
   audience: "business" | "customer";
@@ -61,13 +61,13 @@ function buildNotificationBase(event: NotifyEvent, d: Data): BuiltNotification {
   const id = d._id ?? "";
   switch (event) {
     case "booking.created": {
-      const fields = pick(d, ["Reference", "Customer", "Email", "Pickup", "Stops", "Destination", "When", "Passengers", "Vehicle", "Trip type", "Trip fare", "Meet & Greet", "Child car seats", "Total", "Tier", "Fixed tier price (internal)", "Trip estimate (internal)", "Service region", "Needs staff review", "Requested extras", "Booking for"]);
+      const fields = pick(d, ["Reference", "Customer", "Email", "Pickup", "Stops", "Destination", "When", "Passengers", "Vehicle", "Trip type", "Trip fare", "Meet & Greet", "Child car seats", "Total", "Tier", "Fixed tier price (internal)", "Trip estimate (internal)", "Service region", "Needs staff review", "Requested extras", "Booking for", "Card on file"]);
       const cust: EmailMessage[] = d._customerEmail ? [{
         audience: "customer", to: customerTo(d), subject: `We received your booking request ${v(d, "Reference")}`,
         heading: "Booking request received",
-        intro: "Thank you. This is a request, not a confirmed booking. We will review it first. No payment has been taken. If we approve it, we will email you a secure payment link, and your booking is confirmed once that payment is received.",
+        intro: "Thank you. This is a request, not a confirmed booking. Your card was saved securely and your request is now awaiting admin approval. Nothing has been charged and no funds are on hold. If we approve it, we will email you to review and confirm the booking; your saved card is charged only after you confirm, and your booking is confirmed once that payment is verified.",
         fields: pick(withTracking(d), ["Reference", "Tracking ID", "When", "Pickup", "Stops", "Destination", "Vehicle", "Passengers", "Tier", "Trip fare", "Meet & Greet", "Child car seats", "Total"]), // customer email: combined Trip fare, optional services, Total. Never the tier fee or any rate.
-        footnote: "Keep your tracking ID private: anyone who has it can see this booking's progress. Requested services (such as airport Meet & Greet or child car seats) are not confirmed until we confirm them with you.",
+        footnote: "Keep your tracking ID private: anyone who has it can see this booking's progress. Requested services (such as airport Meet & Greet or child car seats) are not confirmed until we confirm them with you. This is a request, not a confirmed booking.",
         ...(d._trackUrl ? { ctaLabel: "Track your ride", ctaUrl: d._trackUrl } : {}),
       }] : [];
       return {
@@ -118,24 +118,36 @@ function buildNotificationBase(event: NotifyEvent, d: Data): BuiltNotification {
         admin: null,
         emails: d._customerEmail ? [{
           audience: "customer", to: customerTo(d), subject: `Your Vanta booking is confirmed (${v(d, "Reference")})`, heading: "Your booking is confirmed",
-          intro: "Thank you. Your payment was received and verified, and your booking is confirmed. You can follow your ride with the tracking ID below.",
+          intro: "Thank you. You confirmed your booking, your payment was received and verified, and your booking is now confirmed. We will email you your driver's details as soon as a driver is assigned. You can follow your ride with the tracking ID below.",
           fields: pick(withTracking(d), ["Reference", "Tracking ID", "Driver", "Driver vehicle", "License plate", "Pickup", "Stops", "Destination", "When", "Vehicle", "Tier", "Amount paid", "Payment status", "Remaining online balance", "Vanta support phone"]),
           footnote: "Keep your tracking ID private: anyone who has it can see this booking's progress. For help with your ride, call Vanta support. We do not share driver or customer phone numbers; you can message your driver from the tracking page.",
           ...(d._trackUrl ? { ctaLabel: "Track your ride", ctaUrl: d._trackUrl } : {}),
         }] : [],
       };
     case "booking.approved": {
-      const ctaUrl = d._payUrl ?? d["Booking page"];
+      // No payment link. The customer is sent to THEIR booking page (the tracker) to review the approved booking and explicitly confirm it.
+      const ctaUrl = d["Booking page"];
       return {
         admin: null,
         emails: d._customerEmail ? [{
-          audience: "customer", to: customerTo(d), subject: `Your Vanta booking is approved (${v(d, "Reference")})`, heading: "Your booking is approved",
-          intro: d._payUrl ? "Good news: your booking has been approved and a driver has been assigned. To confirm it, complete payment online using the secure link below. Your booking is confirmed only after your payment is received and verified, and we will then email you your driver's name, vehicle and license plate." : "Good news: your booking has been approved and a driver has been assigned. We will arrange payment with you directly; your booking is confirmed once payment is received, and we will then email you your driver's details.",
-          fields: pick(withTracking(d), ["Reference", "Tracking ID", "When", "Pickup", "Destination", "Total"]),
-          ...(ctaUrl ? { ctaLabel: d._payUrl ? "Pay online" : "View your booking", ctaUrl } : {}),
+          audience: "customer", to: customerTo(d), subject: `Your Vanta booking is approved: please confirm (${v(d, "Reference")})`, heading: "Your booking is approved",
+          intro: "Good news: your booking has been approved. Nothing has been charged yet. Open your booking page to review the details and the total, then choose Confirm Booking & Authorize Charge. Your saved card is charged only when you confirm, and your booking is confirmed once that payment is verified.",
+          fields: pick(withTracking(d), ["Reference", "Tracking ID", "When", "Pickup", "Destination", "Total", "Card on file"]),
+          footnote: "Keep your tracking ID private: anyone who has it can open this booking. We never ask you to pay through a link in an email.",
+          ...(ctaUrl ? { ctaLabel: "Review and confirm your booking", ctaUrl } : {}),
         }] : [],
       };
     }
+    case "booking.driver_assigned":
+      return {
+        admin: null,
+        emails: d._customerEmail ? [{
+          audience: "customer", to: customerTo(d), subject: `Your driver has been assigned (${v(d, "Reference")})`, heading: "A driver has been assigned to your booking",
+          intro: "Your booking is confirmed and a driver has now been assigned. Your driver's details are below; you can also follow your ride with the tracking ID.",
+          fields: pick(withTracking(d), ["Reference", "Tracking ID", "When", "Pickup", "Destination", "Driver", "Driver vehicle", "License plate"]),
+          footnote: "We do not share driver or customer phone numbers; you can message your driver from the tracking page.",
+        }] : [],
+      };
     case "booking.reassigned":
       return {
         admin: null,
@@ -150,7 +162,7 @@ function buildNotificationBase(event: NotifyEvent, d: Data): BuiltNotification {
         admin: null,
         emails: d._customerEmail ? [{
           audience: "customer", to: customerTo(d), subject: `Update on your Vanta booking request (${v(d, "Reference")})`, heading: "We could not accept your booking request",
-          intro: "Unfortunately we are unable to accept this booking request. No payment is due for it.",
+          intro: "Unfortunately we are unable to accept this booking request. Your card was not charged and no funds were held.",
           fields: pick(d, ["Reference", "When", "Pickup", "Destination", "Reason"]),
         }] : [],
       };

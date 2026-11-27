@@ -99,8 +99,8 @@ Tier names are fixed; vehicles are assigned to tiers under **Admin, Vehicles** (
 **Switching payments on.** In **Admin, Booking settings** set *Online payment* (`disabled` by default; `full` charges the online amount; the deposit modes take a fixed amount or a percent of the online amount) and choose which providers to offer. A provider is shown to customers only if it is switched on there AND configured on the server. **Admin, Payments** shows provider status (no secrets) and every payment.
 
 **Stripe (cards).** Uses Stripe-hosted Checkout (Visa, Mastercard and American Express where your Stripe account supports them; card data never touches this application).
-1. Test mode: put the secret key in `STRIPE_SECRET_KEY`.
-2. Create a webhook endpoint `https://YOUR-DOMAIN/api/stripe/webhook` for: `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.async_payment_failed`, `checkout.session.expired`, `charge.refunded`; put its signing secret in `STRIPE_WEBHOOK_SECRET`. Locally: `stripe listen --forward-to localhost:3000/api/stripe/webhook` prints a temporary `whsec_...`.
+1. Test mode: put the secret key in `STRIPE_SECRET_KEY` and the publishable key (`pk_test_...`, public by design) in `STRIPE_PUBLISHABLE_KEY` (needed so customers can save a card at booking).
+2. Create a webhook endpoint `https://YOUR-DOMAIN/api/stripe/webhook` for: `setup_intent.succeeded`, `setup_intent.setup_failed`, `payment_intent.succeeded`, `payment_intent.processing`, `payment_intent.requires_action`, `payment_intent.payment_failed`, `payment_intent.canceled`, `charge.refunded` (the older `checkout.session.*` events may stay enabled so payments started before the saved-card workflow still reconcile); put its signing secret in `STRIPE_WEBHOOK_SECRET`. Locally: `stripe listen --forward-to localhost:3000/api/stripe/webhook` prints a temporary `whsec_...`.
 3. Test card 4242 4242 4242 4242 (any future date, any CVC); American Express test card 3782 822463 10005.
 4. Live: create live keys and a live webhook endpoint, replace the two variables, redeploy, and run one small real payment.
 

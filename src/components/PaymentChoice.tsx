@@ -23,7 +23,7 @@ function loadPayPal(clientId: string): Promise<PayPalSdk> {
   return sdkPromise;
 }
 
-type Provider = "stripe" | "paypal";
+type Provider = "paypal";
 const post = async (url: string, body: object) => {
   const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   return { ok: res.ok, data: await res.json().catch(() => ({})) as Record<string, unknown> };
@@ -66,30 +66,16 @@ export default function PaymentChoice({ token, available, paypalClientId, amount
     return () => { cancelled = true; el.innerHTML = ""; };
   }, [choice, token, paypalClientId, router]);
 
-  async function payByCard() {
-    if (busy) return;
-    setBusy(true); setMsg(null);
-    const r = await post("/api/payments/checkout", { token, provider: "stripe" });
-    if (r.ok && typeof r.data.url === "string" && r.data.url.startsWith("https://")) { window.location.href = r.data.url; return; }
-    setMsg({ kind: "error", text: String(r.data.error ?? "Could not start the payment. Please try again.") });
-    setBusy(false);
-  }
-
   if (available.length === 0) return <div className="notice">Online payment is not available for this booking right now. We will arrange payment with you directly.</div>;
   return (
     <fieldset className="fieldset paychoice">
-      <legend>Choose how to pay{retry ? " (try again)" : ""}</legend>
+      <legend>Pay with PayPal{retry ? " (try again)" : ""}</legend>
       <div className="choices">
-        {available.includes("stripe") && (
-          <label className="choice"><input type="radio" name="provider" checked={choice === "stripe"} onChange={() => { setChoice("stripe"); setMsg(null); }} />
-            <span><strong>Card</strong>: Visa, Mastercard or American Express<br /><small className="muted">Paid on Stripe&apos;s secure page. We never see or store your card number.</small></span></label>
-        )}
         {available.includes("paypal") && (
           <label className="choice"><input type="radio" name="provider" checked={choice === "paypal"} onChange={() => { setChoice("paypal"); setMsg(null); }} />
             <span><strong>PayPal</strong><br /><small className="muted">Pay with your PayPal account or the cards saved in it.</small></span></label>
         )}
       </div>
-      {choice === "stripe" && <p style={{ marginTop: "1rem" }}><button type="button" className="btn btn--primary" onClick={payByCard} disabled={busy}>{busy ? "Opening secure payment…" : `Pay ${amountLabel} by card`}</button></p>}
       {choice === "paypal" && <div ref={box} className="paychoice__paypal" aria-busy={busy} />}
       {choice === null && <p className="muted" style={{ marginTop: ".75rem" }}>Select a payment method to continue.</p>}
       <div role="alert" aria-live="polite">{msg && <div className={`notice ${msg.kind === "error" ? "notice--error" : msg.kind === "ok" ? "notice--ok" : ""}`} style={{ marginTop: "1rem" }}>{msg.text}</div>}</div>

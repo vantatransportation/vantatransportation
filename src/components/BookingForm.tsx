@@ -80,8 +80,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
         sessionStorage.removeItem(TRIP_STORAGE_KEY);
         sessionStorage.setItem("vanta:confirmation", JSON.stringify({ reference: data.reference, pricing: data.pricing ?? null, currency: data.currency, shownTotalCents: onlineTotal, trackingId: data.trackingId ?? null }));
       } catch { /* ignore */ }
-      if (typeof data.authorizeUrl === "string" && data.authorizeUrl.startsWith("https://")) { window.location.assign(data.authorizeUrl); return; } // Stripe hosted card page (a hold, not a charge)
-      // No card step (not enabled, or it could not be opened): the customer's own booking page, which offers the card step again when it applies.
+      // Straight to the payment step for THIS booking: the customer's own booking page (private token), where the card is saved. Refresh-safe.
       router.push(typeof data.confirmUrl === "string" && data.confirmUrl.startsWith("/book/confirmation?") ? data.confirmUrl : `/book/confirmation?ref=${encodeURIComponent(data.reference)}`);
     } catch {
       setStatus({ kind: "error", message: "Could not reach the server. Your details are kept; please try again." });
@@ -118,7 +117,7 @@ export default function BookingForm({ policies }: { policies: PublicPolicies }) 
         {tripFare?.tollStatus === "unavailable" && <p className="muted">Toll costs could not be estimated for this route and are not included.</p>}
         {meetGreet && <p className="muted">Meet &amp; Greet is requested here and is not confirmed until Vanta confirms it.</p>}
         {trip.childSeats && seatCount(trip.childSeats) > 0 && <p className="muted">{SEAT_CONFIRMATION_NOTE}</p>}
-        <p className="muted">We verify the amounts again when you submit. This is a booking request, not a confirmed booking. Nothing is charged when you submit. If we approve your request we email you a secure payment link, and your booking is confirmed once the payment is received.</p>
+        <p className="muted">We verify the amounts again when you submit. This is a booking request, not a confirmed booking. After you press Book you add your card on the next step: it is saved securely, with no charge and no funds held. If we approve your request you confirm it, and only then is your saved card charged; your booking is confirmed once that payment is verified.</p>
         <p><button type="button" className="linkbtn" onClick={() => openCalculator({ pickup: trip.pickup.text, dropoff: trip.dropoff.text, date: trip.date, time: trip.time })}>Change trip details</button></p>
       </section>
 

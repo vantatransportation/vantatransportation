@@ -4,22 +4,20 @@ import { guard } from "@/lib/admin/guard";
 import { notify } from "@/lib/notify";
 import { clean } from "@/lib/validation";
 import { BUSINESS_TZ } from "@/lib/config";
-import { AWAITING_PAYMENT_MESSAGE, AWAITING_REVIEW, DRIVER_FLOW, canApprove, canAssign, canTransition, rideMayProgress, type BookingStatus } from "@/lib/booking-status";
+import { AWAITING_PAYMENT_MESSAGE, AWAITING_REVIEW, DRIVER_FLOW, PAID_STATES, canApprove, canAssign, canTransition, rideMayProgress, type BookingStatus } from "@/lib/booking-status";
 import { formatMoney } from "@/lib/pricing/engine";
-import { availableProviders } from "@/lib/payment-providers";
-import { loadBookingSettings } from "@/lib/policies";
 import { trackingUrl } from "@/lib/tracking-url";
-import { captureAuthorization, releaseAuthorization, type CaptureResult } from "@/lib/payments-server";
-import type { SupabaseClient } from "@supabase/supabase-js";
+import { releaseAuthorization } from "@/lib/payments-server";
+import { releaseSavedCard } from "@/lib/saved-card";
 
 export const runtime = "nodejs";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 type Row = Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
 
-const BOOKING_COLS = "id,reference,status,customer_id,driver_id,pickup_at,pickup_address,dropoff_address,passengers,checked_bags,carry_on_bags,payment_status,payment_token,tracking_code,confirmed_at,online_amount_cents,currency,payment_released_at";
+const BOOKING_COLS = "id,reference,status,customer_id,driver_id,pickup_at,pickup_address,dropoff_address,passengers,checked_bags,carry_on_bags,payment_status,payment_token,tracking_code,confirmed_at,online_amount_cents,currency,payment_released_at,approved_at,customer_confirmed_at,card_flow,card_setup_at,card_brand,card_last4";
 
 /**
- * Admin-only booking workflow: approve + assign a driver (releases payment), reassign, reject, cancel.
+ * Admin-only booking workflow: approve (no charge, no driver), assign a driver (only once confirmed and paid), reassign, reject, cancel.
  * Every state change is a conditional update ("claim"), so two admins acting at once cannot both succeed.
  * Emails are sent only after the database change succeeded and are de-duplicated per assignment.
  */
@@ -42,15 +40,42 @@ export async function POST(request: Request) {
   const driverOf = async (driverId: string) => (await g.db.from("drivers").select("id,full_name,first_name,preferred_name,email,phone,vehicle_plate,is_active").eq("id", driverId).maybeSingle()).data as Row | null;
 
   switch (body?.action) {
-    case "approve_assign":
+    case "approve": {
+      // Admin approval: records the decision and nothing else. It does NOT charge the customer, does NOT confirm the ride, assigns NO driver and
+      // sends NO payment link. The customer must still confirm (their own, separately recorded action) before the saved card is charged.
+      if (!canApprove(status)) return json({ error: "This booking was already reviewed." }, 409);
+      if (b.card_flow && !b.card_setup_at) return json({ error: "The customer has not finished adding their card, so this booking cannot be approved yet. Nothing was charged.", code: "card_setup_incomplete" }, 409);
+      const now = new Date().toISOString();
+      const upd = await g.db.from("bookings").update({ status: "approved", approved_at: now, approved_by: g.admin.id, payment_released_at: now }).eq("id", id).in("status", AWAITING_REVIEW).is("approved_at", null).select("id");
+      if (upd.error || !upd.data?.length) return json({ error: "This booking was just changed by someone else. Reload and try again." }, 409);
+      await history(status, "approved", "Approved by admin. The customer has not been charged and must confirm the booking first.");
+      await log("booking.approved", {});
+      await releaseAuthorization(g.db, id); // an old card hold from the previous workflow is released (never captured); the customer then follows the new flow
+      const cust = await customer();
+      if (cust?.email) {
+        const card = b.card_last4 ? `${String(b.card_brand ?? "card").toUpperCase()} ending ${b.card_last4}` : undefined;
+        await notify(g.db, "booking.approved", { type: "booking", id }, {
+          Reference: String(b.reference), When: when, Pickup: String(b.pickup_address ?? ""), Destination: b.dropoff_address ?? undefined,
+          "Booking page": trackingUrl(b.tracking_code) ?? undefined, _trackingId: b.tracking_code ?? undefined, Total: b.online_amount_cents != null ? formatMoney(b.online_amount_cents, b.currency ?? "USD") : undefined,
+          "Card on file": card, _customerEmail: cust.email, _customerName: cust.name,
+        }, { dedupeSuffix: "approved" });
+      }
+      return json({ ok: true, status: "approved" });
+    }
+
+    case "assign":
     case "reassign": {
-      const isApprove = body.action === "approve_assign";
+      const isAssign = body.action === "assign";
       const driverId = typeof body.driverId === "string" && UUID_RE.test(body.driverId) ? body.driverId : null;
       if (!driverId) return json({ error: "Choose a driver." }, 422);
-      if (isApprove ? !canApprove(status) : !(canAssign(status) && b.driver_id)) {
-        return json({ error: isApprove ? "This booking was already reviewed." : "A driver can be changed only before the passenger is picked up." }, 409);
+      if (isAssign) {
+        // A driver is assigned only AFTER the booking is confirmed: admin approved, customer confirmed, payment verified by the provider.
+        if (status !== "confirmed" || !b.confirmed_at || !PAID_STATES.includes(String(b.payment_status))) return json({ error: "A driver can be assigned only after the booking is confirmed and paid (admin approval, customer confirmation and a verified payment).", code: "not_confirmed" }, 409);
+        if (b.driver_id) return json({ error: "A driver is already assigned. Use Reassign." }, 409);
+      } else if (!(canAssign(status) && b.driver_id)) {
+        return json({ error: "A driver can be changed only before the passenger is picked up." }, 409);
       }
-      if (!isApprove && b.driver_id === driverId) return json({ error: "That driver is already assigned." }, 409);
+      if (!isAssign && b.driver_id === driverId) return json({ error: "That driver is already assigned." }, 409);
       const driver = await driverOf(driverId);
       if (!driver) return json({ error: "Driver not found." }, 404);
       if (!driver.is_active) return json({ error: "That driver is not active." }, 422);
@@ -58,71 +83,44 @@ export async function POST(request: Request) {
       const previous = b.driver_id as string | null;
 
       // 1. Close the current assignment (reassign only). Zero rows means another admin changed it first.
-      if (!isApprove) {
+      if (!isAssign) {
         const closed = await g.db.from("booking_assignments").update({ unassigned_at: now, unassigned_reason: "reassigned" }).eq("booking_id", id).eq("driver_id", previous).is("unassigned_at", null).select("id");
         if (closed.error || !closed.data?.length) return json({ error: "This booking was just changed by someone else. Reload and try again." }, 409);
       }
       // 2. Create the new assignment. The database allows only one open assignment per booking.
       const assignment = await g.db.from("booking_assignments").insert({ booking_id: id, driver_id: driverId, assigned_by: g.admin.id, assigned_at: now }).select("id").single();
       if (assignment.error) {
-        if (!isApprove && previous) await g.db.from("booking_assignments").insert({ booking_id: id, driver_id: previous, assigned_by: g.admin.id, assigned_at: now }); // restore
+        if (!isAssign && previous) await g.db.from("booking_assignments").insert({ booking_id: id, driver_id: previous, assigned_by: g.admin.id, assigned_at: now }); // restore
         return json({ error: assignment.error.code === "23505" ? "Another assignment was just made for this booking. Reload and try again." : "Could not save the assignment." }, assignment.error.code === "23505" ? 409 : 500);
       }
       // 3. Update the booking only if it is still in the state we read (compare-and-set).
-      let q = g.db.from("bookings").update(isApprove
-        ? { status: "assigned", driver_id: driverId, approved_at: now, approved_by: g.admin.id, payment_released_at: now }
-        : { driver_id: driverId }).eq("id", id);
-      q = isApprove ? q.in("status", AWAITING_REVIEW).is("driver_id", null) : q.eq("driver_id", previous);
+      let q = g.db.from("bookings").update(isAssign ? { status: "assigned", driver_id: driverId } : { driver_id: driverId }).eq("id", id);
+      q = isAssign ? q.eq("status", "confirmed").is("driver_id", null) : q.eq("driver_id", previous);
       const upd = await q.select("id");
       if (upd.error || !upd.data?.length) {
         await g.db.from("booking_assignments").update({ unassigned_at: now, unassigned_reason: "claim failed" }).eq("id", assignment.data.id);
         return json({ error: "This booking was just changed by someone else. Reload and try again." }, 409);
       }
-      await history(status, isApprove ? "assigned" : status, isApprove ? `Approved and assigned to ${driver.full_name}` : `Reassigned to ${driver.full_name}`);
-      await log(isApprove ? "booking.approved" : "booking.reassigned", { driverId, previous });
-
-      // Approve & Capture Payment: if the customer authorized a card at booking, capture it now (server-side, validated against the booking).
-      // A capture that fails or finds an expired hold leaves the booking approved and UNPAID ("needs payment"); the customer gets the payment link below.
-      let capture: CaptureResult | null = null;
-      if (isApprove) {
-        capture = await captureAuthorization(g.db, id);
-        if (!capture.ok && capture.code === "no_authorization") capture = null;
-        if (capture) await log(capture.ok ? "payment.captured" : "payment.capture_failed", capture.ok ? {} : { code: capture.code });
-      }
+      await history(status, isAssign ? "assigned" : status, isAssign ? `Driver assigned: ${driver.full_name}` : `Reassigned to ${driver.full_name}`);
+      await log(isAssign ? "booking.driver_assigned" : "booking.reassigned", { driverId, previous });
 
       // Emails only after the change is saved. Keys include the assignment id so a retry never duplicates and a later reassignment still notifies.
       const cust = await customer();
       const ref = String(b.reference);
       const common = { Reference: ref, When: when, Pickup: String(b.pickup_address ?? ""), Destination: b.dropoff_address ?? undefined };
       const site = (process.env.NEXT_PUBLIC_SITE_URL || "").replace(/\/$/, "");
-      if (isApprove && cust?.email && !capture?.ok) { // when the capture succeeded the customer gets the booking CONFIRMATION email instead
-        const settings = await loadBookingSettings(g.db);
-        const payable = availableProviders(settings).length > 0 && b.online_amount_cents != null && b.payment_token && site;
-        await notify(g.db, "booking.approved", { type: "booking", id }, {
-          ...common, // driver details are emailed only once the booking is confirmed by verified payment (see booking.confirmed)
-          "Booking page": trackingUrl(b.tracking_code) ?? undefined, _trackingId: b.tracking_code ?? undefined, Total: b.online_amount_cents != null ? formatMoney(b.online_amount_cents, b.currency ?? "USD") : undefined,
-          _customerEmail: cust.email, _customerName: cust.name, _payUrl: payable ? `${site}/pay/${b.payment_token}` : undefined,
+      // The booking is confirmed and paid, so the customer may now see the driver's details.
+      if (cust?.email) {
+        await notify(g.db, isAssign ? "booking.driver_assigned" : "booking.reassigned", { type: "booking", id }, {
+          ...common, ...(await driverEmailFields(g.db, driverId)), _trackingId: b.tracking_code ?? undefined, _customerEmail: cust.email, _customerName: cust.name,
         }, { dedupeSuffix: assignment.data.id });
       }
-      // A reassignment is told to the customer only when the booking is already confirmed and paid (the customer has seen driver details).
-      // Before that no driver details were shared, so there is nothing to correct, and the confirmation email will carry the current driver.
-      if (!isApprove && cust?.email && b.confirmed_at) {
-        await notify(g.db, "booking.reassigned", { type: "booking", id }, { ...common, ...(await driverEmailFields(g.db, driverId)), _customerEmail: cust.email, _customerName: cust.name }, { dedupeSuffix: assignment.data.id });
-      }
-      if (!isApprove && previous) {
+      if (!isAssign && previous) {
         const old = await driverOf(previous);
         if (old?.email) await notify(g.db, "driver.unassigned", { type: "booking", id }, { Reference: ref, When: when, _driverEmail: old.email, _driverName: old.full_name }, { dedupeSuffix: assignment.data.id });
       }
       await notify(g.db, "driver.assigned", { type: "booking", id }, { ...common, Passengers: String(b.passengers), Luggage: luggage, _driverEmail: driver.email, _driverName: driver.full_name, _driverUrl: site ? `${site}/driver` : undefined }, { dedupeSuffix: assignment.data.id });
-      return json({ ok: true, status: isApprove ? "assigned" : status, driver: driver.full_name, ...(capture ? { payment: capture.ok ? { outcome: "captured" } : { outcome: "needs_payment", code: capture.code, message: capture.error } } : {}) });
-    }
-
-    case "capture_payment": {
-      // Retry for an approved booking whose capture did not complete. Admin-only (guard above); the same validation as approval applies.
-      if (!b.driver_id || !b.payment_released_at || !["assigned", "confirmed", "getting_ready", "on_the_way", "arrived"].includes(status)) return json({ error: "Approve the booking before capturing its payment." }, 409);
-      const r = await captureAuthorization(g.db, id);
-      await log(r.ok ? "payment.captured" : "payment.capture_failed", r.ok ? { retry: true } : { retry: true, code: r.code });
-      return r.ok ? json({ ok: true, payment: { outcome: "captured" } }) : json({ error: r.error, code: r.code }, r.code === "in_progress" ? 409 : 422);
+      return json({ ok: true, status: isAssign ? "assigned" : status, driver: driver.full_name });
     }
 
     case "reject": {
@@ -133,7 +131,8 @@ export async function POST(request: Request) {
       const upd = await g.db.from("bookings").update({ status: "rejected", rejected_at: now, rejection_reason: reason, payment_released_at: null }).eq("id", id).in("status", AWAITING_REVIEW).select("id");
       if (upd.error || !upd.data?.length) return json({ error: "This booking was already reviewed." }, 409);
       await history(status, "rejected", reason); await log("booking.rejected", { reason });
-      await releaseAuthorization(g.db, id); // frees the customer's card hold (nothing was charged)
+      await releaseAuthorization(g.db, id); // frees an old card hold from the previous workflow (nothing was charged)
+      await releaseSavedCard(g.db, id); // the saved card is removed from Stripe: it was never charged
       const cust = await customer();
       if (cust?.email) await notify(g.db, "booking.rejected", { type: "booking", id }, { Reference: String(b.reference), When: when, Pickup: String(b.pickup_address ?? ""), Destination: b.dropoff_address ?? undefined, Reason: reason, _customerEmail: cust.email, _customerName: cust.name });
       return json({ ok: true, status: "rejected" });
@@ -149,7 +148,8 @@ export async function POST(request: Request) {
       const prev = b.driver_id as string | null;
       await g.db.from("booking_assignments").update({ unassigned_at: now, unassigned_reason: "booking cancelled" }).eq("booking_id", id).is("unassigned_at", null);
       await history(status, "cancelled", reason); await log("booking.cancelled", { reason });
-      await releaseAuthorization(g.db, id); // releases an UNCAPTURED hold only; captured money follows the existing refund process
+      await releaseAuthorization(g.db, id); // releases an UNCAPTURED legacy hold only; captured money follows the existing refund process
+      await releaseSavedCard(g.db, id); // removes an UNUSED saved card; a card that was charged is left alone
       const cust = await customer();
       if (cust?.email) await notify(g.db, "booking.status_changed", { type: "booking", id }, { Reference: String(b.reference), Status: "cancelled", Pickup: String(b.pickup_address ?? ""), Destination: b.dropoff_address ?? undefined, When: when, _status: "cancelled", _customerEmail: cust.email, _customerName: cust.name }, { dedupeSuffix: "cancelled" });
       if (prev) { const d = await driverOf(prev); if (d?.email) await notify(g.db, "driver.unassigned", { type: "booking", id }, { Reference: String(b.reference), When: when, _driverEmail: d.email, _driverName: d.full_name }, { dedupeSuffix: "cancelled" }); }
@@ -185,6 +185,7 @@ export async function POST(request: Request) {
       const to = typeof body.status === "string" && (DRIVER_FLOW as string[]).includes(body.status) && body.status !== "assigned" ? (body.status as BookingStatus) : null;
       if (!to) return json({ error: "Choose a valid next step." }, 422);
       if (!canTransition("admin", status, to)) return json({ error: "That step is not valid from the current status." }, 409);
+      if (!b.driver_id) return json({ error: "Assign a driver first: a ride moves forward only with a driver on it." }, 409);
       if (!rideMayProgress(b)) return json({ error: AWAITING_PAYMENT_MESSAGE.replace("You will be able to continue", "The ride can continue"), code: "awaiting_payment" }, 409);
       const upd = await g.db.from("bookings").update({ status: to }).eq("id", id).eq("status", status).not("confirmed_at", "is", null).in("payment_status", ["paid", "deposit_paid", "partially_refunded"]).select("id");
       if (upd.error || !upd.data?.length) return json({ error: "This booking was just changed by someone else. Reload and try again." }, 409);

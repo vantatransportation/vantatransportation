@@ -1,14 +1,15 @@
 "use client";
 
 import { driverInitials } from "@/lib/driver/profile";
-import Link from "next/link";
 import { useEffect, useState } from "react";
 import ChatPanel from "@/components/chat/ChatPanel";
 import StarRatingForm from "@/components/StarRatingForm";
+import BookingActions from "@/components/BookingActions";
 import { formatMoney } from "@/lib/pricing/engine";
 import type { TripView } from "@/lib/trip";
+import type { ClientCredential } from "@/lib/customer-client";
 
-export type ClientCredential = { kind: "token"; token: string } | { kind: "code"; code: string };
+export type { ClientCredential };
 
 /** Customer-facing helpline button. The number comes only from the configured Vanta helpline; there is no per-driver or per-customer calling. */
 export function HelplineButton({ helpline }: { helpline: TripView["helpline"] }) {
@@ -40,16 +41,19 @@ export function Timeline({ steps }: { steps: TripView["steps"] }) {
 export default function TripStatus({ credential, initial, tz }: { credential: ClientCredential; initial: TripView; tz: string }) {
   const [trip, setTrip] = useState(initial);
   const credKey = credential.kind === "token" ? `t:${credential.token}` : `c:${credential.code}`;
+  async function load(): Promise<void> {
+    try {
+      const res = credential.kind === "token"
+        ? await fetch(`/api/trip/${credential.token}`, { cache: "no-store" })
+        : await fetch("/api/track", { method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trackingId: credential.code }) });
+      if (res.ok) setTrip(((await res.json()) as { trip: TripView }).trip);
+    } catch { /* keep the last known status */ }
+  }
   useEffect(() => {
     let stop = false;
     async function poll() {
-      if (document.hidden) return;
-      try {
-        const res = credential.kind === "token"
-          ? await fetch(`/api/trip/${credential.token}`, { cache: "no-store" })
-          : await fetch("/api/track", { method: "POST", cache: "no-store", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trackingId: credential.code }) });
-        if (res.ok && !stop) setTrip(((await res.json()) as { trip: TripView }).trip);
-      } catch { /* keep the last known status */ }
+      if (document.hidden || stop) return;
+      await load();
     }
     const t = setInterval(poll, 6000);
     const onVis = () => { if (!document.hidden) poll(); };
@@ -68,9 +72,7 @@ export default function TripStatus({ credential, initial, tz }: { credential: Cl
       <div role="status" aria-live="polite" className={`notice ${trip.ended ? "notice--error" : ""}`}><strong>{trip.headline}</strong>{trip.terminalNote && <p style={{ marginTop: ".25rem" }}>{trip.terminalNote}</p>}</div>
       <Timeline steps={trip.steps} />
 
-      {trip.status === "new_request" || trip.status === "pending_confirmation" ? <p className="muted">Your request is awaiting approval. You have not been charged. We will email you when it is approved.</p> : null}
-      {trip.awaitingPayment && <p className="muted">Your booking is approved. It is confirmed once your payment is received and verified. Use the secure payment link in your approval email{credential.kind === "token" ? " or the button below" : ""}.</p>}
-      {trip.confirmed && !trip.ended && <p className="muted">Your booking is confirmed and payment was received.</p>}
+      <BookingActions cred={credential} trip={trip} onRefresh={load} />
 
       {trip.driver && (
         <section className="panel" aria-label="Your driver" style={{ marginTop: "1rem" }}>
@@ -111,7 +113,6 @@ export default function TripStatus({ credential, initial, tz }: { credential: Cl
           </tbody></table>
         )}
         {credential.kind === "token" && <p className="muted">Payment: {trip.paymentStatus.replace(/_/g, " ")}</p>}
-        {trip.payable && credential.kind === "token" && <p><Link className="btn btn--primary" href={`/pay/${credential.token}`}>Pay securely online</Link></p>}
       </section>
 
       <section className="panel" aria-label="Support" style={{ marginTop: "1rem" }}>
